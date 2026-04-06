@@ -1,0 +1,198 @@
+package scorer
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/TechXTT/marktbot/internal/format"
+	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/marktbot/internal/reasoner"
+	"github.com/TechXTT/marktbot/internal/store"
+)
+
+const minOfferCents = 1000 // EUR10 minimum offer
+
+type Scorer struct {
+	store      store.Reader
+	scoringCfg struct {
+		MinScore         float64
+		MarketSampleSize int
+	}
+	reasoner *reasoner.Reasoner
+}
+
+func New(s store.Reader, cfg interface {
+	GetMinScore() float64
+	GetMarketSampleSize() int
+}, rsn *reasoner.Reasoner) *Scorer {
+	return &Scorer{
+		store: s,
+		scoringCfg: struct {
+			MinScore         float64
+			MarketSampleSize int
+		}{
+			MinScore:         cfg.GetMinScore(),
+			MarketSampleSize: cfg.GetMarketSampleSize(),
+		},
+		reasoner: rsn,
+	}
+}
+
+// Score evaluates a listing and returns a ScoredListing with score and offer price.
+func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search models.SearchSpec) models.ScoredListing {
+	var score float64
+	var reason strings.Builder
+
+	if !hasActionablePrice(listing) {
+		reason.WriteString("listing has no actionable asking price")
+		if listing.PriceType != "" {
+			reason.WriteString(" (")
+			reason.WriteString(listing.PriceType)
+			reason.WriteString(")")
+		}
+
+		return models.ScoredListing{
+			Listing:         listing,
+			Score:           1.0,
+			OfferPrice:      0,
+			FairPrice:       0,
+			MarketAverage:   0,
+			Confidence:      0,
+			Reason:          reason.String(),
+			ReasoningSource: "rule",
+		}
+	}
+
+	marketAvg, hasMarket, err := sc.store.GetMarketAverage(search.Query, search.CategoryID, sc.scoringCfg.MarketSampleSize)
+	if err != nil {
+		slog.Warn("failed to load market average", "query", search.Query, "error", err)
+	}
+
+	comparables, err := sc.store.GetComparableDeals(search.UserID, search.Query, listing.ItemID, 50)
+	if err != nil {
+		slog.Warn("failed to load comparable deals", "item", listing.ItemID, "error", err)
+	}
+
+	analysis := models.DealAnalysis{
+		FairPrice:  marketAvg,
+		Confidence: 0.35,
+		Reason:     "market-average fallback",
+		Source:     "heuristic",
+	}
+	if sc.reasoner != nil {
+		analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
+		if err != nil {
+			slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+		}
+	}
+
+	referencePrice := analysis.FairPrice
+	if referencePrice <= 0 && hasMarket {
+		referencePrice = marketAvg
+	}
+
+	if referencePrice > 0 {
+		ratio := float64(listing.Price) / float64(referencePrice)
+		score = clamp(10.0-10.0*ratio+5.0, 1, 10)
+		reason.WriteString(fmt.Sprintf("%.0f%% of fair value (%s)", ratio*100, format.Euro(referencePrice)))
+	} else if search.MaxPrice > 0 {
+		ratio := float64(listing.Price) / float64(search.MaxPrice)
+		score = clamp(10.0-8.0*ratio, 1, 10)
+		reason.WriteString(fmt.Sprintf("%.0f%% of max budget", ratio*100))
+	} else {
+		score = 5.0
+		reason.WriteString("no market data")
+	}
+
+	if analysis.Confidence >= 0.75 {
+		score += 0.4
+		reason.WriteString(", strong comparable confidence")
+	} else if analysis.Confidence < 0.4 {
+		score -= 0.3
+		reason.WriteString(", weak comparable confidence")
+	}
+
+	if listing.PriceType == "negotiable" {
+		score += 1.0
+		reason.WriteString(", negotiable")
+	}
+
+	if !listing.Date.IsZero() && time.Since(listing.Date) < time.Hour {
+		score += 0.5
+		reason.WriteString(", fresh listing")
+	}
+
+	switch strings.ToLower(listing.Condition) {
+	case "like_new":
+		score += 0.5
+		reason.WriteString(", like new")
+	case "new":
+		score += 0.5
+		reason.WriteString(", new condition")
+	}
+
+	score = clamp(score, 1, 10)
+	offerPrice := calculateOffer(listing.Price, analysis.FairPrice, marketAvg, hasMarket, search.OfferPercentage)
+
+	if analysis.Reason != "" {
+		reason.WriteString(" | ")
+		reason.WriteString(analysis.Reason)
+	}
+
+	return models.ScoredListing{
+		Listing:         listing,
+		Score:           score,
+		OfferPrice:      offerPrice,
+		FairPrice:       analysis.FairPrice,
+		MarketAverage:   marketAvg,
+		Confidence:      analysis.Confidence,
+		Reason:          reason.String(),
+		ReasoningSource: analysis.Source,
+		SearchAdvice:    analysis.SearchAdvice,
+		ComparableDeals: analysis.ComparableDeals,
+	}
+}
+
+func calculateOffer(askingPrice, fairPrice, marketAvg int, hasMarket bool, offerPct int) int {
+	base := askingPrice
+	if fairPrice > 0 {
+		base = fairPrice
+	} else if hasMarket && marketAvg > 0 {
+		base = marketAvg
+	}
+
+	offer := base * offerPct / 100
+	if offer < minOfferCents {
+		offer = minOfferCents
+	}
+	if offer > askingPrice {
+		offer = askingPrice
+	}
+	return offer
+}
+
+func clamp(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func hasActionablePrice(listing models.Listing) bool {
+	if listing.Price <= 0 {
+		return false
+	}
+
+	switch listing.PriceType {
+	case "reserved", "see-description", "exchange", "free":
+		return false
+	default:
+		return true
+	}
+}
