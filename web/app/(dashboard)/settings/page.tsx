@@ -1,102 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-import { api, User } from "../../../lib/api";
+import { useDashboardContext } from "../../../components/DashboardContext";
+import { api } from "../../../lib/api";
 
 const TIER_LABELS: Record<string, string> = { free: "Free", pro: "Pro", team: "Team" };
 
 export default function SettingsPage() {
-  const [user, setUser] = useState<User | null>(null);
+  const { user } = useDashboardContext();
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    api.auth.me().then(setUser).catch((err) => {
-      setError(err instanceof Error ? err.message : "Failed to load profile");
-    });
-  }, []);
-
-  return (
-    <div>
-      <h1 className="text-xl font-semibold text-gray-900 mb-6">Settings</h1>
-
-      {error && <p className="error-msg mb-4">{error}</p>}
-
-      {user ? (
-        <div className="space-y-6 max-w-lg">
-          <div className="card p-5">
-            <h2 className="text-sm font-semibold text-gray-900 mb-4">Profile</h2>
-            <dl className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-gray-500">Name</dt>
-                <dd className="text-gray-900 font-medium">{user.name}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-gray-500">Email</dt>
-                <dd className="text-gray-900">{user.email}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-gray-500">Plan</dt>
-                <dd><span className={`badge-${user.tier}`}>{TIER_LABELS[user.tier] ?? user.tier}</span></dd>
-              </div>
-            </dl>
-          </div>
-
-          {user.tier === "free" && (
-            <div className="card p-5">
-              <h2 className="text-sm font-semibold text-gray-900 mb-1">Upgrade</h2>
-              <p className="text-xs text-gray-400 mb-4">
-                Unlock more searches, faster intervals, and AI-powered scoring.
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="border border-gray-200 rounded-lg p-4">
-                  <p className="font-semibold text-sm text-gray-900">Pro</p>
-                  <p className="text-2xl font-bold text-gray-900 mt-1">
-                    €9<span className="text-sm font-normal text-gray-400">/mo</span>
-                  </p>
-                  <ul className="text-xs text-gray-500 mt-2 space-y-1 list-disc list-inside">
-                    <li>10 searches · 5-min interval</li>
-                    <li>Full AI scoring</li>
-                    <li>All marketplaces</li>
-                  </ul>
-                  <button
-                    type="button"
-                    className="btn-primary w-full mt-4 text-xs"
-                    onClick={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID ?? "")}
-                  >
-                    Upgrade to Pro
-                  </button>
-                </div>
-                <div className="border border-brand-200 rounded-lg p-4 bg-brand-50">
-                  <p className="font-semibold text-sm text-brand-900">Team</p>
-                  <p className="text-2xl font-bold text-brand-900 mt-1">
-                    €29<span className="text-sm font-normal text-brand-400">/mo</span>
-                  </p>
-                  <ul className="text-xs text-brand-600 mt-2 space-y-1 list-disc list-inside">
-                    <li>50 searches · 1-min interval</li>
-                    <li>5 team members</li>
-                    <li>Priority support</li>
-                  </ul>
-                  <button
-                    type="button"
-                    className="btn-primary w-full mt-4 text-xs"
-                    onClick={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_TEAM_PRICE_ID ?? "")}
-                  >
-                    Upgrade to Team
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        !error && <p className="text-sm text-gray-400">Loading…</p>
-      )}
-    </div>
-  );
-
   async function handleCheckout(priceID: string) {
-    if (!priceID) { alert("Stripe not configured (missing NEXT_PUBLIC_STRIPE_PRO_PRICE_ID)"); return; }
+    if (!priceID) {
+      setError("Stripe is not configured. Set NEXT_PUBLIC_STRIPE_PRO_PRICE_ID / NEXT_PUBLIC_STRIPE_TEAM_PRICE_ID in web/.env.local.");
+      return;
+    }
+
     try {
       const res = await api.billing.createCheckout(priceID);
       window.location.href = res.url;
@@ -104,4 +24,129 @@ export default function SettingsPage() {
       setError(err instanceof Error ? err.message : "Checkout failed");
     }
   }
+
+  async function openBillingPortal() {
+    try {
+      const res = await api.billing.portal();
+      window.location.href = res.url;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to open billing portal");
+    }
+  }
+
+  if (!user) {
+    return null;
+  }
+
+  return (
+    <div className="page-stack">
+      <section className="hero-panel compact">
+        <div>
+          <p className="section-kicker">Settings</p>
+          <h2>Account and billing overview</h2>
+          <p className="hero-copy">Review who is using the workspace, what plan is active, and where billing controls live.</p>
+        </div>
+        <div className="stat-card">
+          <span className="metric-label">Current plan</span>
+          <strong>{TIER_LABELS[user.tier] ?? user.tier}</strong>
+        </div>
+      </section>
+
+      {error && <div className="error-msg">{error}</div>}
+
+      <div className="settings-grid">
+        <section className="surface-panel">
+          <div className="profile-card">
+            <div className="profile-avatar">{(user.name || user.email).slice(0, 1).toUpperCase()}</div>
+            <div>
+              <p className="section-kicker">Profile</p>
+              <h3>{user.name || "Unnamed account"}</h3>
+              <p className="section-support">{user.email}</p>
+            </div>
+          </div>
+
+          <div className="settings-list">
+            <div className="settings-row">
+              <span>Name</span>
+              <strong>{user.name || "—"}</strong>
+            </div>
+            <div className="settings-row">
+              <span>Email</span>
+              <strong>{user.email}</strong>
+            </div>
+            <div className="settings-row">
+              <span>Plan</span>
+              <strong>{TIER_LABELS[user.tier] ?? user.tier}</strong>
+            </div>
+          </div>
+        </section>
+
+        {user.tier === "free" ? (
+          <section className="surface-panel premium-card">
+            <p className="section-kicker">Upgrade</p>
+            <h3>Unlock faster scans and more active hunts</h3>
+            <p className="section-support">Choose the plan that fits how aggressively you want MarktBot to monitor the market.</p>
+
+            <div className="plan-grid">
+              <PlanCard
+                name="Pro"
+                price="€9"
+                features={["10 active searches", "5 minute polling", "AI search generation", "Full assistant access"]}
+                onUpgrade={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID ?? "")}
+              />
+              <PlanCard
+                name="Team"
+                price="€29"
+                highlight
+                features={["50 active searches", "1 minute polling", "Auto-messaging", "Priority support"]}
+                onUpgrade={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_TEAM_PRICE_ID ?? "")}
+              />
+            </div>
+          </section>
+        ) : (
+          <section className="surface-panel">
+            <p className="section-kicker">Billing</p>
+            <h3>Manage your paid workspace</h3>
+            <p className="section-support">Open Stripe’s billing portal to update payment details, invoices, and subscription settings.</p>
+            <button type="button" className="btn-primary" onClick={() => void openBillingPortal()}>
+              Open billing portal
+            </button>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({
+  name,
+  price,
+  features,
+  highlight = false,
+  onUpgrade,
+}: {
+  name: string;
+  price: string;
+  features: string[];
+  highlight?: boolean;
+  onUpgrade: () => void;
+}) {
+  return (
+    <article className={`plan-card${highlight ? " highlight" : ""}`}>
+      {highlight && <span className="success-badge">Most popular</span>}
+      <h4>{name}</h4>
+      <p className="plan-price">
+        {price}
+        <span>/month</span>
+      </p>
+      <ul className="plan-feature-list">
+        {features.map((feature) => (
+          <li key={feature}>{feature}</li>
+        ))}
+      </ul>
+      <button type="button" className={highlight ? "btn-primary" : "btn-secondary"} onClick={onUpgrade}>
+        Upgrade to {name}
+      </button>
+    </article>
+  );
 }

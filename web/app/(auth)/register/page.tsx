@@ -18,7 +18,7 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       await api.auth.register(email, password, name);
-      window.location.href = "/feed";
+      window.location.replace("/feed");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");
     } finally {
@@ -27,65 +27,99 @@ export default function RegisterPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">MarktBot</h1>
-          <p className="text-sm text-gray-500 mt-1">Create your account</p>
-        </div>
-        <div className="card p-6">
-          {error && <p className="error-msg mb-4">{error}</p>}
-          <form onSubmit={onSubmit} className="space-y-4">
+    <main className="landing-shell">
+    <div className="auth-shell">
+      <section className="auth-panel auth-panel-dark">
+        <span className="landing-kicker">Create your workspace</span>
+        <h1>Set up a premium deal-hunting cockpit in minutes.</h1>
+        <p>
+          Start with a few searches, let the assistant sharpen your buying brief, and build a shortlist of the listings worth acting on.
+        </p>
+        <p className="auth-panel-switch">
+          Already have an account?{" "}
+          <Link href="/login" className="auth-panel-link">Sign in</Link>
+        </p>
+      </section>
+
+      <section className="auth-panel">
+        <div className="auth-card">
+          <div className="section-heading">
             <div>
-              <label className="label" htmlFor="name">Name</label>
+              <p className="section-kicker">Create account</p>
+              <h2>Start tracking better deals</h2>
+            </div>
+          </div>
+
+          {error && <div className="error-msg">{error}</div>}
+
+          <form onSubmit={onSubmit} className="auth-form">
+            <div className="input-stack">
+              <label htmlFor="name" className="label">
+                Name
+              </label>
               <input
                 id="name"
-                className="input"
                 type="text"
+                className="input"
                 placeholder="Your name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                autoComplete="name"
                 required
                 autoFocus
+                disabled={loading}
               />
             </div>
-            <div>
-              <label className="label" htmlFor="email">Email</label>
+
+            <div className="input-stack">
+              <label htmlFor="email" className="label">
+                Email
+              </label>
               <input
                 id="email"
-                className="input"
                 type="email"
+                className="input"
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
                 required
+                disabled={loading}
               />
             </div>
-            <div>
-              <label className="label" htmlFor="password">Password</label>
+
+            <div className="input-stack">
+              <label htmlFor="password" className="label">
+                Password
+              </label>
               <input
                 id="password"
-                className="input"
                 type="password"
-                placeholder="Min. 8 characters"
+                className="input"
+                placeholder="Minimum 8 characters"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
                 required
                 minLength={8}
+                disabled={loading}
               />
             </div>
-            <button type="submit" disabled={loading} className="btn-primary w-full">
+
+            <button type="submit" disabled={loading} className="btn-primary auth-submit">
               {loading ? "Creating account…" : "Create account"}
             </button>
           </form>
+
+          <p className="auth-footer">
+            Already have an account?{" "}
+            <Link href="/login">
+              Sign in
+            </Link>
+          </p>
         </div>
-        <p className="text-center text-sm text-gray-500 mt-4">
-          Already have an account?{" "}
-          <Link href="/login" className="font-medium">
-            Sign in
-          </Link>
-        </p>
-      </div>
+      </section>
+    </div>
     </main>
   );
 }

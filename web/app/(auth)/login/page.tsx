@@ -17,7 +17,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.auth.login(email, password);
-      window.location.href = "/feed";
+      window.location.replace("/feed");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -26,52 +26,81 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">MarktBot</h1>
-          <p className="text-sm text-gray-500 mt-1">Sign in to your account</p>
-        </div>
-        <div className="card p-6">
-          {error && <p className="error-msg mb-4">{error}</p>}
-          <form onSubmit={onSubmit} className="space-y-4">
+    <main className="landing-shell">
+    <div className="auth-shell">
+      <section className="auth-panel auth-panel-dark">
+        <span className="landing-kicker">Welcome back</span>
+        <h1>Log in and pick up where your market watch left off.</h1>
+        <p>
+          MarktBot keeps your searches, shortlist, and assistant brief in sync so you can jump straight back into the hunt.
+        </p>
+        <p className="auth-panel-switch">
+          No account yet?{" "}
+          <Link href="/register" className="auth-panel-link">Create one free</Link>
+        </p>
+      </section>
+
+      <section className="auth-panel">
+        <div className="auth-card">
+          <div className="section-heading">
             <div>
-              <label className="label" htmlFor="email">Email</label>
+              <p className="section-kicker">Sign in</p>
+              <h2>Access your workspace</h2>
+            </div>
+          </div>
+
+          {error && <div className="error-msg">{error}</div>}
+
+          <form onSubmit={onSubmit} className="auth-form">
+            <div className="input-stack">
+              <label htmlFor="email" className="label">
+                Email
+              </label>
               <input
                 id="email"
-                className="input"
                 type="email"
+                className="input"
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
                 required
                 autoFocus
+                disabled={loading}
               />
             </div>
-            <div>
-              <label className="label" htmlFor="password">Password</label>
+
+            <div className="input-stack">
+              <label htmlFor="password" className="label">
+                Password
+              </label>
               <input
                 id="password"
-                className="input"
                 type="password"
-                placeholder="••••••••"
+                className="input"
+                placeholder="Enter your password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
                 required
+                disabled={loading}
               />
             </div>
-            <button type="submit" disabled={loading} className="btn-primary w-full">
+
+            <button type="submit" disabled={loading} className="btn-primary auth-submit">
               {loading ? "Signing in…" : "Sign in"}
             </button>
           </form>
+
+          <p className="auth-footer">
+            No account yet?{" "}
+            <Link href="/register">
+              Create one
+            </Link>
+          </p>
         </div>
-        <p className="text-center text-sm text-gray-500 mt-4">
-          No account?{" "}
-          <Link href="/register" className="font-medium">
-            Create one
-          </Link>
-        </p>
-      </div>
+      </section>
+    </div>
     </main>
   );
 }
