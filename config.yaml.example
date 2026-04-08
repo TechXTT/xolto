@@ -1,0 +1,47 @@
+# MarktBot CLI Configuration
+# Copy this file to config.yaml and fill in real values.
+
+marktplaats:
+  zip_code: "1011AB"        # Your postal code for distance filtering
+  distance: 100000          # Search radius in metres (100 km)
+  check_interval: 5m        # How often to poll for new listings
+  request_delay: 3s         # Delay between Marktplaats API requests
+
+scoring:
+  min_score: 7.0            # Minimum score (0–10) to surface a deal
+  market_sample_size: 20    # Number of recent prices to use for fair-price estimate
+
+ai:
+  enabled: false            # Set to true to use AI-assisted pricing
+  api_key: "sk-..."         # OpenAI-compatible API key
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+  temperature: 0.2
+  max_comparables: 8
+  min_confidence: 0.55
+
+discord:
+  assistant_enabled: false  # Set to true to enable the Discord bot
+  bot_token: ""
+  command_prefix: "!"
+  message_content_enabled: true
+  # guild_ids: []
+  # allowed_channel_ids: []
+  # allowed_user_ids: []
+
+messenger:
+  enabled: false            # Set to true to auto-message sellers
+  headless: true
+  username: ""              # Marktplaats email
+  password: ""
+  max_messages_per_hour: 10
+
+searches:
+  - name: "Sony A6700"
+    query: "sony a6700"
+    marketplace_id: marktplaats
+    max_price: 900            # euros
+    condition:
+      - like_new
+      - good
+    offer_percentage: 80      # Offer up to 80% of asking price

@@ -132,7 +132,7 @@ go run ./cmd/server
 ```powershell
 cd web
 npm install
-$env:NEXT_PUBLIC_API_URL="http://localhost:8080"
+$env:NEXT_PUBLIC_API_URL="http://localhost:8000"
 npm run dev
 ```
 
@@ -343,7 +343,7 @@ Required env vars:
 
 Common env vars:
 
-- `SERVER_ADDR`: default `:8080`
+- `SERVER_ADDR`: default `:8000`
 - `DATABASE_URL`: SQLite file path or Postgres DSN, default `marktbot-server.db`
 - `APP_BASE_URL`: dashboard origin, default `http://localhost:3000`
 - `AI_API_KEY`
@@ -425,7 +425,7 @@ Run it locally:
 ```powershell
 cd web
 npm install
-$env:NEXT_PUBLIC_API_URL="http://localhost:8080"
+$env:NEXT_PUBLIC_API_URL="http://localhost:8000"
 npm run dev
 ```
 
