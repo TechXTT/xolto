@@ -98,6 +98,15 @@ type messageJob struct {
 
 func (s *Scheduler) processSearch(ctx context.Context, searchCfg config.SearchConfig) (int, []messageJob, error) {
 	spec := searchCfg.ToSpec()
+	if spec.ProfileID > 0 {
+		mission, err := s.store.GetMission(spec.ProfileID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("loading mission for search: %w", err)
+		}
+		if mission == nil || mission.Status == "paused" || mission.Status == "completed" {
+			return 0, nil, nil
+		}
+	}
 	mp, ok := s.registry.Get(spec.MarketplaceID)
 	if !ok {
 		return 0, nil, fmt.Errorf("marketplace %q is not registered", spec.MarketplaceID)
@@ -112,6 +121,7 @@ func (s *Scheduler) processSearch(ctx context.Context, searchCfg config.SearchCo
 	var jobs []messageJob
 
 	for _, listing := range listings {
+		listing.ProfileID = spec.ProfileID
 		if listing.Price > 0 {
 			if err := s.store.RecordPrice(spec.Query, spec.CategoryID, listing.Price); err != nil {
 				slog.Warn("failed to record price", "error", err)

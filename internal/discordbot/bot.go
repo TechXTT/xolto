@@ -396,7 +396,7 @@ func (b *Bot) handleProfile(userID string) string {
 }
 
 func (b *Bot) handleMatches(ctx context.Context, userID string) string {
-	recs, profile, err := b.assistant.FindMatches(ctx, userID, 5)
+	recs, profile, err := b.assistant.FindMatches(ctx, userID, 5, 0)
 	if err != nil {
 		return "I couldn't fetch matches: " + err.Error()
 	}

@@ -62,6 +62,8 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/searches/run", s.requireAuth(s.handleRunAllSearches))
 	mux.HandleFunc("/searches/generate", s.requireAuth(s.handleGenerateSearches))
 	mux.HandleFunc("/searches/", s.requireAuth(s.handleSearchByID))
+	mux.HandleFunc("/missions", s.requireAuth(s.handleMissions))
+	mux.HandleFunc("/missions/", s.requireAuth(s.handleMissionByID))
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
 	mux.HandleFunc("/shortlist/", s.requireAuth(s.handleShortlistItem))
@@ -282,6 +284,17 @@ func (s *Server) handleSearches(w http.ResponseWriter, r *http.Request, user *mo
 			spec.CheckInterval = 5 * time.Minute
 		}
 		spec.Enabled = true
+		if spec.ProfileID > 0 {
+			mission, err := s.db.GetMission(spec.ProfileID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if mission == nil || mission.UserID != user.ID {
+				writeError(w, http.StatusBadRequest, "invalid mission for search")
+				return
+			}
+		}
 		limits := billing.LimitsFor(user.Tier)
 		if limits.MaxMarketplaces > 0 && spec.MarketplaceID != "" && !s.marketplaceAllowedForTier(spec.MarketplaceID, limits) {
 			writeError(w, http.StatusPaymentRequired, "marketplace not available for current tier")
@@ -383,6 +396,17 @@ func (s *Server) handleSearchByID(w http.ResponseWriter, r *http.Request, user *
 		if spec.CheckInterval == 0 {
 			spec.CheckInterval = 5 * time.Minute
 		}
+		if spec.ProfileID > 0 {
+			mission, err := s.db.GetMission(spec.ProfileID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if mission == nil || mission.UserID != user.ID {
+				writeError(w, http.StatusBadRequest, "invalid mission for search")
+				return
+			}
+		}
 		if err := s.db.UpdateSearchConfig(spec); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -412,6 +436,212 @@ func (s *Server) handleSearchByID(w http.ResponseWriter, r *http.Request, user *
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "search run triggered"})
 	default:
 		writeMethodNotAllowed(w, http.MethodPut, http.MethodDelete, http.MethodPost)
+	}
+}
+
+func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *models.User) {
+	switch r.Method {
+	case http.MethodGet:
+		missions, err := s.db.ListMissions(user.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"missions": missions})
+	case http.MethodPost:
+		var mission models.Mission
+		if err := json.NewDecoder(r.Body).Decode(&mission); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		mission.UserID = user.ID
+		mission.ID = 0
+		if strings.TrimSpace(mission.Name) == "" {
+			mission.Name = strings.TrimSpace(mission.TargetQuery)
+		}
+		if mission.BudgetStretch == 0 && mission.BudgetMax > 0 {
+			mission.BudgetStretch = mission.BudgetMax
+		}
+		if strings.TrimSpace(mission.Status) == "" {
+			mission.Status = "active"
+		}
+		if strings.TrimSpace(mission.Category) == "" {
+			mission.Category = "other"
+		}
+		mission.Active = mission.Status == "active"
+
+		limits := billing.LimitsFor(user.Tier)
+		if limits.MaxMissions > 0 {
+			existing, err := s.db.ListMissions(user.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if len(existing) >= limits.MaxMissions {
+				writeError(w, http.StatusPaymentRequired, "mission limit reached for current tier")
+				return
+			}
+		}
+
+		id, err := s.db.UpsertMission(mission)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		mission.ID = id
+		if mission.Status == "active" && s.assistant != nil {
+			_, _ = s.assistant.AutoDeployHunts(r.Context(), user.ID, mission)
+		}
+		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_created", "mission": mission}))
+		writeJSON(w, http.StatusCreated, mission)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleMissionByID(w http.ResponseWriter, r *http.Request, user *models.User) {
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/missions/"), "/")
+	if rawPath == "" {
+		writeError(w, http.StatusBadRequest, "invalid mission path")
+		return
+	}
+
+	// PUT /missions/{id}/status
+	if strings.HasSuffix(rawPath, "/status") {
+		if r.Method != http.MethodPut {
+			writeMethodNotAllowed(w, http.MethodPut)
+			return
+		}
+		idPart := strings.TrimSuffix(rawPath, "/status")
+		idPart = strings.Trim(idPart, "/")
+		id, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid mission id")
+			return
+		}
+		mission, err := s.db.GetMission(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if mission == nil || mission.UserID != user.ID {
+			writeError(w, http.StatusNotFound, "mission not found")
+			return
+		}
+		var req struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if err := s.db.UpdateMissionStatus(id, req.Status); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		updated, err := s.db.GetMission(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_status_updated", "mission": updated}))
+		writeJSON(w, http.StatusOK, updated)
+		return
+	}
+
+	// GET /missions/{id}/matches
+	if strings.HasSuffix(rawPath, "/matches") {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		idPart := strings.TrimSuffix(rawPath, "/matches")
+		idPart = strings.Trim(idPart, "/")
+		id, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid mission id")
+			return
+		}
+		mission, err := s.db.GetMission(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if mission == nil || mission.UserID != user.ID {
+			writeError(w, http.StatusNotFound, "mission not found")
+			return
+		}
+		limit := 50
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+				limit = parsed
+			}
+		}
+		listings, err := s.db.ListRecentListings(user.ID, limit, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mission":  mission,
+			"listings": listings,
+		})
+		return
+	}
+
+	// GET/PUT /missions/{id}
+	id, err := strconv.ParseInt(rawPath, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid mission id")
+		return
+	}
+	existing, err := s.db.GetMission(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil || existing.UserID != user.ID {
+		writeError(w, http.StatusNotFound, "mission not found")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, existing)
+	case http.MethodPut:
+		var mission models.Mission
+		if err := json.NewDecoder(r.Body).Decode(&mission); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		mission.ID = id
+		mission.UserID = user.ID
+		if strings.TrimSpace(mission.Name) == "" {
+			mission.Name = existing.Name
+		}
+		if mission.BudgetStretch == 0 && mission.BudgetMax > 0 {
+			mission.BudgetStretch = mission.BudgetMax
+		}
+		if strings.TrimSpace(mission.Status) == "" {
+			mission.Status = existing.Status
+		}
+		mission.Active = mission.Status == "active"
+		if _, err := s.db.UpsertMission(mission); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		updated, err := s.db.GetMission(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if updated != nil && updated.Status == "active" && s.assistant != nil {
+			_, _ = s.assistant.AutoDeployHunts(r.Context(), user.ID, *updated)
+		}
+		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_updated", "mission": updated}))
+		writeJSON(w, http.StatusOK, updated)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -458,7 +688,13 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request, user *models
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	listings, err := s.db.ListRecentListings(user.ID, 50)
+	missionID := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("mission_id")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			missionID = parsed
+		}
+	}
+	listings, err := s.db.ListRecentListings(user.ID, 50, missionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -910,7 +1146,7 @@ func (s *Server) subscriptionTier(priceID string) (string, bool) {
 	case strings.TrimSpace(s.cfg.StripeProPriceID):
 		return "pro", true
 	case strings.TrimSpace(s.cfg.StripeTeamPriceID):
-		return "team", true
+		return "power", true
 	default:
 		return "", false
 	}
@@ -919,7 +1155,10 @@ func (s *Server) subscriptionTier(priceID string) (string, bool) {
 func (s *Server) subscriptionTierFromMetadata(metadata map[string]string) (string, bool) {
 	tier := strings.TrimSpace(metadata["tier"])
 	switch tier {
-	case "pro", "team":
+	case "pro", "power", "team":
+		if tier == "team" {
+			return "power", true
+		}
 		return tier, true
 	default:
 		return "", false

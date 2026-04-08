@@ -47,6 +47,16 @@ func (w *UserWorker) RunCycle(ctx context.Context) error {
 		if !spec.Enabled {
 			continue
 		}
+		if spec.ProfileID > 0 {
+			mission, err := w.db.GetMission(spec.ProfileID)
+			if err != nil {
+				slog.Warn("failed to load mission for search", "search_id", spec.ID, "mission_id", spec.ProfileID, "error", err)
+				continue
+			}
+			if mission == nil || mission.Status == "paused" || mission.Status == "completed" {
+				continue
+			}
+		}
 		mp, ok := w.registry.Get(spec.MarketplaceID)
 		if !ok {
 			slog.Warn("unknown marketplace", "marketplace", spec.MarketplaceID)
@@ -61,6 +71,7 @@ func (w *UserWorker) RunCycle(ctx context.Context) error {
 			if !titleMatchesQuery(listing.Title, spec.Query) {
 				continue
 			}
+			listing.ProfileID = spec.ProfileID
 			if listing.Price > 0 {
 				_ = w.db.RecordPrice(spec.Query, spec.CategoryID, listing.Price)
 			}
@@ -78,10 +89,11 @@ func (w *UserWorker) RunCycle(ctx context.Context) error {
 			}
 			if w.notifier != nil {
 				payload, _ := json.Marshal(map[string]any{
-					"type":   "deal_found",
-					"userID": spec.UserID,
-					"search": spec.Name,
-					"deal":   scored,
+					"type":      "deal_found",
+					"userID":    spec.UserID,
+					"missionID": spec.ProfileID,
+					"search":    spec.Name,
+					"deal":      scored,
 				})
 				w.notifier.Publish(spec.UserID, string(payload))
 			}
