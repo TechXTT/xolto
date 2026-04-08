@@ -2,95 +2,245 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 
-import { api, clearToken, User } from "../../lib/api";
+import { DashboardProvider } from "../../components/DashboardContext";
+import { api, ShortlistEntry, User } from "../../lib/api";
+
+function IconAI() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path d="M8 1.5 9.3 5.2 13 6.5 9.3 7.8 8 11.5 6.7 7.8 3 6.5l3.7-1.3z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <circle cx="13" cy="12" r="1.5" fill="currentColor" opacity="0.5" />
+      <circle cx="3.5" cy="12.5" r="1" fill="currentColor" opacity="0.4" />
+    </svg>
+  );
+}
+
+function IconRadar() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="8" cy="8" r="2" />
+      <path d="M8 3a5 5 0 0 1 5 5" />
+      <path d="M8 0.5a7.5 7.5 0 0 1 7.5 7.5" opacity="0.5" />
+      <circle cx="8" cy="8" r="2" fill="currentColor" opacity="0.15" />
+    </svg>
+  );
+}
+
+function IconSaved() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M4 2.5h8a.5.5 0 0 1 .5.5v10.5L8 11 3.5 13.5V3a.5.5 0 0 1 .5-.5z" />
+    </svg>
+  );
+}
+
+function IconSettings() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <path d="M2 5h12M2 11h12" />
+      <circle cx="5.5" cy="5" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="10.5" cy="11" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
 
 const NAV = [
-  { href: "/",          label: "Overview" },
-  { href: "/feed",      label: "Feed" },
-  { href: "/searches",  label: "Searches" },
-  { href: "/shortlist", label: "Shortlist" },
-  { href: "/assistant", label: "Assistant" },
-  { href: "/settings",  label: "Settings" },
+  { href: "/assistant", label: "Brief", description: "Tell the AI what you want", Icon: IconAI },
+  { href: "/feed", label: "Deals", description: "AI-surfaced matches", Icon: IconRadar },
+  { href: "/shortlist", label: "Saved", description: "Deals you're considering", Icon: IconSaved },
+  { href: "/settings", label: "Settings", description: "Account and billing", Icon: IconSettings },
 ];
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+function initialsForUser(user: User | null) {
+  if (!user?.name) return user?.email.slice(0, 1).toUpperCase() || "?";
+  return user.name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+function normalizeShortlist(items: ShortlistEntry[]) {
+  return items.filter((item) => item.Status !== "removed");
+}
+
+export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [shortlist, setShortlist] = useState<ShortlistEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
-    api.auth
-      .me()
-      .then(setUser)
-      .catch(() => {
-        clearToken();
-        window.location.href = "/login";
-      })
-      .finally(() => setLoading(false));
+    let cancelled = false;
+
+    async function bootstrap() {
+      try {
+        const [me, shortlistRes] = await Promise.all([
+          api.auth.me(),
+          api.shortlist.get().catch(() => ({ shortlist: [] as ShortlistEntry[] })),
+        ]);
+        if (cancelled) return;
+        setUser(me);
+        setShortlist(normalizeShortlist(shortlistRes.shortlist));
+      } catch (err) {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : "";
+          if (msg.includes("401") || msg.toLowerCase().includes("unauthorized") || msg.toLowerCase().includes("missing") || msg.toLowerCase().includes("invalid token")) {
+            window.location.replace("/login");
+          }
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
+
+  async function refreshShortlist() {
+    const res = await api.shortlist.get();
+    setShortlist(normalizeShortlist(res.shortlist));
+  }
+
+  const shortlistIDs = new Set(shortlist.map((item) => item.ItemID));
+
+  async function addToShortlist(itemID: string) {
+    if (shortlistIDs.has(itemID)) return;
+    const entry = await api.shortlist.add(itemID);
+    setShortlist((prev) => normalizeShortlist([entry, ...prev.filter((item) => item.ItemID !== itemID)]));
+  }
+
+  async function removeFromShortlist(itemID: string) {
+    await api.shortlist.remove(itemID);
+    setShortlist((prev) => prev.filter((item) => item.ItemID !== itemID));
+  }
+
+  const currentNav = NAV.find((item) => pathname === item.href || pathname?.startsWith(`${item.href}/`)) ?? NAV[0];
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <span className="text-sm text-gray-400">Loading…</span>
+      <div className="fullscreen-shell">
+        <div className="loading-orb" />
+        <p className="loading-copy">Initialising your AI workspace…</p>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 bg-white border-r border-gray-200 flex flex-col">
-        <div className="px-5 py-5 border-b border-gray-100">
-          <p className="font-bold text-gray-900 text-base leading-tight">MarktBot</p>
-          {user && (
-            <p className="text-xs text-gray-400 mt-0.5 truncate">
-              {user.name} ·{" "}
-              <span className={`badge-${user.tier}`}>{user.tier}</span>
-            </p>
-          )}
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-0.5">
-          {NAV.map(({ href, label }) => {
-            const active = pathname === href || (href !== "/" && pathname?.startsWith(href));
-            return (
-              <Link
-                key={href}
-                href={href}
-                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                  active
-                    ? "bg-brand-50 text-brand-700"
-                    : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
-                }`}
-              >
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
-        <div className="px-4 py-4 border-t border-gray-100">
-          <button
-            type="button"
-            className="btn-secondary w-full text-xs"
-            onClick={async () => {
-              try { await api.auth.logout(); } catch {}
-              clearToken();
-              window.location.href = "/login";
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-      </aside>
+    <DashboardProvider
+      value={{
+        user,
+        shortlist,
+        shortlistIDs,
+        refreshShortlist,
+        addToShortlist,
+        removeFromShortlist,
+        isShortlisted: (itemID: string) => shortlistIDs.has(itemID),
+      }}
+    >
+      <div className="app-shell">
+        {menuOpen && <button type="button" className="app-overlay" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
 
-      {/* Main */}
-      <main className="flex-1 min-w-0 overflow-auto">
-        <div className="max-w-5xl mx-auto px-6 py-8">
-          {children}
+        <aside className={`app-sidebar${menuOpen ? " open" : ""}`}>
+          <div className="sidebar-brand">
+            <div className="brand-mark">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2l2.5 6.5L21 11l-6.5 2.5L12 20l-2.5-6.5L3 11l6.5-2.5z" stroke="#fff" strokeWidth="1.8" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div>
+              <p className="brand-title">MarktBot</p>
+              <p className="brand-subtitle">AI deal intelligence</p>
+            </div>
+          </div>
+
+          <nav className="sidebar-nav">
+            <div className="sidebar-ai-badge">
+              <span className="sidebar-ai-dot" />
+              AI is actively hunting
+            </div>
+
+            {NAV.map(({ href, label, description, Icon }) => {
+              const active = pathname === href || pathname?.startsWith(`${href}/`);
+              return (
+                <Link key={href} href={href} className={`nav-item${active ? " active" : ""}`}>
+                  <div className="nav-icon">
+                    <Icon />
+                  </div>
+                  <div>
+                    <p className="nav-label">{label}</p>
+                    <p className="nav-meta">{description}</p>
+                  </div>
+                </Link>
+              );
+            })}
+          </nav>
+
+          <div className="sidebar-footer">
+            <div className="sidebar-user-card">
+              <div className="sidebar-avatar">{initialsForUser(user)}</div>
+              <div className="sidebar-user-copy">
+                <p className="sidebar-user-name">{user?.name || user?.email}</p>
+                <p className="sidebar-user-tier">{user?.tier || "free"} plan</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn-ghost sidebar-signout"
+              onClick={async () => {
+                try {
+                  await api.auth.logout();
+                } catch {
+                  // Best-effort logout.
+                }
+                window.location.replace("/login");
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </aside>
+
+        <div className="app-main">
+          <header className="app-topbar">
+            <div className="topbar-left">
+              <button type="button" className="menu-trigger" onClick={() => setMenuOpen((open) => !open)} aria-label="Open navigation">
+                <span />
+                <span />
+                <span />
+              </button>
+              <div>
+                <p className="topbar-eyebrow">MarktBot</p>
+                <h1 className="topbar-title">{currentNav.label}</h1>
+              </div>
+            </div>
+            <div className="topbar-right">
+              <div className="topbar-chip">
+                <span className="chip-dot" />
+                {shortlist.length} saved
+              </div>
+              <Link href="/settings" className="topbar-user-link">
+                <span className="topbar-avatar">{initialsForUser(user)}</span>
+                <span>{user?.name || "Account"}</span>
+              </Link>
+            </div>
+          </header>
+
+          <main className="page-shell">{children}</main>
         </div>
-      </main>
-    </div>
+      </div>
+    </DashboardProvider>
   );
 }

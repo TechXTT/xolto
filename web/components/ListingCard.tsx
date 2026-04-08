@@ -1,89 +1,116 @@
+"use client";
+
+import { useState } from "react";
+
 import { Listing } from "../lib/api";
+import { formatEuroFromCents } from "../lib/format";
 import { ScoreBar } from "./ScoreBar";
 
-interface ScoredListing {
-  Listing: Listing;
-  Score: number;
-  OfferPrice: number;
-  FairPrice: number;
-  Reason?: string;
-}
-
 interface Props {
-  listing: Listing | ScoredListing;
+  listing: Listing;
   onShortlist?: (itemID: string) => Promise<void>;
+  isSaved?: boolean;
 }
 
-function isScoredListing(l: Listing | ScoredListing): l is ScoredListing {
-  return "Listing" in l && "Score" in l;
-}
+const MARKETPLACE_LABELS: Record<string, string> = {
+  marktplaats: "Marktplaats",
+  vinted: "Vinted",
+  olxbg: "OLX BG",
+};
 
-function euro(cents: number) {
-  return `€${(cents / 100).toFixed(2)}`;
-}
+const RISK_FLAG_LABELS: Record<string, string> = {
+  anomaly_price: "Anomaly price",
+  vague_condition: "Vague condition",
+  unclear_bundle: "Unclear bundle",
+  no_model_id: "No model identified",
+};
 
-export function ListingCard({ listing, onShortlist }: Props) {
-  const l: Listing = isScoredListing(listing) ? listing.Listing : listing;
-  const score: number | undefined = isScoredListing(listing) ? listing.Score : undefined;
-  const offerPrice: number | undefined = isScoredListing(listing) ? listing.OfferPrice : undefined;
-  const fairPrice: number | undefined = isScoredListing(listing) ? listing.FairPrice : undefined;
-  const reason: string | undefined = isScoredListing(listing) ? listing.Reason : undefined;
+export function ListingCard({ listing, onShortlist, isSaved = false }: Props) {
+  const item = listing;
+  const score = (listing.Score ?? 0) > 0 ? listing.Score : undefined;
+  const offerPrice = (listing.OfferPrice ?? 0) > 0 ? listing.OfferPrice : undefined;
+  const fairPrice = (listing.FairPrice ?? 0) > 0 ? listing.FairPrice : undefined;
+  const reason = listing.Reason || undefined;
+
+  const [saving, setSaving] = useState(false);
+
+  async function handleShortlist() {
+    if (!onShortlist || saving || isSaved) return;
+    setSaving(true);
+    try {
+      await onShortlist(item.ItemID);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <div className="card p-4 flex gap-4 hover:shadow-md transition-shadow">
-      {l.ImageURLs && l.ImageURLs.length > 0 ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={l.ImageURLs[0]}
-          alt={l.Title}
-          className="w-20 h-20 object-cover rounded-md shrink-0 bg-gray-100"
-        />
-      ) : (
-        <div className="w-20 h-20 rounded-md bg-gray-100 shrink-0 flex items-center justify-center">
-          <span className="text-gray-300 text-xs">No image</span>
-        </div>
-      )}
+    <article className="listing-card">
+      <div className="listing-media">
+        {item.ImageURLs?.[0] ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.ImageURLs[0]} alt={item.Title} className="listing-image" />
+        ) : (
+          <div className="listing-image listing-image-fallback">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--brand-600)" strokeWidth="1.5" strokeLinecap="round" opacity="0.5">
+              <rect x="3" y="3" width="18" height="18" rx="3" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </div>
+        )}
+      </div>
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-2">
-          <a
-            href={l.URL ?? "#"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-medium text-sm text-gray-900 hover:text-brand-600 line-clamp-2 leading-snug"
-          >
-            {l.Title}
-          </a>
+      <div className="listing-content">
+        {/* Score bar at the very top when scored */}
+        {score !== undefined && <ScoreBar score={score} className="listing-score" />}
+
+        <div className="listing-head">
+          <div className="listing-copy">
+            <div className="listing-meta-row">
+              {item.MarketplaceID && (
+                <span className="market-badge">{MARKETPLACE_LABELS[item.MarketplaceID] || item.MarketplaceID}</span>
+              )}
+              {item.Condition && <span className="subtle-pill">{item.Condition}</span>}
+            </div>
+            <a href={item.URL || "#"} target="_blank" rel="noopener noreferrer" className="listing-title">
+              {item.Title}
+            </a>
+          </div>
+
           {onShortlist && (
             <button
               type="button"
-              onClick={() => onShortlist(l.ItemID)}
-              className="btn-secondary text-xs shrink-0"
+              className={`save-chip${isSaved ? " saved" : ""}`}
+              onClick={handleShortlist}
+              disabled={saving || isSaved}
             >
-              + Save
+              {isSaved ? "Saved" : saving ? "Saving…" : "Save"}
             </button>
           )}
         </div>
 
-        <div className="flex flex-wrap gap-3 mt-1.5 text-sm">
-          <span className="font-semibold text-gray-900">{euro(l.Price)}</span>
+        <div className="listing-price-row">
+          <span className="listing-price">{formatEuroFromCents(item.Price)}</span>
           {offerPrice ? (
-            <span className="text-green-700 font-medium">offer {euro(offerPrice)}</span>
+            <span className="price-callout">Offer {formatEuroFromCents(offerPrice)}</span>
           ) : null}
           {fairPrice ? (
-            <span className="text-gray-400">fair {euro(fairPrice)}</span>
-          ) : null}
-          {l.Condition ? (
-            <span className="badge bg-gray-100 text-gray-600">{l.Condition}</span>
+            <span className="price-caption">Fair value {formatEuroFromCents(fairPrice)}</span>
           ) : null}
         </div>
 
-        {score !== undefined && <ScoreBar score={score} className="mt-2" />}
-
-        {reason && (
-          <p className="text-xs text-gray-400 mt-1 line-clamp-1">{reason}</p>
+        {reason && <p className="listing-reason">{reason}</p>}
+        {(item.RiskFlags?.length ?? 0) > 0 && (
+          <div className="risk-flags">
+            {item.RiskFlags!.map((flag) => (
+              <span key={flag} className="risk-flag">
+                {RISK_FLAG_LABELS[flag] ?? flag}
+              </span>
+            ))}
+          </div>
         )}
       </div>
-    </div>
+    </article>
   );
 }
