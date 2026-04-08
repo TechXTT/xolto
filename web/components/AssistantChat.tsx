@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import { api, AssistantReply, Recommendation, ShoppingProfile } from "../lib/api";
+import { api, AssistantReply, Mission, Recommendation } from "../lib/api";
 import { formatEuroFromCents } from "../lib/format";
 
 type Message = {
   role: "user" | "assistant";
   text: string;
-  profile?: ShoppingProfile | null;
+  mission?: Mission | null;
   recommendations?: Recommendation[];
 };
 
@@ -37,19 +37,19 @@ function AIAvatar() {
   );
 }
 
-function BriefProgress({ profile }: { profile: ShoppingProfile }) {
+function BriefProgress({ mission }: { mission: Mission }) {
   const fields: { label: string; value: string }[] = [];
-  if (profile.Name) fields.push({ label: "Looking for", value: profile.Name });
-  if ((profile.BudgetMax ?? 0) > 0) fields.push({ label: "Budget", value: `€${profile.BudgetMax}` });
-  if (profile.PreferredCondition?.length) fields.push({ label: "Condition", value: profile.PreferredCondition.join(", ") });
-  if ((profile.SearchQueries?.length ?? 0) > 0)
-    fields.push({ label: "Queries", value: `${profile.SearchQueries!.length} search term${profile.SearchQueries!.length === 1 ? "" : "s"}` });
+  if (mission.Name) fields.push({ label: "Mission", value: mission.Name });
+  if ((mission.BudgetMax ?? 0) > 0) fields.push({ label: "Budget", value: `€${mission.BudgetMax}` });
+  if (mission.PreferredCondition?.length) fields.push({ label: "Condition", value: mission.PreferredCondition.join(", ") });
+  if ((mission.SearchQueries?.length ?? 0) > 0)
+    fields.push({ label: "Queries", value: `${mission.SearchQueries!.length} search term${mission.SearchQueries!.length === 1 ? "" : "s"}` });
 
   if (fields.length === 0) return null;
 
   return (
     <div className="brief-card">
-      <p className="brief-card-label">Brief captured</p>
+      <p className="brief-card-label">Mission draft</p>
       <div className="brief-fields">
         {fields.map((f) => (
           <div key={f.label} className="brief-field">
@@ -92,7 +92,13 @@ function RecCard({ rec }: { rec: Recommendation }) {
   );
 }
 
-export function AssistantChat() {
+export function AssistantChat({
+  embedded = false,
+  onMissionCreated,
+}: {
+  embedded?: boolean;
+  onMissionCreated?: (mission: Mission) => void;
+}) {
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
@@ -114,14 +120,14 @@ export function AssistantChat() {
             {
               role: "assistant",
               text: res.session.LastAssistantMsg,
-              profile: res.session.DraftProfile,
+              mission: res.session.DraftMission,
             },
           ]);
         }
-        if (res.session.DraftProfile?.Name) {
-          setDraftHint(`Resuming: ${res.session.DraftProfile.Name}`);
+        if (res.session.DraftMission?.Name) {
+          setDraftHint(`Resuming: ${res.session.DraftMission.Name}`);
         } else if (res.session.PendingQuestion) {
-          setDraftHint("Continuing your brief");
+          setDraftHint("Continuing your mission");
         }
       } catch {
         // Keep the assistant usable even if session hydration fails.
@@ -154,13 +160,16 @@ export function AssistantChat() {
         {
           role: "assistant",
           text: reply.Message,
-          profile: reply.Profile,
+          mission: reply.Mission,
           recommendations: reply.Recommendations,
         },
       ]);
+      if (reply.Mission && !reply.Expecting) {
+        onMissionCreated?.(reply.Mission);
+      }
       setDraftHint(
-        reply.Profile?.Name
-          ? `Working brief: ${reply.Profile.Name}`
+        reply.Mission?.Name
+          ? `Working mission: ${reply.Mission.Name}`
           : reply.Expecting
             ? "Tell me more…"
             : ""
@@ -173,20 +182,19 @@ export function AssistantChat() {
     }
   }
 
-  return (
-    <div className="page-stack">
-      <section className="assistant-shell">
+  const content = (
+    <section className="assistant-shell">
         {/* Header */}
         <div className="assistant-header">
           <div>
-            <p className="section-kicker">AI buying assistant</p>
-            <h2>Your personal shopper, powered by AI</h2>
+            <p className="section-kicker">{embedded ? "Describe your mission" : "AI buying assistant"}</p>
+            <h2>{embedded ? "Create a buy mission with natural language" : "Your personal shopper, powered by AI"}</h2>
           </div>
           <div className="assistant-header-right">
             {draftHint && <span className="topbar-chip">{draftHint}</span>}
-            {history.length > 0 && (
-              <Link href="/feed" className="btn-ghost" style={{ fontSize: "0.84rem", minHeight: 36 }}>
-                View deals
+            {!embedded && history.length > 0 && (
+              <Link href="/matches" className="btn-ghost" style={{ fontSize: "0.84rem", minHeight: 36 }}>
+                View matches
               </Link>
             )}
           </div>
@@ -234,8 +242,8 @@ export function AssistantChat() {
                     <div className={`assistant-bubble ${item.role}`}>{item.text}</div>
 
                     {/* Brief progress tracker */}
-                    {item.role === "assistant" && item.profile && (item.profile.BudgetMax ?? 0) > 0 && (
-                      <BriefProgress profile={item.profile} />
+                    {item.role === "assistant" && item.mission && (item.mission.BudgetMax ?? 0) > 0 && (
+                      <BriefProgress mission={item.mission} />
                     )}
 
                     {/* Inline recommendation cards */}
@@ -248,8 +256,8 @@ export function AssistantChat() {
                         </div>
                         <div className="chat-feed-cta">
                           <p>Your monitors are scanning. New deals appear in real time.</p>
-                          <Link href="/feed" className="btn-primary" style={{ fontSize: "0.84rem" }}>
-                            Open Deals
+                          <Link href="/matches" className="btn-primary" style={{ fontSize: "0.84rem" }}>
+                            Open matches
                           </Link>
                         </div>
                       </>
@@ -280,7 +288,7 @@ export function AssistantChat() {
               className="input"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder="What are you shopping for? Item, budget, condition…"
+              placeholder="What are you buying? Item, budget, condition…"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -301,7 +309,15 @@ export function AssistantChat() {
           </div>
         </div>
       </section>
+  );
+
+  if (embedded) {
+    return content;
+  }
+
+  return (
+    <div className="page-stack">
+      {content}
     </div>
   );
 }
-

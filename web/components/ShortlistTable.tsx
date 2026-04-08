@@ -12,6 +12,9 @@ type Props = {
   onRemove?: (itemID: string) => Promise<void>;
   draftStates?: Record<string, { loading: boolean; text: string | null }>;
   onDraftOffer?: (itemID: string) => Promise<void>;
+  comparisonMode?: boolean;
+  selectedIDs?: string[];
+  onToggleSelect?: (itemID: string) => void;
 };
 
 const LABEL_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
@@ -21,7 +24,15 @@ const LABEL_CONFIG: Record<string, { label: string; color: string; bg: string }>
   skip: { label: "Skip", color: "var(--danger-600)", bg: "rgba(220,38,38,0.08)" },
 };
 
-export function ShortlistTable({ items, onRemove, draftStates = {}, onDraftOffer }: Props) {
+export function ShortlistTable({
+  items,
+  onRemove,
+  draftStates = {},
+  onDraftOffer,
+  comparisonMode = false,
+  selectedIDs = [],
+  onToggleSelect,
+}: Props) {
   const [removingID, setRemovingID] = useState<string | null>(null);
 
   if (items.length === 0) {
@@ -34,9 +45,62 @@ export function ShortlistTable({ items, onRemove, draftStates = {}, onDraftOffer
         </div>
         <h3>No saved comparisons yet</h3>
         <p>Save promising listings from the live feed to compare price, verdict, and fair value side by side.</p>
-        <Link href="/feed" className="btn-primary">
-          Browse the feed
+        <Link href="/matches" className="btn-primary">
+          Browse matches
         </Link>
+      </div>
+    );
+  }
+
+  if (comparisonMode) {
+    return (
+      <div className="surface-panel">
+        <div style={{ overflowX: "auto" }}>
+          <table className="shortlist-compare-table">
+            <thead>
+              <tr>
+                <th>Select</th>
+                <th>Name</th>
+                <th>Ask price</th>
+                <th>Fair price</th>
+                <th>Condition</th>
+                <th>Verdict</th>
+                <th>Risks</th>
+                <th>Fit score</th>
+                <th>Suggested offer</th>
+                <th>Next action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => {
+                const savings = item.FairPrice > 0 && item.AskPrice > 0 ? item.FairPrice - item.AskPrice : 0;
+                return (
+                  <tr key={item.ItemID}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedIDs.includes(item.ItemID)}
+                        onChange={() => onToggleSelect?.(item.ItemID)}
+                        disabled={!selectedIDs.includes(item.ItemID) && selectedIDs.length >= 4}
+                      />
+                    </td>
+                    <td>
+                      <a href={item.URL} target="_blank" rel="noopener noreferrer">{item.Title}</a>
+                    </td>
+                    <td>{formatEuroFromCents(item.AskPrice)}</td>
+                    <td>{formatEuroFromCents(item.FairPrice)}</td>
+                    <td>—</td>
+                    <td>{item.Verdict || "—"}</td>
+                    <td>{item.Concerns?.length ? item.Concerns.join(" | ") : "—"}</td>
+                    <td>{item.RecommendationScore > 0 ? item.RecommendationScore.toFixed(1) : "—"}</td>
+                    <td>{savings > 0 ? formatEuroFromCents(item.AskPrice + Math.floor(savings/2)) : "—"}</td>
+                    <td>{item.SuggestedQuestions?.[0] || "Ask for recent photos and condition details."}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     );
   }
@@ -82,13 +146,22 @@ export function ShortlistTable({ items, onRemove, draftStates = {}, onDraftOffer
               </div>
 
               {item.Concerns?.[0] && <p className="shortlist-concern">Flag: {item.Concerns[0]}</p>}
-              {item.SuggestedQuestions?.[0] && <p className="shortlist-question">Ask next: {item.SuggestedQuestions[0]}</p>}
+              {item.SuggestedQuestions?.length > 0 && (
+                <div className="shortlist-question">
+                  <strong>Suggested questions</strong>
+                  <ul>
+                    {item.SuggestedQuestions.map((question) => (
+                      <li key={question}>{question}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {onDraftOffer && (
                 <div className="offer-draft-row">
                   <button
                     type="button"
-                    className="btn-secondary"
+                    className="btn-primary"
                     disabled={draftStates[item.ItemID]?.loading}
                     onClick={() => void onDraftOffer(item.ItemID)}
                   >
