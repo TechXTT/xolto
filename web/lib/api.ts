@@ -1,4 +1,6 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const ACCESS_TOKEN_KEY = "marktbot_access_token";
+const REFRESH_TOKEN_KEY = "marktbot_refresh_token";
 
 export type User = {
   id: string;
@@ -34,6 +36,49 @@ export type Listing = {
   URL?: string;
   ImageURLs?: string[];
   MarketplaceID?: string;
+  Score?: number;
+  FairPrice?: number;
+  OfferPrice?: number;
+  Confidence?: number;
+  Reason?: string;
+  RiskFlags?: string[];
+};
+
+export type ShoppingProfile = {
+  ID?: number;
+  Name: string;
+  TargetQuery?: string;
+  CategoryID?: number;
+  BudgetMax?: number;
+  BudgetStretch?: number;
+  PreferredCondition?: string[];
+  RequiredFeatures?: string[];
+  NiceToHave?: string[];
+  SearchQueries?: string[];
+};
+
+export type AssistantSession = {
+  UserID: string;
+  PendingIntent: string;
+  PendingQuestion: string;
+  DraftProfile?: ShoppingProfile | null;
+  LastAssistantMsg: string;
+  UpdatedAt?: string;
+};
+
+export type Recommendation = {
+  Listing: Listing;
+  Label: string;
+  Verdict: string;
+  Concerns: string[];
+  NextQuestions?: string[];
+  SuggestedOffer?: number;
+  Scored?: {
+    Score: number;
+    FairPrice: number;
+    OfferPrice: number;
+    Confidence?: number;
+  };
 };
 
 export type ShortlistEntry = {
@@ -54,26 +99,104 @@ export type ShortlistEntry = {
 export type AssistantReply = {
   Message: string;
   Expecting: boolean;
+  Intent?: string;
+  Profile?: ShoppingProfile | null;
+  Recommendations?: Recommendation[];
 };
 
-export function getToken(): string {
-  return "";
+type ErrorPayload = {
+  error?: string;
+  message?: string;
+  detail?: string;
+};
+
+function canUseStorage() {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-export function setToken(_token: string) {
+export function getToken(): string {
+  if (!canUseStorage()) return "";
+  return window.localStorage.getItem(ACCESS_TOKEN_KEY) || "";
+}
+
+export function setToken(token: string) {
+  if (!canUseStorage()) return;
+  if (!token) {
+    window.localStorage.removeItem(ACCESS_TOKEN_KEY);
+    return;
+  }
+  window.localStorage.setItem(ACCESS_TOKEN_KEY, token);
 }
 
 export function clearToken() {
+  if (!canUseStorage()) return;
+  window.localStorage.removeItem(ACCESS_TOKEN_KEY);
+  window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+function getRefreshToken(): string {
+  if (!canUseStorage()) return "";
+  return window.localStorage.getItem(REFRESH_TOKEN_KEY) || "";
+}
+
+function setRefreshToken(token: string) {
+  if (!canUseStorage()) return;
+  if (!token) {
+    window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+    return;
+  }
+  window.localStorage.setItem(REFRESH_TOKEN_KEY, token);
+}
+
+async function normalizeApiError(res: Response): Promise<string> {
+  const fallback = `Request failed (${res.status})`;
+  const contentType = res.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = (await res.json()) as ErrorPayload;
+      return payload.error || payload.message || payload.detail || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  try {
+    const text = (await res.text()).trim();
+    if (!text) return fallback;
+    try {
+      const payload = JSON.parse(text) as ErrorPayload;
+      return payload.error || payload.message || payload.detail || text;
+    } catch {
+      return text;
+    }
+  } catch {
+    return fallback;
+  }
 }
 
 async function rawFetch(path: string, options?: RequestInit): Promise<Response> {
+  const headers = new Headers(options?.headers || {});
+  if (!(options?.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (!headers.has("Authorization")) {
+    const token = getToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+  }
+  if (path === "/auth/refresh" && !headers.has("X-Refresh-Token")) {
+    const refreshToken = getRefreshToken();
+    if (refreshToken) {
+      headers.set("X-Refresh-Token", refreshToken);
+    }
+  }
+
   return fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {})
-    }
+    headers,
   });
 }
 
@@ -82,30 +205,56 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   if (res.status === 401 && path !== "/auth/refresh" && path !== "/auth/login" && path !== "/auth/register") {
     const refreshRes = await rawFetch("/auth/refresh", { method: "POST" });
     if (refreshRes.ok) {
+      try {
+        const payload = (await refreshRes.clone().json()) as { access_token?: string; refresh_token?: string };
+        if (payload.access_token) setToken(payload.access_token);
+        if (payload.refresh_token) setRefreshToken(payload.refresh_token);
+      } catch {
+        // Ignore malformed refresh payloads and retry with cookies if present.
+      }
       res = await rawFetch(path, options);
     }
+    // Do NOT call clearToken() on failed refresh — server may be temporarily down.
+    // Let the original 401 propagate so callers can decide what to do.
   }
   if (!res.ok) {
-    throw new Error(await res.text());
+    throw new Error(await normalizeApiError(res));
   }
   return res.json();
 }
 
 export const api = {
   auth: {
-    login: async (email: string, password: string) =>
-      apiFetch<{ access_token: string; user: User }>("/auth/login", {
+    login: async (email: string, password: string) => {
+      const response = await apiFetch<{ access_token: string; refresh_token?: string; user: User }>("/auth/login", {
         method: "POST",
-        body: JSON.stringify({ email, password })
-      }),
-    register: async (email: string, password: string, name: string) =>
-      apiFetch<{ access_token: string; user: User }>("/auth/register", {
+        body: JSON.stringify({ email, password }),
+      });
+      setToken(response.access_token);
+      if (response.refresh_token) setRefreshToken(response.refresh_token);
+      return response;
+    },
+    register: async (email: string, password: string, name: string) => {
+      const response = await apiFetch<{ access_token: string; refresh_token?: string; user: User }>("/auth/register", {
         method: "POST",
-        body: JSON.stringify({ email, password, name })
-      }),
+        body: JSON.stringify({ email, password, name }),
+      });
+      setToken(response.access_token);
+      if (response.refresh_token) setRefreshToken(response.refresh_token);
+      return response;
+    },
     me: async () => apiFetch<User>("/users/me"),
-    refresh: async () => apiFetch<{ access_token: string; user: User }>("/auth/refresh", { method: "POST" }),
-    logout: async () => apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" })
+    refresh: async () => {
+      const response = await apiFetch<{ access_token: string; refresh_token?: string; user: User }>("/auth/refresh", { method: "POST" });
+      setToken(response.access_token);
+      if (response.refresh_token) setRefreshToken(response.refresh_token);
+      return response;
+    },
+    logout: async () => {
+      const response = await apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" });
+      clearToken();
+      return response;
+    },
   },
   searches: {
     list: async () => apiFetch<{ searches: SearchSpec[] }>("/searches"),
@@ -117,32 +266,39 @@ export const api = {
       apiFetch<{ ok: boolean }>(`/searches/${id}`, { method: "DELETE" }),
     run: async (id: number) =>
       apiFetch<{ ok: boolean; message: string }>(`/searches/${id}/run`, { method: "POST" }),
+    runAll: async () =>
+      apiFetch<{ ok: boolean; message: string }>("/searches/run", { method: "POST" }),
     generate: async (topic: string) =>
       apiFetch<{ searches: Array<Record<string, unknown>>; warning?: string }>("/searches/generate", {
         method: "POST",
-        body: JSON.stringify({ topic })
-      })
+        body: JSON.stringify({ topic }),
+      }),
   },
   listings: {
-    feed: async () => apiFetch<{ listings: Listing[]; user_id: string }>("/listings/feed")
+    feed: async () => apiFetch<{ listings: Listing[]; user_id: string }>("/listings/feed"),
   },
   shortlist: {
     get: async () => apiFetch<{ shortlist: ShortlistEntry[] }>("/shortlist"),
     add: async (itemID: string) => apiFetch<ShortlistEntry>(`/shortlist/${itemID}`, { method: "POST" }),
-    remove: async (itemID: string) => apiFetch<{ ok: boolean }>(`/shortlist/${itemID}`, { method: "DELETE" })
+    remove: async (itemID: string) => apiFetch<{ ok: boolean }>(`/shortlist/${itemID}`, { method: "DELETE" }),
+    draftOffer: async (itemID: string) =>
+      apiFetch<{ Content: string; ItemID: string }>(`/shortlist/${encodeURIComponent(itemID)}/draft`, { method: "POST" }),
   },
   assistant: {
     converse: async (message: string) =>
       apiFetch<AssistantReply>("/assistant/converse", {
         method: "POST",
-        body: JSON.stringify({ message })
-      })
+        body: JSON.stringify({ message }),
+      }),
+    session: async () =>
+      apiFetch<{ session: AssistantSession | null }>("/assistant/session"),
   },
   billing: {
     createCheckout: async (priceID: string) =>
       apiFetch<{ url: string; id: string }>("/billing/checkout", {
         method: "POST",
-        body: JSON.stringify({ price_id: priceID })
-      })
-  }
+        body: JSON.stringify({ price_id: priceID }),
+      }),
+    portal: async () => apiFetch<{ url: string }>("/billing/portal"),
+  },
 };

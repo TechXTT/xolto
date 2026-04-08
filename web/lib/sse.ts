@@ -1,5 +1,5 @@
 export function connectDealStream(onMessage: (payload: unknown) => void) {
-  const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+  const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const es = new EventSource(`${base}/events`, { withCredentials: true });
   es.onmessage = (event) => {
     try {
