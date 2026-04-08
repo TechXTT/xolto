@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	defaultMatchLimit = 5
+	defaultMatchLimit      = 5
+	maxListingsToScoreLive = 30 // cap per query for live assistant calls; background workers score all
 )
 
 type Assistant struct {
@@ -63,7 +64,7 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	message = strings.TrimSpace(message)
 	if message == "" {
 		return &models.AssistantReply{
-			Message: "Tell me what you want to buy and I’ll help narrow it down. For example: I want a Sony A6400 under 800 euro in very good condition.",
+			Message: "What are you shopping for? Give me the item and a rough budget — even a vague idea is enough to start.",
 		}, nil
 	}
 
@@ -76,17 +77,43 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	}
 
 	lower := strings.ToLower(message)
+
+	// Handle affirmative/negative replies to "want me to show matches?"
+	if session != nil && session.PendingIntent == models.IntentShowMatches {
+		if isAffirmative(lower) {
+			_ = a.store.ClearAssistantSession(userID)
+			recs, profile, matchErr := a.FindMatches(ctx, userID, 5)
+			if matchErr != nil || profile == nil {
+				return &models.AssistantReply{
+					Message: "I couldn't pull matches right now — the market may be light. Your hunts will surface deals automatically as they come in.",
+				}, nil
+			}
+			return &models.AssistantReply{
+				Message:         renderConversationMatches(profile.Name, recs),
+				Intent:          models.IntentShowMatches,
+				Profile:         profile,
+				Recommendations: recs,
+			}, nil
+		}
+		if isNegative(lower) {
+			_ = a.store.ClearAssistantSession(userID)
+			return &models.AssistantReply{
+				Message: "No problem — your hunts are running. Head to the Radar tab to see deals as they land, or come back here anytime to pull up current matches.",
+			}, nil
+		}
+	}
+
 	switch {
 	case containsAny(lower, "help", "what can you do", "how do i use"):
 		return &models.AssistantReply{
-			Message: "I can help you build a shopping brief, find matches, compare shortlist items, explain a listing, and draft seller questions. Tell me what you want to buy, or ask me to show matches or compare your shortlist.",
+			Message: "I help you find second-hand deals before anyone else does. Tell me what you're after — item, budget, condition — and I'll build a search profile, scan the market, and tell you which listings are actually worth your time. You can also ask me to show current matches or compare your shortlist.",
 			Intent:  models.IntentCreateBrief,
 		}, nil
-	case containsAny(lower, "show matches", "find matches", "what did you find", "matches"):
+	case containsAny(lower, "show matches", "find matches", "what did you find", "any matches", "matches"):
 		recs, profile, err := a.FindMatches(ctx, userID, 5)
 		if err != nil {
 			return &models.AssistantReply{
-				Message:   "I need a shopping brief first. Tell me what you want to buy, your budget, and any must-have features.",
+				Message:   "I don't have a brief on file yet. Tell me what you're looking for — item, budget, and preferred condition — and I'll get searching.",
 				Expecting: true,
 				Intent:    models.IntentCreateBrief,
 			}, nil
@@ -97,11 +124,11 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 			Profile:         profile,
 			Recommendations: recs,
 		}, nil
-	case containsAny(lower, "compare shortlist", "compare my shortlist", "compare"):
+	case containsAny(lower, "compare shortlist", "compare my shortlist", "compare saved", "compare"):
 		comparison, err := a.CompareShortlist(ctx, userID)
 		if err != nil {
 			return &models.AssistantReply{
-				Message:   "Your shortlist is empty right now. Ask me for matches first, then save the interesting ones.",
+				Message:   "Your shortlist is empty — nothing saved yet. Ask me for matches first, save the interesting ones, and then I can compare them for you.",
 				Expecting: true,
 				Intent:    models.IntentShortlist,
 			}, nil
@@ -135,6 +162,9 @@ func (a *Assistant) FindMatches(ctx context.Context, userID string, limit int) (
 		listings, err := a.searcher.Search(ctx, searchCfg)
 		if err != nil {
 			continue
+		}
+		if len(listings) > maxListingsToScoreLive {
+			listings = listings[:maxListingsToScoreLive]
 		}
 		for _, listing := range listings {
 			if _, exists := seen[listing.ItemID]; exists {
@@ -313,14 +343,29 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 		return nil, err
 	}
 	profile.ID = id
+
+	huntCount, _ := a.autoDeployHunts(ctx, userID, *profile)
+	recs, _, _ := a.FindMatches(ctx, userID, defaultMatchLimit)
+
+	var huntMsg string
+	switch {
+	case huntCount == 1:
+		huntMsg = "I've activated 1 monitor. It will scan every few minutes."
+	case huntCount > 1:
+		huntMsg = fmt.Sprintf("I've activated %d monitors across the market.", huntCount)
+	default:
+		huntMsg = "Your existing monitors will pick this up automatically."
+	}
+
+	reply := fmt.Sprintf("Brief saved for %s. %s\n\nHere's what's available right now:", profile.Name, huntMsg)
 	_ = a.store.ClearAssistantSession(userID)
-	reply := fmt.Sprintf("Saved your shopping brief for %s. Want me to show the best matches now?", profile.Name)
 	_ = a.store.SaveConversationArtifact(userID, models.IntentCreateBrief, prompt, reply)
 	return &models.AssistantReply{
-		Message:   reply,
-		Expecting: true,
-		Intent:    models.IntentShowMatches,
-		Profile:   profile,
+		Message:         reply,
+		Expecting:       false,
+		Intent:          models.IntentShowMatches,
+		Profile:         profile,
+		Recommendations: recs,
 	}, nil
 }
 
@@ -355,12 +400,12 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 	_ = a.store.ClearAssistantSession(session.UserID)
 
 	recs, _, matchErr := a.FindMatches(ctx, session.UserID, 3)
-	reply := fmt.Sprintf("Perfect. I saved your brief for %s.", profile.Name)
+	reply := fmt.Sprintf("Done — brief locked in for %s.", profile.Name)
 	if matchErr == nil && len(recs) > 0 {
 		reply += "\n\n" + renderConversationMatches(profile.Name, recs)
-		reply += "\n\nTell me if you want to tighten the budget, focus on one model, or shortlist one of these item IDs."
+		reply += "\n\nLet me know if you want to save any of these, tighten the budget, or focus on a specific model."
 	} else {
-		reply += "\nYou can now ask me to show matches, compare options, or refine the brief."
+		reply += " The hunts are set up — head to the Radar tab to catch new listings as they come in. Or ask me to show matches and I'll check the market right now."
 	}
 	_ = a.store.SaveConversationArtifact(session.UserID, models.IntentRefineBrief, answer, reply)
 	return &models.AssistantReply{
@@ -400,6 +445,80 @@ func (a *Assistant) searchConfigsForProfile(profile models.ShoppingProfile) []mo
 		})
 	}
 	return searches
+}
+
+// autoDeployHunts creates SearchSpec records for the user's brief profile.
+// It skips query+marketplace combinations that already exist.
+func (a *Assistant) autoDeployHunts(ctx context.Context, userID string, profile models.ShoppingProfile) (int, error) {
+	_ = ctx
+	user, err := a.store.GetUserByID(userID)
+	if err != nil || user == nil {
+		return 0, err
+	}
+
+	existing, _ := a.store.GetSearchConfigs(userID)
+	existingKeys := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		existingKeys[strings.ToLower(s.Query)+"|"+s.MarketplaceID] = true
+	}
+
+	queries := profile.SearchQueries
+	if len(queries) == 0 && profile.TargetQuery != "" {
+		queries = []string{profile.TargetQuery}
+	}
+	if len(queries) == 0 {
+		queries = []string{profile.Name}
+	}
+
+	interval := intervalForTier(user.Tier)
+	marketplaces := marketplacesForTier(user.Tier)
+
+	count := 0
+	for _, query := range queries {
+		for _, mp := range marketplaces {
+			key := strings.ToLower(query) + "|" + mp
+			if existingKeys[key] {
+				continue
+			}
+			spec := models.SearchSpec{
+				UserID:          userID,
+				Name:            profile.Name,
+				Query:           query,
+				MarketplaceID:   mp,
+				MaxPrice:        profile.BudgetMax * 100,
+				Condition:       profile.PreferredCondition,
+				CheckInterval:   interval,
+				OfferPercentage: 72,
+				Enabled:         true,
+			}
+			if _, err := a.store.CreateSearchConfig(spec); err == nil {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func intervalForTier(tier string) time.Duration {
+	switch tier {
+	case "team":
+		return time.Minute
+	case "pro":
+		return 5 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
+}
+
+func marketplacesForTier(tier string) []string {
+	switch tier {
+	case "team":
+		return []string{"marktplaats", "vinted", "olxbg"}
+	case "pro":
+		return []string{"marktplaats", "vinted"}
+	default:
+		return []string{"marktplaats"}
+	}
 }
 
 func (a *Assistant) findRecommendationByItemID(ctx context.Context, userID, itemID string) (*models.Recommendation, *models.ShoppingProfile, error) {
@@ -472,7 +591,7 @@ func scoreFit(listing models.Listing, profile models.ShoppingProfile) float64 {
 	if profile.BudgetMax > 0 && listing.Price > 0 && listing.Price <= profile.BudgetMax*100 {
 		score += 0.2
 	}
-	condition := strings.ToLower(listing.Attributes["condition"])
+	condition := strings.ToLower(listing.Condition)
 	for _, preferred := range profile.PreferredCondition {
 		if strings.EqualFold(condition, preferred) {
 			score += 0.1
@@ -492,7 +611,9 @@ func collectConcerns(listing models.Listing, profile models.ShoppingProfile, sco
 	if listing.PriceType == "reserved" || listing.PriceType == "fast-bid" || listing.PriceType == "bidding" {
 		concerns = append(concerns, "listing does not have a straightforward fixed asking price")
 	}
-	if strings.Contains(text, "defect") || strings.Contains(text, "gaat niet aan") || strings.Contains(text, "kapot") {
+	if strings.Contains(text, "defect") || strings.Contains(text, "not working") ||
+		strings.Contains(text, "broken") || strings.Contains(text, "fault") ||
+		strings.Contains(text, "gaat niet aan") || strings.Contains(text, "kapot") {
 		concerns = append(concerns, "listing may be defective or incomplete")
 	}
 	for _, required := range profile.RequiredFeatures {
@@ -508,15 +629,17 @@ func collectConcerns(listing models.Listing, profile models.ShoppingProfile, sco
 
 func buildQuestions(listing models.Listing, concerns []string) []string {
 	questions := []string{
-		"Kun je bevestigen dat alles technisch goed werkt?",
-		"Wat is de staat van de sensor, body en accessoires?",
+		"Can you confirm everything works as expected — no faults or missing parts?",
+		"What accessories and original packaging are included?",
 	}
 	for _, concern := range concerns {
 		switch {
 		case strings.Contains(concern, "defective"):
-			questions = append(questions, "Wat is precies het defect en wat is al getest?")
+			questions = append(questions, "What exactly is the defect, and what have you already tested?")
 		case strings.Contains(concern, "required feature"):
-			questions = append(questions, "Kun je een foto of bevestiging sturen van de ontbrekende specificatie?")
+			questions = append(questions, "Could you send a photo or confirmation of the feature I mentioned?")
+		case strings.Contains(concern, "above your stretch budget"):
+			questions = append(questions, "Is there any flexibility on the asking price?")
 		}
 	}
 	return dedupeStrings(questions)
@@ -548,19 +671,23 @@ func formatRecommendationDetail(rec models.Recommendation) string {
 
 func renderConversationMatches(profileName string, recs []models.Recommendation) string {
 	if len(recs) == 0 {
-		return "I couldn't find any suitable matches right now."
+		return "Nothing strong is showing up for " + profileName + " right now. The market might be thin — keep the hunts running and I'll alert you when something comes in."
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Here are the best matches I found for %s:\n\n", profileName)
+	fmt.Fprintf(&b, "Here's what I found for %s:\n\n", profileName)
 	for i, rec := range recs {
-		fmt.Fprintf(&b, "%d. **%s**\n", i+1, rec.Listing.Title)
-		fmt.Fprintf(&b, "   %s\n", formatRecommendationLabel(rec.Label))
-		fmt.Fprintf(&b, "   Ask: %s\n", formatEuro(rec.Listing.Price))
-		fmt.Fprintf(&b, "   Fair value: %s\n", formatEuro(rec.Scored.FairPrice))
-		fmt.Fprintf(&b, "   Item ID: `%s`\n", rec.Listing.ItemID)
-		fmt.Fprintf(&b, "   Summary: %s\n", rec.Verdict)
+		label := formatRecommendationLabel(rec.Label)
+		fmt.Fprintf(&b, "%d. %s — %s\n", i+1, rec.Listing.Title, formatEuro(rec.Listing.Price))
+		if rec.Scored.FairPrice > 0 {
+			fmt.Fprintf(&b, "   Fair value ≈ %s · %s\n", formatEuro(rec.Scored.FairPrice), label)
+		} else {
+			fmt.Fprintf(&b, "   %s\n", label)
+		}
+		if rec.Verdict != "" {
+			fmt.Fprintf(&b, "   %s\n", rec.Verdict)
+		}
 		if len(rec.Concerns) > 0 {
-			fmt.Fprintf(&b, "   Watch-outs: %s\n", strings.Join(humanizeConcerns(rec.Concerns[:minInt(2, len(rec.Concerns))]), "; "))
+			fmt.Fprintf(&b, "   Worth checking: %s\n", humanizeConcern(rec.Concerns[0]))
 		}
 		if i < len(recs)-1 {
 			b.WriteString("\n")
@@ -570,12 +697,19 @@ func renderConversationMatches(profileName string, recs []models.Recommendation)
 }
 
 func buildHeuristicDraft(entry models.ShortlistEntry) string {
-	questions := strings.Join(entry.SuggestedQuestions, " ")
+	offerAmt := entry.FairPrice
+	if entry.AskPrice > 0 && entry.AskPrice < offerAmt {
+		offerAmt = entry.AskPrice
+	}
+	question := "Can you confirm everything is in good working order and nothing is missing?"
+	if len(entry.SuggestedQuestions) > 0 {
+		question = entry.SuggestedQuestions[0]
+	}
 	return strings.TrimSpace(fmt.Sprintf(
-		"Hoi! Ik heb interesse in %s. Kun je me nog iets meer vertellen over de staat en of alles goed werkt? %s Als alles klopt, zou een prijs rond %s voor jou bespreekbaar zijn?",
+		"Hi! I'm interested in your %s. %s If all checks out, would you consider %s?",
 		entry.Title,
-		questions,
-		formatEuro(entry.FairPrice),
+		question,
+		formatEuro(offerAmt),
 	))
 }
 
@@ -601,26 +735,25 @@ func formatEuro(cents int) string {
 }
 
 func buildVerdict(label models.RecommendationLabel, fitScore float64, scored models.ScoredListing, concerns []string) string {
-	var summary string
 	switch label {
 	case models.RecommendationBuyNow:
-		summary = "Strong match with solid pricing."
+		if len(concerns) == 0 {
+			return "Looks clean — priced well and nothing flags up. I'd move on this."
+		}
+		return "Solid price, but worth a quick check with the seller before committing."
 	case models.RecommendationWatch:
-		summary = "Promising option worth watching."
+		if scored.Confidence < 0.5 {
+			return "Hard to judge without more comparable data, but the price looks reasonable. Worth watching."
+		}
+		return "Decent option. Not the sharpest deal out there, but nothing wrong with it either."
 	case models.RecommendationAskQuestions:
-		summary = "Potential fit, but I would ask a few questions first."
+		if len(concerns) > 0 {
+			return "Could work — but I'd get answers to a couple of questions before saying yes."
+		}
+		return "Interesting, but I'd probe a bit before committing."
 	default:
-		summary = "Not a strong enough match right now."
+		return "Doesn't clear the bar right now — skip it."
 	}
-
-	if scored.Confidence < 0.5 {
-		summary += " Pricing confidence is limited."
-	}
-	if len(concerns) > 0 && label != models.RecommendationSkip {
-		summary += " There are a couple of things to verify."
-	}
-	summary += fmt.Sprintf(" Fit looks like %.0f%%.", fitScore*100)
-	return summary
 }
 
 func formatRecommendationLabel(label models.RecommendationLabel) string {
@@ -701,7 +834,7 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 		CategoryID:         categoryID,
 		BudgetMax:          extractBudget(lower),
 		BudgetStretch:      extractStretchBudget(lower),
-		PreferredCondition: []string{"Gebruikt", "Zo goed als nieuw"},
+		PreferredCondition: []string{"good", "like_new"},
 		RequiredFeatures:   nil,
 		NiceToHave:         nil,
 		RiskTolerance:      "balanced",
@@ -714,19 +847,13 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 
 func nextProfileQuestion(profile models.ShoppingProfile) (string, string) {
 	if strings.TrimSpace(profile.TargetQuery) == "" || len(profile.SearchQueries) == 0 {
-		return "What exactly are you shopping for? A specific model is best.", "target_query"
-	}
-	if profile.CategoryID == 0 {
-		return "Is this a camera body, a lens, or something else?", "category"
+		return "What are you after? A specific make and model works best — the more precise, the better the matches.", "target_query"
 	}
 	if profile.BudgetMax == 0 {
-		return "What is your target budget in euros?", "budget_max"
-	}
-	if profile.BudgetStretch == 0 {
-		return "What is the highest stretch budget you would still consider in euros?", "budget_stretch"
+		return "What's your budget? I'll find deals under that and flag anything that looks like a steal.", "budget_max"
 	}
 	if len(profile.PreferredCondition) == 0 {
-		return "What condition do you prefer? For example: gebruikt, zo goed als nieuw, or new.", "condition"
+		return "How fussy are you about condition? I can stick to like-new only, or cast a wider net and flag the risks on each one.", "condition"
 	}
 	return "", ""
 }
@@ -746,9 +873,7 @@ func applyAnswerToProfile(profile *models.ShoppingProfile, questionKey, answer s
 		profile.CategoryID = detectCategory(answer)
 	case "budget_max":
 		profile.BudgetMax = extractFirstInteger(answer)
-		if profile.BudgetStretch == 0 {
-			profile.BudgetStretch = profile.BudgetMax
-		}
+		profile.BudgetStretch = profile.BudgetMax // treat max as stretch for simplicity
 	case "budget_stretch":
 		profile.BudgetStretch = extractFirstInteger(answer)
 	case "condition":
@@ -804,17 +929,17 @@ func extractFirstInteger(text string) int {
 func parseConditions(text string) []string {
 	lower := strings.ToLower(text)
 	var conditions []string
-	if containsAny(lower, "zo goed als nieuw", "very good", "mint", "excellent") {
-		conditions = append(conditions, "Zo goed als nieuw")
+	if containsAny(lower, "like new", "like-new", "very good", "mint", "excellent", "zo goed als nieuw") {
+		conditions = append(conditions, "like_new")
 	}
-	if containsAny(lower, "gebruikt", "used") {
-		conditions = append(conditions, "Gebruikt")
+	if containsAny(lower, "used", "good", "gebruikt") {
+		conditions = append(conditions, "good")
 	}
 	if containsAny(lower, "new", "nieuw") {
-		conditions = append(conditions, "Nieuw")
+		conditions = append(conditions, "new")
 	}
 	if len(conditions) == 0 {
-		conditions = []string{"Gebruikt", "Zo goed als nieuw"}
+		conditions = []string{"good", "like_new"}
 	}
 	return dedupeStrings(conditions)
 }
@@ -846,6 +971,20 @@ func containsAny(value string, needles ...string) bool {
 	return false
 }
 
+func isAffirmative(lower string) bool {
+	return containsAny(lower,
+		"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go for it", "go ahead",
+		"show me", "show matches", "find matches", "let's go", "lets go", "do it",
+		"please", "sounds good", "great", "perfect", "absolutely",
+	)
+}
+
+func isNegative(lower string) bool {
+	return containsAny(lower,
+		"no", "nope", "nah", "not now", "later", "skip", "cancel", "nevermind", "never mind",
+	)
+}
+
 func (a *Assistant) aiEnabled() bool {
 	return a.cfg.AI.Enabled && a.cfg.AI.APIKey != "" && a.cfg.AI.Model != ""
 }
@@ -868,10 +1007,22 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		"model":       a.cfg.AI.Model,
 		"temperature": 0.2,
 		"messages": []map[string]string{
-			{"role": "system", "content": "You convert shopping requests into a structured Marktplaats shopping profile. Return JSON only."},
-			{"role": "user", "content": "Parse this shopping request into JSON: " +
-				`{"name":"","target_query":"","category_id":0,"budget_max":0,"budget_stretch":0,"preferred_condition":[],"required_features":[],"nice_to_have":[],"risk_tolerance":"balanced","search_queries":[]}` +
-				"\nRequest: " + prompt},
+			{
+				"role": "system",
+				"content": "You are an expert buying assistant helping users find great second-hand deals on European marketplaces (Marktplaats, Vinted, OLX). " +
+					"Extract the user's buying intent into a structured JSON profile. Rules:\n" +
+					"- name: short human-readable label (e.g. 'Sony A6700', 'Camera + 2 lenses', 'Vintage Levi jacket'). No slugs, no hyphens, no URL encoding.\n" +
+					"- search_queries: exactly 3 to 5 terms. Include the main search term, one common abbreviation if applicable, one broader variant. No more.\n" +
+					"- budget values are whole euros (integers). budget_stretch = budget_max if not specified.\n" +
+					"- preferred_condition: 'new', 'like_new', 'good', 'fair'. Default to ['like_new','good'] if unspecified.\n" +
+					"Return ONLY valid JSON — no explanation, no markdown fences.",
+			},
+			{
+				"role": "user",
+				"content": "Extract a buying brief from this request. Schema: " +
+					`{"name":"","target_query":"","category_id":0,"budget_max":0,"budget_stretch":0,"preferred_condition":[],"required_features":[],"nice_to_have":[],"risk_tolerance":"balanced","search_queries":[]}` +
+					"\n\nRequest: " + prompt,
+			},
 		},
 	}
 	raw, _ := json.Marshal(payload)
@@ -912,6 +1063,16 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	if parsed.BudgetStretch == 0 {
 		parsed.BudgetStretch = parsed.BudgetMax
 	}
+	// Cap search queries defensively — the model sometimes ignores the limit.
+	if len(parsed.SearchQueries) > 5 {
+		parsed.SearchQueries = parsed.SearchQueries[:5]
+	}
+	// Sanitize name: replace hyphens/underscores used as slugs with spaces and trim.
+	parsed.Name = strings.NewReplacer("-", " ", "_", " ", "+", " ").Replace(parsed.Name)
+	parsed.Name = strings.Join(strings.Fields(parsed.Name), " ")
+	if parsed.Name == "" && parsed.TargetQuery != "" {
+		parsed.Name = parsed.TargetQuery
+	}
 	return &models.ShoppingProfile{
 		UserID:             userID,
 		Name:               parsed.Name,
@@ -933,10 +1094,15 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 func (a *Assistant) compareWithAI(ctx context.Context, entries []models.ShortlistEntry) (string, error) {
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
-		"temperature": 0.2,
+		"temperature": 0.5,
 		"messages": []map[string]string{
-			{"role": "system", "content": "Compare shortlisted marketplace options for a buyer. Be concise and practical."},
-			{"role": "user", "content": "Compare these shortlist entries and recommend the best one:\n" + mustJSON(entries)},
+			{
+				"role": "system",
+				"content": "You are a knowledgeable buying assistant helping a user decide between second-hand items they've shortlisted. " +
+					"Compare the options like a trusted friend who knows the market: weigh price against fair value, highlight any concerns, and make a clear recommendation. " +
+					"Be direct and conversational — not a bullet-point report. 3-5 sentences max.",
+			},
+			{"role": "user", "content": "Compare these shortlisted deals and tell me which one to go for:\n" + mustJSON(entries)},
 		},
 	}
 	return a.chatText(ctx, payload)
@@ -945,10 +1111,17 @@ func (a *Assistant) compareWithAI(ctx context.Context, entries []models.Shortlis
 func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry) (string, error) {
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
-		"temperature": 0.2,
+		"temperature": 0.5,
 		"messages": []map[string]string{
-			{"role": "system", "content": "Draft a polite Dutch seller message. Advisory only. Do not confirm purchase."},
-			{"role": "user", "content": "Draft a concise Dutch message for this shortlist entry:\n" + mustJSON(entry)},
+			{
+				"role": "system",
+				"content": "You help buyers draft seller messages on European secondhand marketplaces (Marktplaats, Vinted). " +
+					"Write a short, friendly, natural-sounding message in English. " +
+					"Include: a brief mention of what appeals about the listing, one question about condition or completeness if relevant, " +
+					"and the suggested offer phrased naturally as 'would you consider X?'. " +
+					"Keep it to 2-3 sentences. Do not commit to buying. Do not be pushy.",
+			},
+			{"role": "user", "content": "Draft a seller message for this listing:\n" + mustJSON(entry)},
 		},
 	}
 	return a.chatText(ctx, payload)

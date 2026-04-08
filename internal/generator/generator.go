@@ -78,10 +78,10 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		Messages: []chatMessage{
 			{
 				Role: "system",
-				Content: "You generate marketplace search presets for Marktplaats.nl. Return strict JSON only. " +
-					"Optimize for bargain hunting of used electronics. Use euro budgets as whole euros. " +
+				Content: "You generate search presets for European second-hand marketplaces (Marktplaats, Vinted, OLX). Return strict JSON only. " +
+					"Optimize for bargain hunting of used electronics: cameras, lenses, laptops, phones, gaming gear, audio equipment. Use euro budgets as whole euros. " +
 					"For camera bodies use category_id 487, for lenses use 495, and only use 356 for gaming-related items. " +
-					"Use Dutch conditions and keep auto_message false.",
+					"Use canonical English conditions (new, like_new, good, fair) and keep auto_message false.",
 			},
 			{
 				Role:    "user",
@@ -139,12 +139,12 @@ func buildPrompt(topic string) string {
 	return strings.Join([]string{
 		fmt.Sprintf("Create 3 to 5 Marktplaats search presets for this topic: %q.", topic),
 		"Return JSON with this exact shape only:",
-		`{"searches":[{"name":"Sony A7 IV","query":"sony a7 iv","category_id":487,"max_price":1800,"min_price":900,"condition":["Gebruikt","Zo goed als nieuw"],"offer_percentage":78,"auto_message":false,"message_template":"Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?"},{"name":"Sony FE 24-70mm","query":"sony fe 24-70","category_id":495,"max_price":900,"min_price":200,"condition":["Gebruikt","Zo goed als nieuw"],"offer_percentage":72,"auto_message":false,"message_template":"Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?"}]}`,
+		`{"searches":[{"name":"Sony A7 IV","query":"sony a7 iv","category_id":487,"max_price":1800,"min_price":900,"condition":["good","like_new"],"offer_percentage":78,"auto_message":false,"message_template":"Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"},{"name":"Sony FE 24-70mm","query":"sony fe 24-70","category_id":495,"max_price":900,"min_price":200,"condition":["good","like_new"],"offer_percentage":72,"auto_message":false,"message_template":"Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"}]}`,
 		"Rules:",
 		"- Focus on likely used-market deal opportunities, not brand-new retail terms.",
 		"- Prefer specific model searches plus one accessory or lens search when appropriate.",
 		"- Use realistic euro price ranges.",
-		"- Use Dutch condition values.",
+		"- Use canonical English condition values: new, like_new, good, fair.",
 		"- Use category_id 487 for camera bodies and 495 for lenses/objectives.",
 		"- Keep message_template polite and short.",
 	}, "\n")
@@ -170,11 +170,11 @@ func sanitizeSearches(searches []config.SearchConfig) []config.SearchConfig {
 			search.OfferPercentage = 72
 		}
 		if len(search.Condition) == 0 {
-			search.Condition = []string{"Gebruikt", "Zo goed als nieuw"}
+			search.Condition = []string{"good", "like_new"}
 		}
 		search.AutoMessage = false
 		if strings.TrimSpace(search.MessageTemplate) == "" {
-			search.MessageTemplate = "Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?"
+			search.MessageTemplate = "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"
 		}
 		out = append(out, search)
 	}
@@ -216,10 +216,10 @@ func sonyCameraSearches() []config.SearchConfig {
 			CategoryID:      cameraCategoryID,
 			MaxPrice:        1800,
 			MinPrice:        900,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 78,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik ben geïnteresseerd in {{.Title}}. Als alles goed werkt, zou je €{{.OfferPrice}} accepteren?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. If everything works well, would you accept EUR {{.OfferPrice}}?",
 		},
 		{
 			Name:            "Sony A7 III",
@@ -227,10 +227,10 @@ func sonyCameraSearches() []config.SearchConfig {
 			CategoryID:      cameraCategoryID,
 			MaxPrice:        1100,
 			MinPrice:        500,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 75,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Is {{.Title}} nog beschikbaar? Ik kan snel handelen en €{{.OfferPrice}} bieden.",
+			MessageTemplate: "Hi, is {{.Title}} still available? I can move quickly and offer EUR {{.OfferPrice}}.",
 		},
 		{
 			Name:            "Sony A6700",
@@ -238,10 +238,10 @@ func sonyCameraSearches() []config.SearchConfig {
 			CategoryID:      cameraCategoryID,
 			MaxPrice:        1400,
 			MinPrice:        700,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 78,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik heb interesse in {{.Title}}. Zou €{{.OfferPrice}} een optie zijn?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would EUR {{.OfferPrice}} work for you?",
 		},
 		{
 			Name:            "Sony FE Lens",
@@ -249,10 +249,10 @@ func sonyCameraSearches() []config.SearchConfig {
 			CategoryID:      lensCategoryID,
 			MaxPrice:        900,
 			MinPrice:        150,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 72,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?",
 		},
 	}
 }
@@ -266,10 +266,10 @@ func genericCameraSearches(topic string) []config.SearchConfig {
 			CategoryID:      cameraCategoryID,
 			MaxPrice:        1500,
 			MinPrice:        300,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 75,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?",
 		},
 		{
 			Name:            base + " Lens",
@@ -277,10 +277,10 @@ func genericCameraSearches(topic string) []config.SearchConfig {
 			CategoryID:      lensCategoryID,
 			MaxPrice:        900,
 			MinPrice:        100,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 72,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?",
 		},
 	}
 }
@@ -295,10 +295,10 @@ func genericSearches(topic string) []config.SearchConfig {
 			CategoryID:      defaultCategoryID,
 			MaxPrice:        1000,
 			MinPrice:        50,
-			Condition:       []string{"Gebruikt", "Zo goed als nieuw"},
+			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 72,
 			AutoMessage:     false,
-			MessageTemplate: "Hoi! Ik ben geïnteresseerd in {{.Title}}. Zou je €{{.OfferPrice}} accepteren?",
+			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?",
 		},
 	}
 }
