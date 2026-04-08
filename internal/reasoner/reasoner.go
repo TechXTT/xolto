@@ -113,6 +113,7 @@ func (r *Reasoner) heuristicAnalysis(
 	}
 
 	return models.DealAnalysis{
+		Relevant:        true, // heuristic path cannot judge relevance; rely on worker pre-filter
 		FairPrice:       fairPrice,
 		Confidence:      clamp(confidence, 0.05, 0.99),
 		Reason:          reason,
@@ -180,7 +181,11 @@ func (r *Reasoner) callLLM(
 		Messages: []chatMessage{
 			{
 				Role:    "system",
-				Content: "You analyze Dutch marketplace listings for resale/value hunting. Reply with strict JSON only.",
+				Content: "You analyze secondhand marketplace listings for resale and value hunting. " +
+					"You must also judge whether the listing is actually relevant to what the user searched for — " +
+					"a listing is NOT relevant if it is a completely different product category than the search intent " +
+					"(e.g. a phone appearing in a camera search, or a bag appearing in a laptop search). " +
+					"Reply with strict JSON only.",
 			},
 			{
 				Role:    "user",
@@ -236,6 +241,7 @@ func (r *Reasoner) callLLM(
 	}
 
 	return models.DealAnalysis{
+		Relevant:        parsed.Relevant,
 		FairPrice:       parsed.FairPriceCents,
 		Confidence:      clamp(parsed.Confidence, 0.05, 0.99),
 		Reason:          strings.TrimSpace(parsed.Reasoning),
@@ -286,9 +292,11 @@ func buildPrompt(
 
 	raw, _ := json.Marshal(input)
 	return strings.Join([]string{
-		"Analyze this marketplace listing against the provided comparables.",
+		"Analyze this marketplace listing against the provided comparables and search query.",
+		"First decide: is this listing actually the kind of product the user searched for?",
+		"Set relevant=false if the listing is a different product category than the search intent.",
 		"Return JSON with this shape only:",
-		`{"fair_price_cents":12345,"confidence":0.72,"reasoning":"short explanation","search_advice":"optional search refinement advice","comparable_indexes":[0,2]}`,
+		`{"relevant":true,"fair_price_cents":12345,"confidence":0.72,"reasoning":"short explanation","search_advice":"optional search refinement advice","comparable_indexes":[0,2]}`,
 		"Confidence must be between 0 and 1. Use comparable_indexes for the strongest matches only.",
 		string(raw),
 	}, "\n")
@@ -411,9 +419,10 @@ func clamp(v, min, max float64) float64 {
 }
 
 var stopWords = map[string]bool{
-	"de": true, "het": true, "een": true, "en": true, "met": true, "voor": true,
-	"van": true, "op": true, "te": true, "in": true, "is": true, "used": true,
-	"nieuw": true, "goed": true, "als": true, "new": true,
+	"the": true, "and": true, "for": true, "with": true, "from": true,
+	"this": true, "that": true, "are": true, "has": true, "have": true,
+	"in": true, "is": true, "it": true, "on": true, "at": true,
+	"used": true, "good": true, "new": true, "like": true,
 }
 
 type chatCompletionRequest struct {
@@ -434,6 +443,7 @@ type chatCompletionResponse struct {
 }
 
 type aiListingAnalysis struct {
+	Relevant          bool    `json:"relevant"`
 	FairPriceCents    int     `json:"fair_price_cents"`
 	Confidence        float64 `json:"confidence"`
 	Reasoning         string  `json:"reasoning"`

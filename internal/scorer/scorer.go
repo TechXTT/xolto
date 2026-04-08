@@ -135,6 +135,19 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	}
 
 	score = clamp(score, 1, 10)
+
+	// AI explicitly judged the listing as irrelevant to the search query.
+	if analysis.Source == "ai" && !analysis.Relevant {
+		return models.ScoredListing{
+			Listing:         listing,
+			Score:           1.0,
+			OfferPrice:      0,
+			Reason:          "not relevant to search: " + analysis.Reason,
+			ReasoningSource: "ai",
+		}
+	}
+
+	riskFlags := computeRiskFlags(listing, analysis.FairPrice)
 	offerPrice := calculateOffer(listing.Price, analysis.FairPrice, marketAvg, hasMarket, search.OfferPercentage)
 
 	if analysis.Reason != "" {
@@ -153,6 +166,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		ReasoningSource: analysis.Source,
 		SearchAdvice:    analysis.SearchAdvice,
 		ComparableDeals: analysis.ComparableDeals,
+		RiskFlags:       riskFlags,
 	}
 }
 
@@ -195,4 +209,59 @@ func hasActionablePrice(listing models.Listing) bool {
 	default:
 		return true
 	}
+}
+
+// computeRiskFlags returns trust-signal flags for a listing.
+func computeRiskFlags(listing models.Listing, fairPrice int) []string {
+	var flags []string
+	lower := strings.ToLower(listing.Title + " " + listing.Description)
+
+	if fairPrice > 0 && listing.Price > 0 && listing.Price < fairPrice/2 {
+		flags = append(flags, "anomaly_price")
+	}
+
+	vagueTerms := []string{"as is", "as-is", "untested", "for parts", "sold as seen", "no returns", "working condition", "not working"}
+	for _, term := range vagueTerms {
+		if strings.Contains(lower, term) {
+			flags = append(flags, "vague_condition")
+			break
+		}
+	}
+
+	bundleTerms := []string{"bundle", " lot ", "complete set", "collection"}
+	for _, term := range bundleTerms {
+		if strings.Contains(lower, term) {
+			flags = append(flags, "unclear_bundle")
+			break
+		}
+	}
+
+	if isElectronicsListing(listing.Title) {
+		hasDigit := false
+		for _, c := range listing.Title {
+			if c >= '0' && c <= '9' {
+				hasDigit = true
+				break
+			}
+		}
+		if !hasDigit {
+			flags = append(flags, "no_model_id")
+		}
+	}
+
+	return flags
+}
+
+func isElectronicsListing(title string) bool {
+	lower := strings.ToLower(title)
+	keywords := []string{
+		"camera", "lens", "laptop", "macbook", "iphone", "ipad", "samsung", "pixel",
+		"sony", "nikon", "canon", "fuji", "fujifilm", "gpu", "cpu", "graphics card",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
