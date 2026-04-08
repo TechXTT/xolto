@@ -23,6 +23,7 @@ type SearchConfig struct {
 	Name            string            `yaml:"name"`
 	Query           string            `yaml:"query"`
 	MarketplaceID   string            `yaml:"marketplace_id"`
+	ProfileID       int64             `yaml:"profile_id"`
 	CategoryID      int               `yaml:"category_id"`
 	MaxPrice        int               `yaml:"max_price"`
 	MinPrice        int               `yaml:"min_price"`
@@ -207,6 +208,7 @@ func (c SearchConfig) ToSpec() models.SearchSpec {
 		Name:            c.Name,
 		Query:           c.Query,
 		MarketplaceID:   c.MarketplaceID,
+		ProfileID:       c.ProfileID,
 		CategoryID:      c.CategoryID,
 		MaxPrice:        wholeEuroToCents(c.MaxPrice),
 		MinPrice:        wholeEuroToCents(c.MinPrice),

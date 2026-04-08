@@ -45,19 +45,19 @@ func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, s
 	}
 }
 
-func (a *Assistant) UpsertBrief(ctx context.Context, userID, prompt string) (*models.ShoppingProfile, error) {
-	profile, err := a.parseBrief(ctx, userID, prompt)
+func (a *Assistant) UpsertBrief(ctx context.Context, userID, prompt string) (*models.Mission, error) {
+	mission, err := a.parseBrief(ctx, userID, prompt)
 	if err != nil {
 		return nil, err
 	}
 
-	id, err := a.store.UpsertShoppingProfile(*profile)
+	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
 		return nil, err
 	}
-	profile.ID = id
-	_ = a.store.SaveConversationArtifact(userID, models.IntentCreateBrief, prompt, fmt.Sprintf("profile:%d", id))
-	return profile, nil
+	mission.ID = id
+	_ = a.store.SaveConversationArtifact(userID, models.IntentCreateBrief, prompt, fmt.Sprintf("mission:%d", id))
+	return mission, nil
 }
 
 func (a *Assistant) Converse(ctx context.Context, userID, message string) (*models.AssistantReply, error) {
@@ -72,7 +72,7 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	if err != nil {
 		return nil, err
 	}
-	if session != nil && session.PendingIntent == models.IntentCreateBrief && session.DraftProfile != nil {
+	if session != nil && session.PendingIntent == models.IntentCreateBrief && session.DraftMission != nil {
 		return a.continueBriefConversation(ctx, *session, message)
 	}
 
@@ -82,23 +82,23 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	if session != nil && session.PendingIntent == models.IntentShowMatches {
 		if isAffirmative(lower) {
 			_ = a.store.ClearAssistantSession(userID)
-			recs, profile, matchErr := a.FindMatches(ctx, userID, 5)
-			if matchErr != nil || profile == nil {
+			recs, mission, matchErr := a.FindMatches(ctx, userID, 5, 0)
+			if matchErr != nil || mission == nil {
 				return &models.AssistantReply{
 					Message: "I couldn't pull matches right now — the market may be light. Your hunts will surface deals automatically as they come in.",
 				}, nil
 			}
 			return &models.AssistantReply{
-				Message:         renderConversationMatches(profile.Name, recs),
+				Message:         renderConversationMatches(mission.Name, recs),
 				Intent:          models.IntentShowMatches,
-				Profile:         profile,
+				Mission:         mission,
 				Recommendations: recs,
 			}, nil
 		}
 		if isNegative(lower) {
 			_ = a.store.ClearAssistantSession(userID)
 			return &models.AssistantReply{
-				Message: "No problem — your hunts are running. Head to the Radar tab to see deals as they land, or come back here anytime to pull up current matches.",
+				Message: "No problem — your monitors are running. Head to Matches to see deals as they land, or come back here anytime to pull up current matches.",
 			}, nil
 		}
 	}
@@ -106,11 +106,11 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	switch {
 	case containsAny(lower, "help", "what can you do", "how do i use"):
 		return &models.AssistantReply{
-			Message: "I help you find second-hand deals before anyone else does. Tell me what you're after — item, budget, condition — and I'll build a search profile, scan the market, and tell you which listings are actually worth your time. You can also ask me to show current matches or compare your shortlist.",
+			Message: "I help you find second-hand deals before anyone else does. Tell me what you're after — item, budget, condition — and I'll build a buy mission, scan the market, and tell you which listings are actually worth your time. You can also ask me to show current matches or compare your shortlist.",
 			Intent:  models.IntentCreateBrief,
 		}, nil
 	case containsAny(lower, "show matches", "find matches", "what did you find", "any matches", "matches"):
-		recs, profile, err := a.FindMatches(ctx, userID, 5)
+		recs, mission, err := a.FindMatches(ctx, userID, 5, 0)
 		if err != nil {
 			return &models.AssistantReply{
 				Message:   "I don't have a brief on file yet. Tell me what you're looking for — item, budget, and preferred condition — and I'll get searching.",
@@ -119,9 +119,9 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 			}, nil
 		}
 		return &models.AssistantReply{
-			Message:         renderConversationMatches(profile.Name, recs),
+			Message:         renderConversationMatches(mission.Name, recs),
 			Intent:          models.IntentShowMatches,
-			Profile:         profile,
+			Mission:         mission,
 			Recommendations: recs,
 		}, nil
 	case containsAny(lower, "compare shortlist", "compare my shortlist", "compare saved", "compare"):
@@ -139,23 +139,38 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	}
 }
 
-func (a *Assistant) GetActiveProfile(userID string) (*models.ShoppingProfile, error) {
-	return a.store.GetActiveShoppingProfile(userID)
+func (a *Assistant) GetActiveMission(userID string) (*models.Mission, error) {
+	return a.store.GetActiveMission(userID)
 }
 
-func (a *Assistant) FindMatches(ctx context.Context, userID string, limit int) ([]models.Recommendation, *models.ShoppingProfile, error) {
-	profile, err := a.store.GetActiveShoppingProfile(userID)
+func (a *Assistant) GetActiveProfile(userID string) (*models.Mission, error) {
+	return a.GetActiveMission(userID)
+}
+
+func (a *Assistant) FindMatches(ctx context.Context, userID string, limit int, missionID int64) ([]models.Recommendation, *models.Mission, error) {
+	var (
+		mission *models.Mission
+		err     error
+	)
+	if missionID > 0 {
+		mission, err = a.store.GetMission(missionID)
+	} else {
+		mission, err = a.store.GetActiveMission(userID)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
-	if profile == nil {
+	if mission == nil {
 		return nil, nil, fmt.Errorf("no active shopping brief found")
+	}
+	if mission.UserID != "" && mission.UserID != userID {
+		return nil, nil, fmt.Errorf("mission does not belong to user")
 	}
 	if limit <= 0 {
 		limit = defaultMatchLimit
 	}
 
-	searches := a.searchConfigsForProfile(*profile)
+	searches := a.searchConfigsForMission(*mission)
 	seen := map[string]struct{}{}
 	var recs []models.Recommendation
 	for _, searchCfg := range searches {
@@ -171,8 +186,9 @@ func (a *Assistant) FindMatches(ctx context.Context, userID string, limit int) (
 				continue
 			}
 			seen[listing.ItemID] = struct{}{}
+			listing.ProfileID = mission.ID
 			scored := a.scorer.Score(ctx, listing, searchCfg)
-			rec := buildRecommendation(scored, *profile)
+			rec := buildRecommendation(scored, *mission)
 			if rec.Label == models.RecommendationSkip {
 				continue
 			}
@@ -199,11 +215,11 @@ func (a *Assistant) FindMatches(ctx context.Context, userID string, limit int) (
 	if len(recs) > limit {
 		recs = recs[:limit]
 	}
-	return recs, profile, nil
+	return recs, mission, nil
 }
 
 func (a *Assistant) ExplainListing(ctx context.Context, userID, itemID string) (string, error) {
-	rec, _, err := a.findRecommendationByItemID(ctx, userID, itemID)
+	rec, _, err := a.findRecommendationByItemID(ctx, userID, itemID, 0)
 	if err != nil {
 		return "", err
 	}
@@ -215,17 +231,17 @@ func (a *Assistant) ExplainListing(ctx context.Context, userID, itemID string) (
 }
 
 func (a *Assistant) SaveToShortlist(ctx context.Context, userID, itemID string) (*models.ShortlistEntry, error) {
-	rec, profile, err := a.findRecommendationByItemID(ctx, userID, itemID)
+	rec, mission, err := a.findRecommendationByItemID(ctx, userID, itemID, 0)
 	if err != nil {
 		return nil, err
 	}
-	if rec == nil || profile == nil {
+	if rec == nil || mission == nil {
 		return nil, fmt.Errorf("listing %s not found in active matches", itemID)
 	}
 
 	entry := models.ShortlistEntry{
 		UserID:              userID,
-		ProfileID:           profile.ID,
+		MissionID:           mission.ID,
 		ItemID:              rec.Listing.ItemID,
 		Title:               rec.Listing.Title,
 		URL:                 rec.Listing.URL,
@@ -289,7 +305,14 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 		}
 	}
 
-	content := buildHeuristicDraft(*entry)
+	var mission *models.Mission
+	if entry.MissionID > 0 {
+		if loaded, err := a.store.GetMission(entry.MissionID); err == nil && loaded != nil && loaded.UserID == userID {
+			mission = loaded
+		}
+	}
+
+	content := buildHeuristicDraft(*entry, mission)
 	if a.aiEnabled() {
 		if aiDraft, err := a.draftWithAI(ctx, *entry); err == nil && aiDraft != "" {
 			content = aiDraft
@@ -310,20 +333,20 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 }
 
 func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt string) (*models.AssistantReply, error) {
-	profile, err := a.parseBrief(ctx, userID, prompt)
+	mission, err := a.parseBrief(ctx, userID, prompt)
 	if err != nil {
 		return nil, err
 	}
-	if profile.BudgetStretch == 0 && profile.BudgetMax > 0 {
-		profile.BudgetStretch = profile.BudgetMax
+	if mission.BudgetStretch == 0 && mission.BudgetMax > 0 {
+		mission.BudgetStretch = mission.BudgetMax
 	}
 
-	if question, key := nextProfileQuestion(*profile); question != "" {
+	if question, key := nextProfileQuestion(*mission); question != "" {
 		session := models.AssistantSession{
 			UserID:           userID,
 			PendingIntent:    models.IntentCreateBrief,
 			PendingQuestion:  key,
-			DraftProfile:     profile,
+			DraftMission:     mission,
 			LastAssistantMsg: question,
 		}
 		if err := a.store.SaveAssistantSession(session); err != nil {
@@ -334,18 +357,18 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 			Message:   question,
 			Expecting: true,
 			Intent:    models.IntentCreateBrief,
-			Profile:   profile,
+			Mission:   mission,
 		}, nil
 	}
 
-	id, err := a.store.UpsertShoppingProfile(*profile)
+	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
 		return nil, err
 	}
-	profile.ID = id
+	mission.ID = id
 
-	huntCount, _ := a.autoDeployHunts(ctx, userID, *profile)
-	recs, _, _ := a.FindMatches(ctx, userID, defaultMatchLimit)
+	huntCount, _ := a.AutoDeployHunts(ctx, userID, *mission)
+	recs, _, _ := a.FindMatches(ctx, userID, defaultMatchLimit, mission.ID)
 
 	var huntMsg string
 	switch {
@@ -357,28 +380,28 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 		huntMsg = "Your existing monitors will pick this up automatically."
 	}
 
-	reply := fmt.Sprintf("Brief saved for %s. %s\n\nHere's what's available right now:", profile.Name, huntMsg)
+	reply := fmt.Sprintf("Mission saved for %s. %s\n\nHere's what's available right now:", mission.Name, huntMsg)
 	_ = a.store.ClearAssistantSession(userID)
 	_ = a.store.SaveConversationArtifact(userID, models.IntentCreateBrief, prompt, reply)
 	return &models.AssistantReply{
 		Message:         reply,
 		Expecting:       false,
 		Intent:          models.IntentShowMatches,
-		Profile:         profile,
+		Mission:         mission,
 		Recommendations: recs,
 	}, nil
 }
 
 func (a *Assistant) continueBriefConversation(ctx context.Context, session models.AssistantSession, answer string) (*models.AssistantReply, error) {
-	profile := session.DraftProfile
-	if profile == nil {
+	mission := session.DraftMission
+	if mission == nil {
 		return a.startBriefConversation(ctx, session.UserID, answer)
 	}
 
-	applyAnswerToProfile(profile, session.PendingQuestion, answer, a.cfg.Marktplaats)
-	if question, key := nextProfileQuestion(*profile); question != "" {
+	applyAnswerToProfile(mission, session.PendingQuestion, answer, a.cfg.Marktplaats)
+	if question, key := nextProfileQuestion(*mission); question != "" {
 		session.PendingQuestion = key
-		session.DraftProfile = profile
+		session.DraftMission = mission
 		session.LastAssistantMsg = question
 		if err := a.store.SaveAssistantSession(session); err != nil {
 			return nil, err
@@ -388,44 +411,48 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 			Message:   question,
 			Expecting: true,
 			Intent:    models.IntentRefineBrief,
-			Profile:   profile,
+			Mission:   mission,
 		}, nil
 	}
 
-	id, err := a.store.UpsertShoppingProfile(*profile)
+	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
 		return nil, err
 	}
-	profile.ID = id
+	mission.ID = id
 	_ = a.store.ClearAssistantSession(session.UserID)
 
-	recs, _, matchErr := a.FindMatches(ctx, session.UserID, 3)
-	reply := fmt.Sprintf("Done — brief locked in for %s.", profile.Name)
+	huntCount, _ := a.AutoDeployHunts(ctx, session.UserID, *mission)
+	recs, _, matchErr := a.FindMatches(ctx, session.UserID, 3, mission.ID)
+	reply := fmt.Sprintf("Done — mission locked in for %s.", mission.Name)
+	if huntCount > 0 {
+		reply += fmt.Sprintf(" I activated %d monitor(s) for it.", huntCount)
+	}
 	if matchErr == nil && len(recs) > 0 {
-		reply += "\n\n" + renderConversationMatches(profile.Name, recs)
+		reply += "\n\n" + renderConversationMatches(mission.Name, recs)
 		reply += "\n\nLet me know if you want to save any of these, tighten the budget, or focus on a specific model."
 	} else {
-		reply += " The hunts are set up — head to the Radar tab to catch new listings as they come in. Or ask me to show matches and I'll check the market right now."
+		reply += " The monitors are set up — head to Matches to catch new listings as they come in."
 	}
 	_ = a.store.SaveConversationArtifact(session.UserID, models.IntentRefineBrief, answer, reply)
 	return &models.AssistantReply{
 		Message:         reply,
 		Intent:          models.IntentShowMatches,
-		Profile:         profile,
+		Mission:         mission,
 		Recommendations: recs,
 	}, nil
 }
 
-func (a *Assistant) searchConfigsForProfile(profile models.ShoppingProfile) []models.SearchSpec {
-	queries := profile.SearchQueries
-	if len(queries) == 0 && profile.TargetQuery != "" {
-		queries = []string{profile.TargetQuery}
+func (a *Assistant) searchConfigsForMission(mission models.Mission) []models.SearchSpec {
+	queries := mission.SearchQueries
+	if len(queries) == 0 && mission.TargetQuery != "" {
+		queries = []string{mission.TargetQuery}
 	}
 	if len(queries) == 0 {
-		queries = []string{profile.Name}
+		queries = []string{mission.Name}
 	}
 
-	conditions := profile.PreferredCondition
+	conditions := mission.PreferredCondition
 	if len(conditions) == 0 {
 		conditions = []string{"good", "like_new"}
 	}
@@ -433,11 +460,12 @@ func (a *Assistant) searchConfigsForProfile(profile models.ShoppingProfile) []mo
 	searches := make([]models.SearchSpec, 0, len(queries))
 	for _, query := range queries {
 		searches = append(searches, models.SearchSpec{
-			Name:            profile.Name,
+			Name:            mission.Name,
 			Query:           query,
 			MarketplaceID:   "marktplaats",
-			CategoryID:      profile.CategoryID,
-			MaxPrice:        profile.BudgetStretch * 100,
+			ProfileID:       mission.ID,
+			CategoryID:      mission.CategoryID,
+			MaxPrice:        mission.BudgetStretch * 100,
 			MinPrice:        0,
 			Condition:       conditions,
 			OfferPercentage: 72,
@@ -447,9 +475,9 @@ func (a *Assistant) searchConfigsForProfile(profile models.ShoppingProfile) []mo
 	return searches
 }
 
-// autoDeployHunts creates SearchSpec records for the user's brief profile.
+// AutoDeployHunts creates SearchSpec records for a mission.
 // It skips query+marketplace combinations that already exist.
-func (a *Assistant) autoDeployHunts(ctx context.Context, userID string, profile models.ShoppingProfile) (int, error) {
+func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission models.Mission) (int, error) {
 	_ = ctx
 	user, err := a.store.GetUserByID(userID)
 	if err != nil || user == nil {
@@ -462,12 +490,12 @@ func (a *Assistant) autoDeployHunts(ctx context.Context, userID string, profile 
 		existingKeys[strings.ToLower(s.Query)+"|"+s.MarketplaceID] = true
 	}
 
-	queries := profile.SearchQueries
-	if len(queries) == 0 && profile.TargetQuery != "" {
-		queries = []string{profile.TargetQuery}
+	queries := mission.SearchQueries
+	if len(queries) == 0 && mission.TargetQuery != "" {
+		queries = []string{mission.TargetQuery}
 	}
 	if len(queries) == 0 {
-		queries = []string{profile.Name}
+		queries = []string{mission.Name}
 	}
 
 	interval := intervalForTier(user.Tier)
@@ -482,11 +510,13 @@ func (a *Assistant) autoDeployHunts(ctx context.Context, userID string, profile 
 			}
 			spec := models.SearchSpec{
 				UserID:          userID,
-				Name:            profile.Name,
+				ProfileID:       mission.ID,
+				Name:            mission.Name,
 				Query:           query,
 				MarketplaceID:   mp,
-				MaxPrice:        profile.BudgetMax * 100,
-				Condition:       profile.PreferredCondition,
+				CategoryID:      mission.CategoryID,
+				MaxPrice:        mission.BudgetMax * 100,
+				Condition:       mission.PreferredCondition,
 				CheckInterval:   interval,
 				OfferPercentage: 72,
 				Enabled:         true,
@@ -501,7 +531,7 @@ func (a *Assistant) autoDeployHunts(ctx context.Context, userID string, profile 
 
 func intervalForTier(tier string) time.Duration {
 	switch tier {
-	case "team":
+	case "power", "team":
 		return time.Minute
 	case "pro":
 		return 5 * time.Minute
@@ -512,7 +542,7 @@ func intervalForTier(tier string) time.Duration {
 
 func marketplacesForTier(tier string) []string {
 	switch tier {
-	case "team":
+	case "power", "team":
 		return []string{"marktplaats", "vinted", "olxbg"}
 	case "pro":
 		return []string{"marktplaats", "vinted"}
@@ -521,23 +551,23 @@ func marketplacesForTier(tier string) []string {
 	}
 }
 
-func (a *Assistant) findRecommendationByItemID(ctx context.Context, userID, itemID string) (*models.Recommendation, *models.ShoppingProfile, error) {
-	recs, profile, err := a.FindMatches(ctx, userID, 15)
+func (a *Assistant) findRecommendationByItemID(ctx context.Context, userID, itemID string, missionID int64) (*models.Recommendation, *models.Mission, error) {
+	recs, mission, err := a.FindMatches(ctx, userID, 15, missionID)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, rec := range recs {
 		if rec.Listing.ItemID == itemID {
 			recCopy := rec
-			return &recCopy, profile, nil
+			return &recCopy, mission, nil
 		}
 	}
-	return nil, profile, nil
+	return nil, mission, nil
 }
 
-func buildRecommendation(scored models.ScoredListing, profile models.ShoppingProfile) models.Recommendation {
-	fitScore := scoreFit(scored.Listing, profile)
-	concerns := collectConcerns(scored.Listing, profile, scored)
+func buildRecommendation(scored models.ScoredListing, mission models.Mission) models.Recommendation {
+	fitScore := scoreFit(scored.Listing, mission)
+	concerns := collectConcerns(scored.Listing, mission, scored)
 	questions := buildQuestions(scored.Listing, concerns)
 
 	label := models.RecommendationSkip
@@ -562,7 +592,7 @@ func buildRecommendation(scored models.ScoredListing, profile models.ShoppingPro
 	return models.Recommendation{
 		Listing:        scored.Listing,
 		Scored:         scored,
-		Profile:        profile,
+		Mission:        mission,
 		Label:          label,
 		FitScore:       fitScore,
 		Verdict:        verdict,
@@ -572,27 +602,27 @@ func buildRecommendation(scored models.ScoredListing, profile models.ShoppingPro
 	}
 }
 
-func scoreFit(listing models.Listing, profile models.ShoppingProfile) float64 {
+func scoreFit(listing models.Listing, mission models.Mission) float64 {
 	score := 0.4
 	text := strings.ToLower(listing.Title + " " + listing.Description)
 
-	for _, feature := range profile.RequiredFeatures {
+	for _, feature := range mission.RequiredFeatures {
 		if strings.Contains(text, strings.ToLower(feature)) {
 			score += 0.15
 		} else {
 			score -= 0.15
 		}
 	}
-	for _, feature := range profile.NiceToHave {
+	for _, feature := range mission.NiceToHave {
 		if strings.Contains(text, strings.ToLower(feature)) {
 			score += 0.05
 		}
 	}
-	if profile.BudgetMax > 0 && listing.Price > 0 && listing.Price <= profile.BudgetMax*100 {
+	if mission.BudgetMax > 0 && listing.Price > 0 && listing.Price <= mission.BudgetMax*100 {
 		score += 0.2
 	}
 	condition := strings.ToLower(listing.Condition)
-	for _, preferred := range profile.PreferredCondition {
+	for _, preferred := range mission.PreferredCondition {
 		if strings.EqualFold(condition, preferred) {
 			score += 0.1
 			break
@@ -601,7 +631,7 @@ func scoreFit(listing models.Listing, profile models.ShoppingProfile) float64 {
 	return math.Max(0, math.Min(1, score))
 }
 
-func collectConcerns(listing models.Listing, profile models.ShoppingProfile, scored models.ScoredListing) []string {
+func collectConcerns(listing models.Listing, mission models.Mission, scored models.ScoredListing) []string {
 	var concerns []string
 	text := strings.ToLower(listing.Title + " " + listing.Description)
 
@@ -616,12 +646,12 @@ func collectConcerns(listing models.Listing, profile models.ShoppingProfile, sco
 		strings.Contains(text, "gaat niet aan") || strings.Contains(text, "kapot") {
 		concerns = append(concerns, "listing may be defective or incomplete")
 	}
-	for _, required := range profile.RequiredFeatures {
+	for _, required := range mission.RequiredFeatures {
 		if !strings.Contains(text, strings.ToLower(required)) {
 			concerns = append(concerns, fmt.Sprintf("required feature not clearly confirmed: %s", required))
 		}
 	}
-	if profile.BudgetStretch > 0 && listing.Price > profile.BudgetStretch*100 {
+	if mission.BudgetStretch > 0 && listing.Price > mission.BudgetStretch*100 {
 		concerns = append(concerns, "listing is above your stretch budget")
 	}
 	return concerns
@@ -669,12 +699,12 @@ func formatRecommendationDetail(rec models.Recommendation) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderConversationMatches(profileName string, recs []models.Recommendation) string {
+func renderConversationMatches(missionName string, recs []models.Recommendation) string {
 	if len(recs) == 0 {
-		return "Nothing strong is showing up for " + profileName + " right now. The market might be thin — keep the hunts running and I'll alert you when something comes in."
+		return "Nothing strong is showing up for " + missionName + " right now. The market might be thin — keep the monitors running and I'll alert you when something comes in."
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Here's what I found for %s:\n\n", profileName)
+	fmt.Fprintf(&b, "Here's what I found for %s:\n\n", missionName)
 	for i, rec := range recs {
 		label := formatRecommendationLabel(rec.Label)
 		fmt.Fprintf(&b, "%d. %s — %s\n", i+1, rec.Listing.Title, formatEuro(rec.Listing.Price))
@@ -696,12 +726,12 @@ func renderConversationMatches(profileName string, recs []models.Recommendation)
 	return strings.TrimSpace(b.String())
 }
 
-func buildHeuristicDraft(entry models.ShortlistEntry) string {
+func buildHeuristicDraft(entry models.ShortlistEntry, mission *models.Mission) string {
 	offerAmt := entry.FairPrice
 	if entry.AskPrice > 0 && entry.AskPrice < offerAmt {
 		offerAmt = entry.AskPrice
 	}
-	question := "Can you confirm everything is in good working order and nothing is missing?"
+	question := categorySpecificQuestion(mission, entry.Title)
 	if len(entry.SuggestedQuestions) > 0 {
 		question = entry.SuggestedQuestions[0]
 	}
@@ -711,6 +741,34 @@ func buildHeuristicDraft(entry models.ShortlistEntry) string {
 		question,
 		formatEuro(offerAmt),
 	))
+}
+
+func categorySpecificQuestion(mission *models.Mission, title string) string {
+	category := ""
+	if mission != nil {
+		category = strings.ToLower(strings.TrimSpace(mission.Category))
+	}
+	lowerTitle := strings.ToLower(title)
+	if category == "" || category == "other" {
+		switch {
+		case containsAny(lowerTitle, "iphone", "pixel", "samsung", "oneplus", "smartphone", "phone"):
+			category = "phone"
+		case containsAny(lowerTitle, "camera", "sony", "canon", "nikon", "fujifilm", "lens"):
+			category = "camera"
+		case containsAny(lowerTitle, "laptop", "macbook", "thinkpad", "notebook"):
+			category = "laptop"
+		}
+	}
+	switch category {
+	case "phone":
+		return "Could you share the battery health percentage and confirm whether there are any screen or frame marks?"
+	case "camera":
+		return "Could you share the current shutter count and confirm whether the sensor and lens mount are clean?"
+	case "laptop":
+		return "Could you confirm battery condition, keyboard/screen condition, and if there are any dead pixels?"
+	default:
+		return "Can you confirm everything is in good working order and nothing is missing?"
+	}
 }
 
 func dedupeStrings(values []string) []string {
@@ -799,20 +857,20 @@ func minInt(a, b int) int {
 	return b
 }
 
-func (a *Assistant) parseBrief(ctx context.Context, userID, prompt string) (*models.ShoppingProfile, error) {
-	profile := heuristicProfileFromPrompt(userID, prompt, a.cfg.Marktplaats)
+func (a *Assistant) parseBrief(ctx context.Context, userID, prompt string) (*models.Mission, error) {
+	mission := heuristicProfileFromPrompt(userID, prompt, a.cfg.Marktplaats)
 	if !a.aiEnabled() {
-		return profile, nil
+		return mission, nil
 	}
 
 	aiProfile, err := a.parseBriefWithAI(ctx, userID, prompt)
 	if err != nil {
-		return profile, nil
+		return mission, nil
 	}
 	return aiProfile, nil
 }
 
-func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsConfig) *models.ShoppingProfile {
+func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsConfig) *models.Mission {
 	text := strings.TrimSpace(prompt)
 	lower := strings.ToLower(text)
 	categoryID := 0
@@ -827,7 +885,7 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 	if len(name) > 40 {
 		name = name[:40]
 	}
-	return &models.ShoppingProfile{
+	return &models.Mission{
 		UserID:             userID,
 		Name:               name,
 		TargetQuery:        text,
@@ -841,11 +899,15 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 		ZipCode:            mpCfg.ZipCode,
 		Distance:           mpCfg.Distance,
 		SearchQueries:      []string{text},
+		Status:             "active",
+		Urgency:            "flexible",
+		TravelRadius:       mpCfg.Distance / 1000,
+		Category:           detectMissionCategory(lower),
 		Active:             true,
 	}
 }
 
-func nextProfileQuestion(profile models.ShoppingProfile) (string, string) {
+func nextProfileQuestion(profile models.Mission) (string, string) {
 	if strings.TrimSpace(profile.TargetQuery) == "" || len(profile.SearchQueries) == 0 {
 		return "What are you after? A specific make and model works best — the more precise, the better the matches.", "target_query"
 	}
@@ -858,7 +920,7 @@ func nextProfileQuestion(profile models.ShoppingProfile) (string, string) {
 	return "", ""
 }
 
-func applyAnswerToProfile(profile *models.ShoppingProfile, questionKey, answer string, mpCfg config.MarktplaatsConfig) {
+func applyAnswerToProfile(profile *models.Mission, questionKey, answer string, mpCfg config.MarktplaatsConfig) {
 	answer = strings.TrimSpace(answer)
 	lower := strings.ToLower(answer)
 	switch questionKey {
@@ -869,8 +931,12 @@ func applyAnswerToProfile(profile *models.ShoppingProfile, questionKey, answer s
 		if profile.CategoryID == 0 {
 			profile.CategoryID = detectCategory(answer)
 		}
+		if strings.TrimSpace(profile.Category) == "" || strings.EqualFold(profile.Category, "other") {
+			profile.Category = detectMissionCategory(answer)
+		}
 	case "category":
 		profile.CategoryID = detectCategory(answer)
+		profile.Category = detectMissionCategory(answer)
 	case "budget_max":
 		profile.BudgetMax = extractFirstInteger(answer)
 		profile.BudgetStretch = profile.BudgetMax // treat max as stretch for simplicity
@@ -892,6 +958,9 @@ func applyAnswerToProfile(profile *models.ShoppingProfile, questionKey, answer s
 			profile.RiskTolerance = "balanced"
 		}
 	}
+	if profile.TravelRadius == 0 && profile.Distance > 0 {
+		profile.TravelRadius = profile.Distance / 1000
+	}
 	if len(profile.SearchQueries) == 0 && profile.TargetQuery != "" {
 		profile.SearchQueries = []string{profile.TargetQuery}
 	}
@@ -906,6 +975,20 @@ func detectCategory(text string) int {
 		return 487
 	}
 	return 0
+}
+
+func detectMissionCategory(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case containsAny(lower, "iphone", "pixel", "samsung", "oneplus", "smartphone", "phone"):
+		return "phone"
+	case containsAny(lower, "laptop", "macbook", "thinkpad", "notebook", "chromebook"):
+		return "laptop"
+	case containsAny(lower, "camera", "sony", "canon", "nikon", "fujifilm", "lens", "alpha", "a7", "a6"):
+		return "camera"
+	default:
+		return "other"
+	}
 }
 
 func extractFirstInteger(text string) int {
@@ -989,11 +1072,12 @@ func (a *Assistant) aiEnabled() bool {
 	return a.cfg.AI.Enabled && a.cfg.AI.APIKey != "" && a.cfg.AI.Model != ""
 }
 
-func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string) (*models.ShoppingProfile, error) {
+func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string) (*models.Mission, error) {
 	type profileResponse struct {
 		Name               string   `json:"name"`
 		TargetQuery        string   `json:"target_query"`
 		CategoryID         int      `json:"category_id"`
+		Category           string   `json:"category"`
 		BudgetMax          int      `json:"budget_max"`
 		BudgetStretch      int      `json:"budget_stretch"`
 		PreferredCondition []string `json:"preferred_condition"`
@@ -1073,7 +1157,7 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	if parsed.Name == "" && parsed.TargetQuery != "" {
 		parsed.Name = parsed.TargetQuery
 	}
-	return &models.ShoppingProfile{
+	return &models.Mission{
 		UserID:             userID,
 		Name:               parsed.Name,
 		TargetQuery:        parsed.TargetQuery,
@@ -1087,8 +1171,22 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		ZipCode:            a.cfg.Marktplaats.ZipCode,
 		Distance:           a.cfg.Marktplaats.Distance,
 		SearchQueries:      parsed.SearchQueries,
+		Status:             "active",
+		Urgency:            "flexible",
+		TravelRadius:       a.cfg.Marktplaats.Distance / 1000,
+		Category:           missionCategoryFromParsed(parsed.Category, parsed.TargetQuery, parsed.Name),
 		Active:             true,
 	}, nil
+}
+
+func missionCategoryFromParsed(parsedCategory, targetQuery, name string) string {
+	value := strings.ToLower(strings.TrimSpace(parsedCategory))
+	switch value {
+	case "phone", "laptop", "camera", "other":
+		return value
+	default:
+		return detectMissionCategory(targetQuery + " " + name)
+	}
 }
 
 func (a *Assistant) compareWithAI(ctx context.Context, entries []models.ShortlistEntry) (string, error) {

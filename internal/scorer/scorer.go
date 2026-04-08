@@ -215,6 +215,7 @@ func hasActionablePrice(listing models.Listing) bool {
 func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 	var flags []string
 	lower := strings.ToLower(listing.Title + " " + listing.Description)
+	electronics := isElectronicsListing(lower)
 
 	if fairPrice > 0 && listing.Price > 0 && listing.Price < fairPrice/2 {
 		flags = append(flags, "anomaly_price")
@@ -236,7 +237,7 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		}
 	}
 
-	if isElectronicsListing(listing.Title) {
+	if electronics {
 		hasDigit := false
 		for _, c := range listing.Title {
 			if c >= '0' && c <= '9' {
@@ -249,17 +250,64 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		}
 	}
 
+	if electronics && len(listing.ImageURLs) < 3 {
+		flags = append(flags, "missing_key_photos")
+	}
+
+	if electronics && isPhoneOrLaptop(lower) && !hasBatteryHealthSignal(lower) {
+		flags = append(flags, "no_battery_health")
+	}
+
+	if hasRefurbishedAmbiguity(lower) {
+		flags = append(flags, "refurbished_ambiguity")
+	}
+
 	return flags
 }
 
-func isElectronicsListing(title string) bool {
-	lower := strings.ToLower(title)
+func isElectronicsListing(text string) bool {
+	lower := strings.ToLower(text)
 	keywords := []string{
 		"camera", "lens", "laptop", "macbook", "iphone", "ipad", "samsung", "pixel",
 		"sony", "nikon", "canon", "fuji", "fujifilm", "gpu", "cpu", "graphics card",
+		"smartphone", "tablet", "notebook", "thinkpad", "surface", "playstation", "xbox", "nintendo",
+		"monitor", "television", "tv", "router", "modem", "headphone", "airpods", "charger", "battery",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPhoneOrLaptop(text string) bool {
+	return containsAny(text,
+		"iphone", "samsung", "pixel", "oneplus", "smartphone", "phone",
+		"laptop", "macbook", "notebook", "thinkpad", "surface",
+	)
+}
+
+func hasBatteryHealthSignal(text string) bool {
+	return containsAny(text,
+		"battery health", "battery capaciteit", "battery capacity", "accu", "accuprestatie",
+		"cycle count", "battery cycles", "batterijconditie", "battery condition",
+	)
+}
+
+func hasRefurbishedAmbiguity(text string) bool {
+	if !containsAny(text, "refurb", "renewed", "reconditioned", "gereviseerd") {
+		return false
+	}
+	if containsAny(text, "grade a", "grade b", "grade c", "warranty", "garantie", "12 month", "24 month") {
+		return false
+	}
+	return true
+}
+
+func containsAny(text string, terms ...string) bool {
+	for _, term := range terms {
+		if strings.Contains(text, term) {
 			return true
 		}
 	}
