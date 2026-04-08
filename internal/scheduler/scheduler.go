@@ -132,7 +132,7 @@ func (s *Scheduler) processSearch(ctx context.Context, searchCfg config.SearchCo
 
 		scored := s.scorer.Score(ctx, listing, spec)
 
-		if err := s.store.SaveListing("", listing, spec.Query, scored.Score); err != nil {
+		if err := s.store.SaveListing("", listing, spec.Query, scored); err != nil {
 			slog.Warn("failed to save listing", "error", err)
 		}
 

@@ -18,10 +18,11 @@ import (
 	"github.com/TechXTT/marktbot/internal/generator"
 	"github.com/TechXTT/marktbot/internal/models"
 	"github.com/TechXTT/marktbot/internal/store"
-	"github.com/stripe/stripe-go/v76"
-	"github.com/stripe/stripe-go/v76/checkout/session"
-	"github.com/stripe/stripe-go/v76/customer"
-	"github.com/stripe/stripe-go/v76/webhook"
+	"github.com/stripe/stripe-go/v81"
+	portalsession "github.com/stripe/stripe-go/v81/billingportal/session"
+	"github.com/stripe/stripe-go/v81/checkout/session"
+	"github.com/stripe/stripe-go/v81/customer"
+	"github.com/stripe/stripe-go/v81/webhook"
 )
 
 type SearchRunner interface {
@@ -58,6 +59,7 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/auth/logout", s.handleLogout)
 	mux.HandleFunc("/users/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("/searches", s.requireAuth(s.handleSearches))
+	mux.HandleFunc("/searches/run", s.requireAuth(s.handleRunAllSearches))
 	mux.HandleFunc("/searches/generate", s.requireAuth(s.handleGenerateSearches))
 	mux.HandleFunc("/searches/", s.requireAuth(s.handleSearchByID))
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
@@ -68,6 +70,7 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/actions", s.requireAuth(s.handleActions))
 	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/billing/checkout", s.requireAuth(s.handleBillingCheckout))
+	mux.HandleFunc("/billing/portal", s.requireAuth(s.handleBillingPortal))
 	mux.HandleFunc("/billing/webhook", s.handleBillingWebhook)
 	return s
 }
@@ -161,8 +164,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookies(w, accessToken, refreshToken)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"access_token": accessToken,
-		"user":         sanitizeUser(*user),
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"user":          sanitizeUser(*user),
 	})
 }
 
@@ -195,8 +199,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookies(w, accessToken, refreshToken)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": accessToken,
-		"user":         sanitizeUser(*user),
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"user":          sanitizeUser(*user),
 	})
 }
 
@@ -205,12 +210,17 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	refreshCookie, err := r.Cookie("marktbot_refresh")
-	if err != nil || strings.TrimSpace(refreshCookie.Value) == "" {
+	refreshToken := strings.TrimSpace(r.Header.Get("X-Refresh-Token"))
+	if refreshToken == "" {
+		if cookie, err := r.Cookie("marktbot_refresh"); err == nil {
+			refreshToken = strings.TrimSpace(cookie.Value)
+		}
+	}
+	if refreshToken == "" {
 		writeError(w, http.StatusUnauthorized, "missing refresh token")
 		return
 	}
-	claims, err := auth.ParseToken(s.cfg.JWTSecret, strings.TrimSpace(refreshCookie.Value))
+	claims, err := auth.ParseToken(s.cfg.JWTSecret, refreshToken)
 	if err != nil || claims.TokenType != "refresh" {
 		writeError(w, http.StatusUnauthorized, "invalid refresh token")
 		return
@@ -227,8 +237,9 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookies(w, accessToken, refreshToken)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": accessToken,
-		"user":         sanitizeUser(*user),
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"user":          sanitizeUser(*user),
 	})
 }
 
@@ -332,6 +343,22 @@ func (s *Server) handleGenerateSearches(w http.ResponseWriter, r *http.Request, 
 		"searches": searches,
 		"warning":  errorString(err),
 	})
+}
+
+func (s *Server) handleRunAllSearches(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "background runner unavailable")
+		return
+	}
+	if err := s.runner.RunUserNow(r.Context(), user.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "active searches triggered"})
 }
 
 func (s *Server) handleSearchByID(w http.ResponseWriter, r *http.Request, user *models.User) {
@@ -453,7 +480,25 @@ func (s *Server) handleShortlist(w http.ResponseWriter, r *http.Request, user *m
 }
 
 func (s *Server) handleShortlistItem(w http.ResponseWriter, r *http.Request, user *models.User) {
-	itemID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/shortlist/"), "/")
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/shortlist/"), "/")
+
+	// Handle /shortlist/{itemID}/draft as a POST sub-resource.
+	if strings.HasSuffix(rawPath, "/draft") && strings.Count(rawPath, "/") == 1 {
+		itemID := strings.TrimSuffix(rawPath, "/draft")
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		draft, err := s.assistant.DraftSellerMessage(r.Context(), user.ID, itemID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, draft)
+		return
+	}
+
+	itemID := rawPath
 	if itemID == "" {
 		writeError(w, http.StatusBadRequest, "missing shortlist item id")
 		return
@@ -486,19 +531,16 @@ func (s *Server) handleShortlistItem(w http.ResponseWriter, r *http.Request, use
 		}
 		writeJSON(w, http.StatusOK, entry)
 	case http.MethodDelete:
-		existing, err := s.db.GetShortlist(user.ID)
+		item, err := s.db.GetShortlistEntry(user.ID, itemID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		for _, item := range existing {
-			if item.ItemID == itemID {
-				item.Status = "removed"
-				if err := s.db.SaveShortlistEntry(item); err != nil {
-					writeError(w, http.StatusInternalServerError, err.Error())
-					return
-				}
-				break
+		if item != nil {
+			item.Status = "removed"
+			if err := s.db.SaveShortlistEntry(*item); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -601,6 +643,33 @@ func (s *Server) handleBillingCheckout(w http.ResponseWriter, r *http.Request, u
 	writeJSON(w, http.StatusOK, map[string]any{"url": sess.URL, "id": sess.ID})
 }
 
+func (s *Server) handleBillingPortal(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if s.cfg.StripeSecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "stripe is not configured")
+		return
+	}
+	stripe.Key = s.cfg.StripeSecret
+	customerID := strings.TrimSpace(user.StripeCustomer)
+	if customerID == "" {
+		writeError(w, http.StatusBadRequest, "no billing account found")
+		return
+	}
+	returnURL := strings.TrimRight(s.cfg.AppBaseURL, "/") + "/settings"
+	sess, err := portalsession.New(&stripe.BillingPortalSessionParams{
+		Customer:  stripe.String(customerID),
+		ReturnURL: stripe.String(returnURL),
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"url": sess.URL})
+}
+
 func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeMethodNotAllowed(w, http.MethodPost)
@@ -612,12 +681,14 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var event stripe.Event
-	if s.cfg.StripeWebhookSecret != "" {
-		signature := r.Header.Get("Stripe-Signature")
-		event, err = webhook.ConstructEvent(body, signature, s.cfg.StripeWebhookSecret)
-	} else {
-		err = json.Unmarshal(body, &event)
+	if s.cfg.StripeWebhookSecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "stripe webhook not configured")
+		return
 	}
+	signature := r.Header.Get("Stripe-Signature")
+	event, err = webhook.ConstructEventWithOptions(body, signature, s.cfg.StripeWebhookSecret, webhook.ConstructEventOptions{
+		IgnoreAPIVersionMismatch: true,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid stripe webhook payload")
 		return
@@ -633,8 +704,8 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 	case "checkout.session.completed":
 		var checkoutSession stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &checkoutSession); err == nil {
-			customerID := checkoutSession.Customer.ID
-			if customerID == "" {
+			customerID := ""
+			if checkoutSession.Customer != nil {
 				customerID = checkoutSession.Customer.ID
 			}
 			tier, ok := s.subscriptionTierFromMetadata(checkoutSession.Metadata)
