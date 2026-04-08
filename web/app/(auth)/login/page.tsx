@@ -17,7 +17,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.auth.login(email, password);
-      window.location.replace("/feed");
+      window.location.replace("/missions");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {

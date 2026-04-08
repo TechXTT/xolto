@@ -18,7 +18,7 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       await api.auth.register(email, password, name);
-      window.location.replace("/feed");
+      window.location.replace("/missions");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");
     } finally {

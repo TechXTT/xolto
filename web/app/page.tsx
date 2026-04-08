@@ -12,7 +12,7 @@ export default function HomePage() {
     api.auth
       .me()
       .then(() => {
-        window.location.replace("/feed");
+        window.location.replace("/missions");
       })
       .catch(() => {
         setChecking(false);
@@ -33,13 +33,13 @@ export default function HomePage() {
       <section className="landing-hero">
         <div className="landing-copy">
           <span className="landing-kicker">Premium marketplace intelligence</span>
-          <h1>Find underpriced listings before everyone else does.</h1>
+          <h1>Buy used electronics without overpaying.</h1>
           <p>
-            MarktBot watches European marketplaces, scores fresh listings, and helps you turn a vague buying goal into a sharp search workflow.
+            markt scans second-hand listings, estimates fair value, flags risks, and tells you exactly which sellers to contact first.
           </p>
           <div className="hero-actions">
             <Link href="/login" className="btn-primary">
-              Sign in
+              Start a buy mission
             </Link>
             <Link href="/register" className="btn-secondary">
               Create account
@@ -69,15 +69,15 @@ export default function HomePage() {
           <div className="landing-list">
             <div className="landing-list-item">
               <span>01</span>
-              <p>Generate candidate searches from a product idea.</p>
+              <p>Create a mission for phones, laptops, or cameras.</p>
             </div>
             <div className="landing-list-item">
               <span>02</span>
-              <p>Track listings across marketplaces and shortlist the best ones.</p>
+              <p>Track matches with fair-value and risk analysis.</p>
             </div>
             <div className="landing-list-item">
               <span>03</span>
-              <p>Use the assistant to tighten your brief and resume later.</p>
+              <p>Compare saved options and message sellers with confidence.</p>
             </div>
           </div>
         </div>

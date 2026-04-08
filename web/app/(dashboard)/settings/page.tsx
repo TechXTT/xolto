@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useDashboardContext } from "../../../components/DashboardContext";
 import { api } from "../../../lib/api";
 
-const TIER_LABELS: Record<string, string> = { free: "Free", pro: "Pro", team: "Team" };
+const TIER_LABELS: Record<string, string> = { free: "Free", pro: "Pro", power: "Power", team: "Power" };
 
 export default function SettingsPage() {
   const { user } = useDashboardContext();
@@ -95,10 +95,10 @@ export default function SettingsPage() {
                 onUpgrade={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID ?? "")}
               />
               <PlanCard
-                name="Team"
+                name="Power"
                 price="€29"
                 highlight
-                features={["50 active searches", "1 minute polling", "Auto-messaging", "Priority support"]}
+                features={["Unlimited missions", "50 active searches", "1 minute polling", "Auto-messaging"]}
                 onUpgrade={() => void handleCheckout(process.env.NEXT_PUBLIC_STRIPE_TEAM_PRICE_ID ?? "")}
               />
             </div>

@@ -102,27 +102,26 @@ export default function LandingPage() {
               className="font-serif text-ink leading-[0.96] tracking-[-0.04em] mb-5"
               style={{ fontSize: "clamp(3rem, 6.5vw, 5.5rem)" }}
             >
-              Find the deal<br />
-              <em className="not-italic text-bright">before</em> anyone<br />
-              else does.
+              Buy used electronics<br />
+              <em className="not-italic text-bright">without</em><br />
+              overpaying.
             </h1>
 
             <p className="text-ink/60 text-[1.1rem] leading-[1.7] max-w-[50ch] mb-9">
-              Tell the AI what you want. It deploys search agents across European marketplaces,
-              scores every listing against fair market value, and surfaces only the deals worth your time.
+              markt scans second-hand listings, estimates fair value, flags risks, and tells you exactly which sellers to contact first.
             </p>
 
             <div className="flex flex-wrap gap-3 mb-10">
-              <a href={`${APP_URL}/register`} className="btn btn-primary">Start for free</a>
+              <a href={`${APP_URL}/register`} className="btn btn-primary">Start a buy mission</a>
               <a href={`${APP_URL}/login`} className="btn btn-ghost">Sign in</a>
             </div>
 
             <div className="flex items-center gap-2.5 text-[0.8125rem] text-ink/38">
-              <span>Watches Marktplaats</span>
+              <span>Phones</span>
               <span className="w-1 h-1 rounded-full bg-ink/38" />
-              <span>Vinted</span>
+              <span>Laptops</span>
               <span className="w-1 h-1 rounded-full bg-ink/38" />
-              <span>OLX Bulgaria</span>
+              <span>Cameras</span>
               <span className="w-1 h-1 rounded-full bg-ink/38" />
               <span>and more</span>
             </div>
@@ -402,10 +401,10 @@ export default function LandingPage() {
 
           <nav className="flex flex-wrap justify-start lg:justify-center gap-7">
             {[
-              ["Feed",       `${APP_URL}/feed`],
-              ["Searches",   `${APP_URL}/searches`],
-              ["Shortlist",  `${APP_URL}/shortlist`],
-              ["Assistant",  `${APP_URL}/assistant`],
+              ["Missions",   `${APP_URL}/missions`],
+              ["Matches",    `${APP_URL}/matches`],
+              ["Saved",      `${APP_URL}/saved`],
+              ["Settings",   `${APP_URL}/settings`],
               ["Pricing",    "#pricing"],
             ].map(([label, href]) => (
               <a key={label} href={href} className="text-[0.875rem] text-ink/38 hover:text-ink transition-colors">
