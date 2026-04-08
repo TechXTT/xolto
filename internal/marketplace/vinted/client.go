@@ -100,22 +100,8 @@ func matchesCondition(condition string, allowed []string) bool {
 		return true
 	}
 	for _, value := range allowed {
-		normalized := strings.ToLower(strings.TrimSpace(value))
-		switch normalized {
-		case condition:
+		if strings.ToLower(strings.TrimSpace(value)) == condition {
 			return true
-		case "zo goed als nieuw":
-			if condition == "like_new" {
-				return true
-			}
-		case "gebruikt":
-			if condition == "good" || condition == "fair" {
-				return true
-			}
-		case "nieuw":
-			if condition == "new" {
-				return true
-			}
 		}
 	}
 	return false
