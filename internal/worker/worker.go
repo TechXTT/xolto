@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/TechXTT/marktbot/internal/marketplace"
 	"github.com/TechXTT/marktbot/internal/models"
@@ -14,12 +15,31 @@ import (
 )
 
 type UserWorker struct {
-	specs    []models.SearchSpec
-	db       store.Store
-	registry *marketplace.Registry
-	scorer   *scorer.Scorer
-	notifier notify.Dispatcher
-	minScore float64
+	specs         []models.SearchSpec
+	db            store.Store
+	registry      *marketplace.Registry
+	scorer        *scorer.Scorer
+	notifier      notify.Dispatcher
+	emailNotifier *notify.EmailNotifier
+	minScore      float64
+}
+
+// titleMatchesQuery returns false when a multi-token query has fewer than 2
+// tokens present in the listing title, catching obvious category mismatches
+// (e.g. a Sony phone surfaced by a "sony camera" search) before scoring.
+func titleMatchesQuery(title, query string) bool {
+	lower := strings.ToLower(title)
+	tokens := strings.Fields(strings.ToLower(query))
+	matches := 0
+	for _, t := range tokens {
+		if len(t) >= 2 && strings.Contains(lower, t) {
+			matches++
+		}
+	}
+	if len(tokens) <= 1 {
+		return matches > 0
+	}
+	return matches >= 2
 }
 
 func (w *UserWorker) RunCycle(ctx context.Context) error {
@@ -38,13 +58,16 @@ func (w *UserWorker) RunCycle(ctx context.Context) error {
 			continue
 		}
 		for _, listing := range listings {
+			if !titleMatchesQuery(listing.Title, spec.Query) {
+				continue
+			}
 			if listing.Price > 0 {
 				_ = w.db.RecordPrice(spec.Query, spec.CategoryID, listing.Price)
 			}
 			isNew, _ := w.db.IsNew(spec.UserID, listing.ItemID)
 			prevScore, hadPrev, _ := w.db.GetListingScore(spec.UserID, listing.ItemID)
 			scored := w.scorer.Score(ctx, listing, spec)
-			_ = w.db.SaveListing(spec.UserID, listing, spec.Query, scored.Score)
+			_ = w.db.SaveListing(spec.UserID, listing, spec.Query, scored)
 
 			crossed := !isNew && hadPrev && prevScore < w.minScore && scored.Score >= w.minScore
 			if !isNew && !crossed {
@@ -61,6 +84,11 @@ func (w *UserWorker) RunCycle(ctx context.Context) error {
 					"deal":   scored,
 				})
 				w.notifier.Publish(spec.UserID, string(payload))
+			}
+			if w.emailNotifier != nil && w.emailNotifier.Enabled() {
+				if user, err := w.db.GetUserByID(spec.UserID); err == nil && user != nil && user.Email != "" {
+					_ = w.emailNotifier.SendDealAlert(user.Email, listing, scored.Score)
+				}
 			}
 			slog.Info("worker deal found", "user", spec.UserID, "title", listing.Title, "score", fmt.Sprintf("%.1f", scored.Score))
 		}
