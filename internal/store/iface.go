@@ -28,7 +28,7 @@ type Writer interface {
 	SaveActionDraft(draft models.ActionDraft) error
 	SaveAssistantSession(session models.AssistantSession) error
 	ClearAssistantSession(userID string) error
-	SaveListing(userID string, l models.Listing, query string, score float64) error
+	SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error
 	RecordPrice(query string, categoryID int, price int) error
 	MarkOffered(userID, itemID string) error
 	CreateUser(email, hash, name string) (string, error)

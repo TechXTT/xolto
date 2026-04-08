@@ -18,6 +18,14 @@ type Listing struct {
 	ImageURLs     []string
 	CategoryID    int
 	Attributes    map[string]string // condition, brand, etc.
+	// Analysis fields: zero-value when listing comes from a marketplace search;
+	// populated when loaded from the store (ListRecentListings).
+	Score      float64
+	FairPrice  int // cents
+	OfferPrice int // cents
+	Confidence float64
+	Reason     string
+	RiskFlags  []string
 }
 
 type Seller struct {
@@ -41,6 +49,7 @@ type ScoredListing struct {
 	ReasoningSource string
 	SearchAdvice    string
 	ComparableDeals []ComparableDeal
+	RiskFlags       []string
 }
 
 type PricePoint struct {
@@ -66,6 +75,7 @@ type DealAnalysis struct {
 	Source          string
 	ComparableDeals []ComparableDeal
 	SearchAdvice    string
+	Relevant        bool // false means the AI judged this listing unrelated to the search
 }
 
 type RecommendationLabel string

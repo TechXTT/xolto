@@ -77,13 +77,13 @@ func TestListingQueriesAreScopedPerUser(t *testing.T) {
 	listingA := models.Listing{ItemID: "m1", Title: "Sony A7 III", Price: 100000, PriceType: "fixed"}
 	listingB := models.Listing{ItemID: "m2", Title: "Sony A6400", Price: 80000, PriceType: "fixed"}
 
-	if err := st.SaveListing("u1", listingA, "sony camera", 8.5); err != nil {
+	if err := st.SaveListing("u1", listingA, "sony camera", models.ScoredListing{Score: 8.5}); err != nil {
 		t.Fatalf("SaveListing(u1, m1) error = %v", err)
 	}
-	if err := st.SaveListing("u1", listingB, "sony camera", 7.8); err != nil {
+	if err := st.SaveListing("u1", listingB, "sony camera", models.ScoredListing{Score: 7.8}); err != nil {
 		t.Fatalf("SaveListing(u1, m2) error = %v", err)
 	}
-	if err := st.SaveListing("u2", models.Listing{ItemID: "m3", Title: "Fuji X-T3", Price: 90000, PriceType: "fixed"}, "sony camera", 9.1); err != nil {
+	if err := st.SaveListing("u2", models.Listing{ItemID: "m3", Title: "Fuji X-T3", Price: 90000, PriceType: "fixed"}, "sony camera", models.ScoredListing{Score: 9.1}); err != nil {
 		t.Fatalf("SaveListing(u2, m3) error = %v", err)
 	}
 

@@ -39,15 +39,16 @@ func NewPostgres(ctx context.Context, databaseURL string) (*PostgresStore, error
 func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS listings (
-			item_id TEXT PRIMARY KEY,
-			title TEXT NOT NULL,
-			price INTEGER NOT NULL,
+			item_id    TEXT PRIMARY KEY,
+			title      TEXT NOT NULL,
+			price      INTEGER NOT NULL,
 			price_type TEXT NOT NULL DEFAULT '',
-			score DOUBLE PRECISION NOT NULL DEFAULT 0,
-			offered BOOLEAN NOT NULL DEFAULT FALSE,
-			query TEXT NOT NULL DEFAULT '',
+			score      DOUBLE PRECISION NOT NULL DEFAULT 0,
+			offered    BOOLEAN NOT NULL DEFAULT FALSE,
+			query      TEXT NOT NULL DEFAULT '',
+			image_urls TEXT NOT NULL DEFAULT '[]',
 			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			last_seen  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 
 		CREATE TABLE IF NOT EXISTS price_history (
@@ -171,7 +172,20 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Add image_urls column to existing databases that pre-date this field.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_urls TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS condition TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS marketplace_id TEXT NOT NULL DEFAULT 'marktplaats'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS fair_price INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS offer_price INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS reasoning TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS risk_flags TEXT NOT NULL DEFAULT '[]'`)
+	return nil
 }
 
 func (s *PostgresStore) Close() error {
@@ -538,7 +552,10 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int) ([]models.L
 		limit = 50
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, price_type, last_seen
+		SELECT item_id, title, price, price_type, image_urls,
+		       url, condition, marketplace_id,
+		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       last_seen
 		FROM listings
 		WHERE item_id LIKE $1
 		ORDER BY last_seen DESC
@@ -552,12 +569,22 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int) ([]models.L
 	var listings []models.Listing
 	for rows.Next() {
 		var listing models.Listing
-		if err := rows.Scan(&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &listing.Date); err != nil {
+		var imageURLsJSON, riskFlagsJSON string
+		if err := rows.Scan(
+			&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+			&listing.URL, &listing.Condition, &listing.MarketplaceID,
+			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
+			&listing.Reason, &riskFlagsJSON, &listing.Date,
+		); err != nil {
 			return nil, err
 		}
 		listing.ItemID = unscopedItemID(listing.ItemID)
-		listing.MarketplaceID = "marktplaats"
-		listing.CanonicalID = "marktplaats:" + listing.ItemID
+		if strings.TrimSpace(listing.MarketplaceID) == "" {
+			listing.MarketplaceID = "marktplaats"
+		}
+		listing.CanonicalID = listing.MarketplaceID + ":" + listing.ItemID
+		_ = json.Unmarshal([]byte(imageURLsJSON), &listing.ImageURLs)
+		_ = json.Unmarshal([]byte(riskFlagsJSON), &listing.RiskFlags)
 		listings = append(listings, listing)
 	}
 	return listings, rows.Err()
@@ -601,15 +628,34 @@ func (s *PostgresStore) GetListingScore(userID, itemID string) (float64, bool, e
 	return score, err == nil, err
 }
 
-func (s *PostgresStore) SaveListing(userID string, l models.Listing, query string, score float64) error {
+func (s *PostgresStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
+	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
+	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
 	_, err := s.db.Exec(`
-		INSERT INTO listings (item_id, title, price, price_type, score, query, first_seen, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		INSERT INTO listings (
+			item_id, title, price, price_type, score, query, image_urls,
+			url, condition, marketplace_id,
+			fair_price, offer_price, confidence, reasoning, risk_flags,
+			first_seen, last_seen
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
 		ON CONFLICT(item_id) DO UPDATE SET
-			price = EXCLUDED.price,
-			score = EXCLUDED.score,
-			last_seen = NOW()
-	`, scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, score, query)
+			price          = EXCLUDED.price,
+			score          = EXCLUDED.score,
+			image_urls     = EXCLUDED.image_urls,
+			url            = EXCLUDED.url,
+			condition      = EXCLUDED.condition,
+			marketplace_id = EXCLUDED.marketplace_id,
+			fair_price     = EXCLUDED.fair_price,
+			offer_price    = EXCLUDED.offer_price,
+			confidence     = EXCLUDED.confidence,
+			reasoning      = EXCLUDED.reasoning,
+			risk_flags     = EXCLUDED.risk_flags,
+			last_seen      = NOW()
+	`,
+		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, string(imageURLsJSON),
+		l.URL, l.Condition, l.MarketplaceID,
+		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
+	)
 	return err
 }
 

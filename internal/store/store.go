@@ -46,15 +46,16 @@ func New(dbPath string) (*SQLiteStore, error) {
 func migrate(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS listings (
-			item_id    TEXT PRIMARY KEY,
-			title      TEXT NOT NULL,
-			price      INTEGER NOT NULL,
-			price_type TEXT NOT NULL DEFAULT '',
-			score      REAL NOT NULL DEFAULT 0,
-			offered    INTEGER NOT NULL DEFAULT 0,
-			query      TEXT NOT NULL DEFAULT '',
-			first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			last_seen  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			item_id     TEXT PRIMARY KEY,
+			title       TEXT NOT NULL,
+			price       INTEGER NOT NULL,
+			price_type  TEXT NOT NULL DEFAULT '',
+			score       REAL NOT NULL DEFAULT 0,
+			offered     INTEGER NOT NULL DEFAULT 0,
+			query       TEXT NOT NULL DEFAULT '',
+			image_urls  TEXT NOT NULL DEFAULT '[]',
+			first_seen  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 
 		CREATE TABLE IF NOT EXISTS price_history (
@@ -178,7 +179,20 @@ func migrate(db *sql.DB) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Add image_urls column to existing databases that pre-date this field.
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN image_urls TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN url TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN condition TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN marketplace_id TEXT NOT NULL DEFAULT 'marktplaats'`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN fair_price INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN offer_price INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN confidence REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN risk_flags TEXT NOT NULL DEFAULT '[]'`)
+	return nil
 }
 
 func (s *SQLiteStore) Close() error {
@@ -601,7 +615,10 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int) ([]models.Lis
 		limit = 50
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, price_type, last_seen
+		SELECT item_id, title, price, price_type, image_urls,
+		       url, condition, marketplace_id,
+		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       last_seen
 		FROM listings
 		WHERE item_id LIKE ?
 		ORDER BY last_seen DESC
@@ -615,14 +632,23 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int) ([]models.Lis
 	var listings []models.Listing
 	for rows.Next() {
 		var listing models.Listing
-		var lastSeen string
-		if err := rows.Scan(&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &lastSeen); err != nil {
+		var imageURLsJSON, riskFlagsJSON, lastSeen string
+		if err := rows.Scan(
+			&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+			&listing.URL, &listing.Condition, &listing.MarketplaceID,
+			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
+			&listing.Reason, &riskFlagsJSON, &lastSeen,
+		); err != nil {
 			return nil, err
 		}
 		listing.ItemID = unscopedItemID(listing.ItemID)
-		listing.MarketplaceID = "marktplaats"
-		listing.CanonicalID = "marktplaats:" + listing.ItemID
+		if strings.TrimSpace(listing.MarketplaceID) == "" {
+			listing.MarketplaceID = "marktplaats"
+		}
+		listing.CanonicalID = listing.MarketplaceID + ":" + listing.ItemID
 		listing.Date, _ = parseSQLiteTime(lastSeen)
+		_ = json.Unmarshal([]byte(imageURLsJSON), &listing.ImageURLs)
+		_ = json.Unmarshal([]byte(riskFlagsJSON), &listing.RiskFlags)
 		listings = append(listings, listing)
 	}
 	return listings, rows.Err()
@@ -714,16 +740,35 @@ func (s *SQLiteStore) GetListingScore(userID, itemID string) (float64, bool, err
 	return score, true, nil
 }
 
-// SaveListing stores or updates a listing.
-func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string, score float64) error {
+// SaveListing stores or updates a listing and its scored analysis.
+func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
+	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
+	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
 	_, err := s.db.Exec(`
-		INSERT INTO listings (item_id, title, price, price_type, score, query, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO listings (
+			item_id, title, price, price_type, score, query, image_urls,
+			url, condition, marketplace_id,
+			fair_price, offer_price, confidence, reasoning, risk_flags,
+			first_seen, last_seen
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(item_id) DO UPDATE SET
-			price = excluded.price,
-			score = excluded.score,
-			last_seen = CURRENT_TIMESTAMP
-	`, scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, score, query)
+			price          = excluded.price,
+			score          = excluded.score,
+			image_urls     = excluded.image_urls,
+			url            = excluded.url,
+			condition      = excluded.condition,
+			marketplace_id = excluded.marketplace_id,
+			fair_price     = excluded.fair_price,
+			offer_price    = excluded.offer_price,
+			confidence     = excluded.confidence,
+			reasoning      = excluded.reasoning,
+			risk_flags     = excluded.risk_flags,
+			last_seen      = CURRENT_TIMESTAMP
+	`,
+		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, string(imageURLsJSON),
+		l.URL, l.Condition, l.MarketplaceID,
+		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
+	)
 	return err
 }
 
