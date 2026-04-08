@@ -42,7 +42,7 @@ Best if you want the multi-user API, dashboard, SSE feed, auth flow, and the eme
 - Runs a Discord assistant with slash commands and conversational follow-up questions
 - Stores shopping briefs, shortlist items, drafts, and seen listings in SQLite or Postgres
 - Exposes a multi-user HTTP API for auth, searches, feed, shortlist, assistant chat, SSE, and billing hooks
-- Ships with a small Next.js dashboard in `web/`
+- Ships with a Next.js dashboard in `web/` and a separate landing site in `landing/`
 
 ## Demo Flow
 
@@ -79,15 +79,17 @@ marktbot/
 |   |-- scorer/
 |   |-- store/
 |   `-- worker/
-|-- web/            # Next.js dashboard
-|-- config.yaml
+|-- web/            # Next.js product dashboard
+|-- landing/        # Next.js marketing/landing site
+|-- config.yaml.example
+|-- .env.example
 `-- README.md
 ```
 
 ## Requirements
 
-- Go 1.25+
-- Node.js 18+ for the dashboard
+- Go 1.25.0+ for the backend and CLI
+- Node.js 18+ and npm for `web/` and `landing/`
 - Chrome or Chromium if you want Rod-based browser automation
 - A Discord webhook for passive alerts
 - A Discord bot token for the interactive assistant
@@ -95,45 +97,70 @@ marktbot/
 
 ## Quick Start
 
-### CLI mode
+### Full local stack
 
 1. Install dependencies:
 
-```powershell
+```bash
 go mod download
+npm --prefix web install
+npm --prefix landing install
 ```
 
-2. Create `config.yaml` in the repo root.
+2. Create local config files from the checked-in examples:
 
-3. Run one dry cycle:
-
-```powershell
-go run ./cmd/marktbot --config config.yaml --once --dry-run --verbose
+```bash
+cp config.yaml.example config.yaml
+cp .env.example .env
+cp web/.env.example web/.env.local
 ```
 
-### Server mode
+3. Edit `.env` and set at least `JWT_SECRET`.
 
-1. Set the required env vars:
+Local defaults already work for the rest of the core server setup:
 
-```powershell
-$env:JWT_SECRET="change-me"
-$env:DATABASE_URL="marktbot-server.db"
-$env:APP_BASE_URL="http://localhost:3000"
-```
+- `DATABASE_URL=marktbot-server.db`
+- `APP_BASE_URL=http://localhost:3000`
+- `SERVER_ADDR=:8000`
 
-2. Start the API:
+4. Start the API server:
 
-```powershell
+```bash
 go run ./cmd/server
 ```
 
-3. Start the dashboard:
+The server loads `.env` automatically and creates the SQLite schema on first start.
 
-```powershell
-cd web
-npm install
-$env:NEXT_PUBLIC_API_URL="http://localhost:8000"
-npm run dev
+5. Start the app dashboard in another terminal:
+
+```bash
+npm --prefix web run dev
+```
+
+The dashboard runs on `http://localhost:3000`.
+
+6. Start the landing page in another terminal if you want the separate marketing site locally:
+
+```bash
+npm --prefix landing run dev
+```
+
+The landing page runs on `http://localhost:3001` and links to `http://localhost:3000` by default. If your app dashboard runs elsewhere, set `NEXT_PUBLIC_APP_URL` in `landing/.env.local`.
+
+### CLI-only mode
+
+1. Copy the example config:
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+2. Edit `config.yaml` with at least one search, or enable Discord assistant-only mode.
+
+3. Run one dry cycle:
+
+```bash
+go run ./cmd/marktbot --config config.yaml --once --dry-run --verbose
 ```
 
 ## Screenshots
@@ -152,7 +179,7 @@ If you want, the next README pass can add real screenshots or GIFs from the dash
 
 The CLI entrypoint is:
 
-```powershell
+```bash
 go run ./cmd/marktbot
 ```
 
@@ -167,7 +194,7 @@ Flags:
 
 Examples:
 
-```powershell
+```bash
 go run ./cmd/marktbot --config config.yaml
 go run ./cmd/marktbot --config config.yaml --once
 go run ./cmd/marktbot --config config.yaml --once --dry-run --verbose
@@ -307,7 +334,7 @@ Typical flow:
 
 You can generate search presets from the CLI:
 
-```powershell
+```bash
 go run ./cmd/marktbot --config config.yaml --generate-searches "sony cameras"
 ```
 
@@ -333,9 +360,16 @@ The AI integration uses an OpenAI-compatible `/chat/completions` API.
 
 The server entrypoint is:
 
-```powershell
+```bash
 go run ./cmd/server
 ```
+
+Setup notes:
+
+- `cmd/server` loads `.env` automatically if it exists in the repo root
+- `JWT_SECRET` is required; the rest of the core local settings are prefilled in `.env.example`
+- `APP_BASE_URL` must match the dashboard origin for cookie auth and CORS; local default is `http://localhost:3000`
+- SQLite and Postgres schemas are created automatically on startup
 
 Required env vars:
 
@@ -371,6 +405,7 @@ The HTTP server currently exposes:
 - `GET /users/me`
 - `GET /searches`
 - `POST /searches`
+- `POST /searches/run`
 - `POST /searches/generate`
 - `PUT /searches/:id`
 - `DELETE /searches/:id`
@@ -384,6 +419,7 @@ The HTTP server currently exposes:
 - `GET /actions`
 - `GET /events`
 - `POST /billing/checkout`
+- `GET /billing/portal`
 - `POST /billing/webhook`
 
 Auth notes:
@@ -409,9 +445,9 @@ Likely next product expansions:
 - better shortlist collaboration and team workflows
 - richer automation with tighter approval gates
 
-## Web Dashboard
+## Frontends
 
-The dashboard lives in `web/` and currently covers:
+The authenticated app dashboard lives in `web/` and currently covers:
 
 - registration and login
 - feed view
@@ -420,21 +456,25 @@ The dashboard lives in `web/` and currently covers:
 - assistant chat
 - billing/settings surface
 
-Run it locally:
+Run the dashboard locally:
 
-```powershell
-cd web
-npm install
-$env:NEXT_PUBLIC_API_URL="http://localhost:8000"
-npm run dev
+```bash
+npm --prefix web run dev
 ```
 
-Build it:
+Build the dashboard:
 
-```powershell
-cd web
-npm run build
+```bash
+npm --prefix web run build
 ```
+
+The marketing site lives in `landing/` and runs separately on port `3001`:
+
+```bash
+npm --prefix landing run dev
+```
+
+If the dashboard is not running on `http://localhost:3000`, set `NEXT_PUBLIC_APP_URL` in `landing/.env.local` so the landing page links to the correct app origin.
 
 ## Notifications and Messaging
 
@@ -462,16 +502,25 @@ Recommended approach:
 
 Useful commands:
 
-```powershell
+```bash
 go test ./...
 go build ./...
 go run ./cmd/marktbot --once --dry-run --verbose
 go run ./cmd/server
 ```
 
+Frontend dev/build:
+
+```bash
+npm --prefix web run dev
+npm --prefix web run build
+npm --prefix landing run dev
+npm --prefix landing run build
+```
+
 For local state reset:
 
-```powershell
+```bash
 go run ./cmd/marktbot --cleanup all
 ```
 
