@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
 import { DashboardProvider } from "../../components/DashboardContext";
-import { api, ShortlistEntry, User } from "../../lib/api";
+import { api, Mission, ShortlistEntry, User } from "../../lib/api";
 
 function IconAI() {
   return (
@@ -48,9 +48,9 @@ function IconSettings() {
 }
 
 const NAV = [
-  { href: "/assistant", label: "Brief", description: "Tell the AI what you want", Icon: IconAI },
-  { href: "/feed", label: "Deals", description: "AI-surfaced matches", Icon: IconRadar },
-  { href: "/shortlist", label: "Saved", description: "Deals you're considering", Icon: IconSaved },
+  { href: "/missions", label: "Missions", description: "Define what to buy", Icon: IconAI },
+  { href: "/matches", label: "Matches", description: "Mission-scoped deals", Icon: IconRadar },
+  { href: "/saved", label: "Saved", description: "Compare top picks", Icon: IconSaved },
   { href: "/settings", label: "Settings", description: "Account and billing", Icon: IconSettings },
 ];
 
@@ -68,25 +68,67 @@ function normalizeShortlist(items: ShortlistEntry[]) {
   return items.filter((item) => item.Status !== "removed");
 }
 
+function resolveActiveMissionID(missions: Mission[], currentID: number, fallbackStoredID = 0) {
+  if (missions.length === 0) return 0;
+  const preferred = currentID > 0 ? currentID : fallbackStoredID;
+  if (preferred > 0 && missions.some((mission) => mission.ID === preferred)) {
+    return preferred;
+  }
+  return missions[0].ID ?? 0;
+}
+
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [missions, setMissions] = useState<Mission[]>([]);
+  const [activeMissionId, setActiveMissionId] = useState(0);
   const [shortlist, setShortlist] = useState<ShortlistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem("markt_active_mission_id");
+    if (!raw) return;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setActiveMissionId(parsed);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeMissionId > 0) {
+      window.localStorage.setItem("markt_active_mission_id", String(activeMissionId));
+    } else {
+      window.localStorage.removeItem("markt_active_mission_id");
+    }
+  }, [activeMissionId]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function bootstrap() {
       try {
-        const [me, shortlistRes] = await Promise.all([
+        const [me, shortlistRes, missionsRes] = await Promise.all([
           api.auth.me(),
           api.shortlist.get().catch(() => ({ shortlist: [] as ShortlistEntry[] })),
+          api.missions.list().catch(() => ({ missions: [] as Mission[] })),
         ]);
         if (cancelled) return;
         setUser(me);
         setShortlist(normalizeShortlist(shortlistRes.shortlist));
+        const loadedMissions = Array.isArray(missionsRes.missions) ? missionsRes.missions : [];
+        setMissions(loadedMissions);
+        const storedMissionRaw = typeof window !== "undefined" ? window.localStorage.getItem("markt_active_mission_id") : "";
+        const storedMissionID = Number(storedMissionRaw);
+        setActiveMissionId((current) =>
+          resolveActiveMissionID(
+            loadedMissions,
+            current,
+            Number.isFinite(storedMissionID) && storedMissionID > 0 ? storedMissionID : 0,
+          ),
+        );
       } catch (err) {
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : "";
@@ -112,6 +154,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   async function refreshShortlist() {
     const res = await api.shortlist.get();
     setShortlist(normalizeShortlist(res.shortlist));
+  }
+
+  async function refreshMissions() {
+    const res = await api.missions.list();
+    const next = Array.isArray(res.missions) ? res.missions : [];
+    setMissions(next);
+    setActiveMissionId((current) => resolveActiveMissionID(next, current));
   }
 
   const shortlistIDs = new Set(shortlist.map((item) => item.ItemID));
@@ -142,6 +191,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     <DashboardProvider
       value={{
         user,
+        missions,
+        activeMissionId,
+        setActiveMission: (missionID: number) => setActiveMissionId(missionID > 0 ? missionID : 0),
+        refreshMissions,
         shortlist,
         shortlistIDs,
         refreshShortlist,
@@ -161,8 +214,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               </svg>
             </div>
             <div>
-              <p className="brand-title">MarktBot</p>
-              <p className="brand-subtitle">AI deal intelligence</p>
+              <p className="brand-title">markt</p>
+              <p className="brand-subtitle">Used electronics copilot</p>
             </div>
           </div>
 
@@ -222,11 +275,17 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <span />
               </button>
               <div>
-                <p className="topbar-eyebrow">MarktBot</p>
+                <p className="topbar-eyebrow">markt</p>
                 <h1 className="topbar-title">{currentNav.label}</h1>
               </div>
             </div>
             <div className="topbar-right">
+              {activeMissionId > 0 && (
+                <div className="topbar-chip">
+                  <span className="chip-dot" />
+                  Mission #{activeMissionId}
+                </div>
+              )}
               <div className="topbar-chip">
                 <span className="chip-dot" />
                 {shortlist.length} saved

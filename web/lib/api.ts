@@ -12,6 +12,7 @@ export type User = {
 export type SearchSpec = {
   ID: number;
   UserID?: string;
+  ProfileID?: number;
   Name: string;
   Query: string;
   MarketplaceID: string;
@@ -29,6 +30,7 @@ export type SearchSpec = {
 
 export type Listing = {
   ItemID: string;
+  ProfileID?: number;
   Title: string;
   Price: number;
   PriceType?: string;
@@ -44,8 +46,9 @@ export type Listing = {
   RiskFlags?: string[];
 };
 
-export type ShoppingProfile = {
+export type Mission = {
   ID?: number;
+  UserID?: string;
   Name: string;
   TargetQuery?: string;
   CategoryID?: number;
@@ -55,19 +58,30 @@ export type ShoppingProfile = {
   RequiredFeatures?: string[];
   NiceToHave?: string[];
   SearchQueries?: string[];
+  Status?: "active" | "paused" | "completed";
+  Urgency?: "urgent" | "flexible" | "no-rush";
+  AvoidFlags?: string[];
+  TravelRadius?: number;
+  Category?: "phone" | "laptop" | "camera" | "other" | string;
+  Active?: boolean;
+  MatchCount?: number;
+  LastMatchAt?: string;
 };
+
+export type ShoppingProfile = Mission;
 
 export type AssistantSession = {
   UserID: string;
   PendingIntent: string;
   PendingQuestion: string;
-  DraftProfile?: ShoppingProfile | null;
+  DraftMission?: Mission | null;
   LastAssistantMsg: string;
   UpdatedAt?: string;
 };
 
 export type Recommendation = {
   Listing: Listing;
+  Mission?: Mission;
   Label: string;
   Verdict: string;
   Concerns: string[];
@@ -83,6 +97,7 @@ export type Recommendation = {
 
 export type ShortlistEntry = {
   ID: number;
+  MissionID?: number;
   ItemID: string;
   Title: string;
   URL: string;
@@ -100,7 +115,7 @@ export type AssistantReply = {
   Message: string;
   Expecting: boolean;
   Intent?: string;
-  Profile?: ShoppingProfile | null;
+  Mission?: Mission | null;
   Recommendations?: Recommendation[];
 };
 
@@ -275,7 +290,24 @@ export const api = {
       }),
   },
   listings: {
-    feed: async () => apiFetch<{ listings: Listing[]; user_id: string }>("/listings/feed"),
+    feed: async (missionID?: number) => {
+      const query = missionID && missionID > 0 ? `?mission_id=${missionID}` : "";
+      return apiFetch<{ listings: Listing[]; user_id: string }>(`/listings/feed${query}`);
+    },
+  },
+  missions: {
+    list: async () => apiFetch<{ missions: Mission[] }>("/missions"),
+    create: async (mission: Partial<Mission>) =>
+      apiFetch<Mission>("/missions", { method: "POST", body: JSON.stringify(mission) }),
+    get: async (id: number) => apiFetch<Mission>(`/missions/${id}`),
+    update: async (id: number, mission: Partial<Mission>) =>
+      apiFetch<Mission>(`/missions/${id}`, { method: "PUT", body: JSON.stringify(mission) }),
+    updateStatus: async (id: number, status: "active" | "paused" | "completed") =>
+      apiFetch<Mission>(`/missions/${id}/status`, { method: "PUT", body: JSON.stringify({ status }) }),
+    matches: async (id: number, params?: { limit?: number }) => {
+      const limit = params?.limit ? `?limit=${params.limit}` : "";
+      return apiFetch<{ mission: Mission; listings: Listing[] }>(`/missions/${id}/matches${limit}`);
+    },
   },
   shortlist: {
     get: async () => apiFetch<{ shortlist: ShortlistEntry[] }>("/shortlist"),

@@ -1,5 +1,5 @@
-import { AssistantChat } from "../../../components/AssistantChat";
+import { redirect } from "next/navigation";
 
-export default function AssistantPage() {
-  return <AssistantChat />;
+export default function AssistantRedirectPage() {
+  redirect("/missions");
 }
