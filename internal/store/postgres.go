@@ -46,6 +46,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			score      DOUBLE PRECISION NOT NULL DEFAULT 0,
 			offered    BOOLEAN NOT NULL DEFAULT FALSE,
 			query      TEXT NOT NULL DEFAULT '',
+			profile_id BIGINT NOT NULL DEFAULT 0,
 			image_urls TEXT NOT NULL DEFAULT '[]',
 			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			last_seen  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -76,6 +77,11 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			zip_code TEXT NOT NULL DEFAULT '',
 			distance INTEGER NOT NULL DEFAULT 0,
 			search_queries JSONB NOT NULL DEFAULT '[]'::jsonb,
+			status TEXT NOT NULL DEFAULT 'active',
+			urgency TEXT NOT NULL DEFAULT 'flexible',
+			avoid_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+			travel_radius INTEGER NOT NULL DEFAULT 0,
+			category TEXT NOT NULL DEFAULT 'other',
 			active BOOLEAN NOT NULL DEFAULT TRUE,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -147,6 +153,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS search_configs (
 			id BIGSERIAL PRIMARY KEY,
 			user_id TEXT NOT NULL,
+			profile_id BIGINT NOT NULL DEFAULT 0,
 			name TEXT NOT NULL DEFAULT '',
 			query TEXT NOT NULL DEFAULT '',
 			marketplace_id TEXT NOT NULL DEFAULT 'marktplaats',
@@ -165,6 +172,8 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_search_configs_user ON search_configs(user_id, enabled, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen DESC);
 
 		CREATE TABLE IF NOT EXISTS stripe_events (
 			id BIGSERIAL PRIMARY KEY,
@@ -185,6 +194,15 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS reasoning TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS risk_flags TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS urgency TEXT NOT NULL DEFAULT 'flexible'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS avoid_flags JSONB NOT NULL DEFAULT '[]'::jsonb`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS travel_radius INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'other'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen DESC)`)
 	return nil
 }
 
@@ -192,26 +210,43 @@ func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *PostgresStore) UpsertShoppingProfile(profile models.ShoppingProfile) (int64, error) {
-	preferredJSON, _ := json.Marshal(profile.PreferredCondition)
-	requiredJSON, _ := json.Marshal(profile.RequiredFeatures)
-	niceJSON, _ := json.Marshal(profile.NiceToHave)
-	queriesJSON, _ := json.Marshal(profile.SearchQueries)
+func (s *PostgresStore) UpsertMission(mission models.Mission) (int64, error) {
+	preferredJSON, _ := json.Marshal(mission.PreferredCondition)
+	requiredJSON, _ := json.Marshal(mission.RequiredFeatures)
+	niceJSON, _ := json.Marshal(mission.NiceToHave)
+	queriesJSON, _ := json.Marshal(mission.SearchQueries)
+	avoidFlagsJSON, _ := json.Marshal(mission.AvoidFlags)
 
-	if profile.ID > 0 {
+	if strings.TrimSpace(mission.Status) == "" {
+		mission.Status = "active"
+	}
+	if strings.TrimSpace(mission.Urgency) == "" {
+		mission.Urgency = "flexible"
+	}
+	if strings.TrimSpace(mission.Category) == "" {
+		mission.Category = "other"
+	}
+	if mission.TravelRadius == 0 && mission.Distance > 0 {
+		mission.TravelRadius = mission.Distance / 1000
+	}
+
+	if mission.ID > 0 {
 		_, err := s.db.Exec(`
 			UPDATE shopping_profiles
 			SET name = $1, target_query = $2, category_id = $3, budget_max = $4, budget_stretch = $5,
 			    preferred_condition = $6::jsonb, required_features = $7::jsonb, nice_to_have = $8::jsonb,
 			    risk_tolerance = $9, zip_code = $10, distance = $11, search_queries = $12::jsonb,
-			    active = $13, updated_at = NOW()
-			WHERE id = $14
+			    status = $13, urgency = $14, avoid_flags = $15::jsonb, travel_radius = $16, category = $17,
+			    active = $18, updated_at = NOW()
+			WHERE id = $19
 		`,
-			profile.Name, profile.TargetQuery, profile.CategoryID, profile.BudgetMax, profile.BudgetStretch,
-			string(preferredJSON), string(requiredJSON), string(niceJSON), profile.RiskTolerance,
-			profile.ZipCode, profile.Distance, string(queriesJSON), profile.Active, profile.ID,
+			mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
+			string(preferredJSON), string(requiredJSON), string(niceJSON), mission.RiskTolerance,
+			mission.ZipCode, mission.Distance, string(queriesJSON),
+			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+			mission.Active, mission.ID,
 		)
-		return profile.ID, err
+		return mission.ID, err
 	}
 
 	var id int64
@@ -219,47 +254,109 @@ func (s *PostgresStore) UpsertShoppingProfile(profile models.ShoppingProfile) (i
 		INSERT INTO shopping_profiles (
 			user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
-			zip_code, distance, search_queries, active
-		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14)
+			zip_code, distance, search_queries,
+			status, urgency, avoid_flags, travel_radius, category,
+			active
+		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, $17, $18, $19)
 		RETURNING id
 	`,
-		profile.UserID, profile.Name, profile.TargetQuery, profile.CategoryID, profile.BudgetMax, profile.BudgetStretch,
-		string(preferredJSON), string(requiredJSON), string(niceJSON), profile.RiskTolerance,
-		profile.ZipCode, profile.Distance, string(queriesJSON), profile.Active,
+		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
+		string(preferredJSON), string(requiredJSON), string(niceJSON), mission.RiskTolerance,
+		mission.ZipCode, mission.Distance, string(queriesJSON),
+		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+		mission.Active,
 	).Scan(&id)
 	return id, err
 }
 
-func (s *PostgresStore) GetActiveShoppingProfile(userID string) (*models.ShoppingProfile, error) {
+func (s *PostgresStore) GetActiveMission(userID string) (*models.Mission, error) {
 	row := s.db.QueryRow(`
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 		       preferred_condition::text, required_features::text, nice_to_have::text, risk_tolerance,
-		       zip_code, distance, search_queries::text, active, created_at, updated_at
+		       zip_code, distance, search_queries::text,
+		       status, urgency, avoid_flags::text, travel_radius, category,
+		       active, created_at, updated_at
 		FROM shopping_profiles
-		WHERE user_id = $1 AND active = TRUE
+		WHERE user_id = $1 AND active = TRUE AND status = 'active'
 		ORDER BY updated_at DESC
 		LIMIT 1
 	`, userID)
-
-	var profile models.ShoppingProfile
-	var preferredJSON, requiredJSON, niceJSON, queriesJSON string
-	err := row.Scan(
-		&profile.ID, &profile.UserID, &profile.Name, &profile.TargetQuery, &profile.CategoryID,
-		&profile.BudgetMax, &profile.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
-		&profile.RiskTolerance, &profile.ZipCode, &profile.Distance, &queriesJSON, &profile.Active,
-		&profile.CreatedAt, &profile.UpdatedAt,
-	)
+	mission, err := scanPGMission(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(preferredJSON), &profile.PreferredCondition)
-	_ = json.Unmarshal([]byte(requiredJSON), &profile.RequiredFeatures)
-	_ = json.Unmarshal([]byte(niceJSON), &profile.NiceToHave)
-	_ = json.Unmarshal([]byte(queriesJSON), &profile.SearchQueries)
-	return &profile, nil
+	return &mission, nil
+}
+
+func (s *PostgresStore) GetMission(id int64) (*models.Mission, error) {
+	row := s.db.QueryRow(`
+		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
+		       preferred_condition::text, required_features::text, nice_to_have::text, risk_tolerance,
+		       zip_code, distance, search_queries::text,
+		       status, urgency, avoid_flags::text, travel_radius, category,
+		       active, created_at, updated_at
+		FROM shopping_profiles
+		WHERE id = $1
+	`, id)
+	mission, err := scanPGMission(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &mission, nil
+}
+
+func (s *PostgresStore) ListMissions(userID string) ([]models.Mission, error) {
+	rows, err := s.db.Query(`
+		SELECT m.id, m.user_id, m.name, m.target_query, m.category_id, m.budget_max, m.budget_stretch,
+		       m.preferred_condition::text, m.required_features::text, m.nice_to_have::text, m.risk_tolerance,
+		       m.zip_code, m.distance, m.search_queries::text,
+		       m.status, m.urgency, m.avoid_flags::text, m.travel_radius, m.category,
+		       m.active, m.created_at, m.updated_at,
+		       COUNT(l.item_id) AS match_count,
+		       COALESCE(MAX(l.last_seen), TO_TIMESTAMP(0)) AS last_match_at
+		FROM shopping_profiles m
+		LEFT JOIN listings l
+			ON l.profile_id = m.id AND l.item_id LIKE $1
+		WHERE m.user_id = $2
+		GROUP BY m.id
+		ORDER BY m.updated_at DESC, m.id DESC
+	`, scopedItemPrefix(userID), userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.Mission, 0)
+	for rows.Next() {
+		mission, err := scanPGMissionWithStats(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mission)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpdateMissionStatus(id int64, status string) error {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "active", "paused", "completed":
+	default:
+		return fmt.Errorf("unsupported mission status %q", status)
+	}
+	active := status == "active"
+	_, err := s.db.Exec(`
+		UPDATE shopping_profiles
+		SET status = $1, active = $2, updated_at = NOW()
+		WHERE id = $3
+	`, status, active, id)
+	return err
 }
 
 func (s *PostgresStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
@@ -284,7 +381,7 @@ func (s *PostgresStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
 			status = EXCLUDED.status,
 			updated_at = NOW()
 	`,
-		entry.UserID, entry.ProfileID, entry.ItemID, entry.Title, entry.URL,
+		entry.UserID, entry.MissionID, entry.ItemID, entry.Title, entry.URL,
 		string(entry.RecommendationLabel), entry.RecommendationScore, entry.AskPrice, entry.FairPrice,
 		entry.Verdict, string(concernsJSON), string(questionsJSON), entry.Status,
 	)
@@ -342,8 +439,8 @@ func (s *PostgresStore) SaveConversationArtifact(userID string, intent models.Co
 
 func (s *PostgresStore) SaveAssistantSession(session models.AssistantSession) error {
 	draftJSON := "{}"
-	if session.DraftProfile != nil {
-		raw, err := json.Marshal(session.DraftProfile)
+	if session.DraftMission != nil {
+		raw, err := json.Marshal(session.DraftMission)
 		if err != nil {
 			return err
 		}
@@ -380,9 +477,9 @@ func (s *PostgresStore) GetAssistantSession(userID string) (*models.AssistantSes
 	}
 	draftJSON = strings.TrimSpace(draftJSON)
 	if draftJSON != "" && draftJSON != "{}" && draftJSON != "null" {
-		var draft models.ShoppingProfile
+		var draft models.Mission
 		if err := json.Unmarshal([]byte(draftJSON), &draft); err == nil {
-			session.DraftProfile = &draft
+			session.DraftMission = &draft
 		}
 	}
 	return &session, nil
@@ -454,7 +551,7 @@ func (s *PostgresStore) RecordStripeEvent(eventID string) error {
 
 func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 		       condition_json::text, offer_percentage, auto_message, message_template, attributes_json::text,
 		       enabled, check_interval_seconds
 		FROM search_configs
@@ -479,7 +576,7 @@ func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, er
 
 func (s *PostgresStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 		       condition_json::text, offer_percentage, auto_message, message_template, attributes_json::text,
 		       enabled, check_interval_seconds
 		FROM search_configs
@@ -514,12 +611,12 @@ func (s *PostgresStore) CreateSearchConfig(spec models.SearchSpec) (int64, error
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO search_configs (
-			user_id, name, query, marketplace_id, category_id, max_price, min_price,
+			user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 			condition_json, offer_percentage, auto_message, message_template, attributes_json,
 			enabled, check_interval_seconds
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13, $14)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15)
 		RETURNING id
-	`, spec.UserID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, spec.AutoMessage, spec.MessageTemplate, string(attributesJSON),
 		spec.Enabled, int64(spec.CheckInterval/time.Second),
 	).Scan(&id)
@@ -531,11 +628,11 @@ func (s *PostgresStore) UpdateSearchConfig(spec models.SearchSpec) error {
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	_, err := s.db.Exec(`
 		UPDATE search_configs
-		SET name = $1, query = $2, marketplace_id = $3, category_id = $4, max_price = $5, min_price = $6,
-		    condition_json = $7::jsonb, offer_percentage = $8, auto_message = $9, message_template = $10,
-		    attributes_json = $11::jsonb, enabled = $12, check_interval_seconds = $13, updated_at = NOW()
-		WHERE id = $14 AND user_id = $15
-	`, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+		SET profile_id = $1, name = $2, query = $3, marketplace_id = $4, category_id = $5, max_price = $6, min_price = $7,
+		    condition_json = $8::jsonb, offer_percentage = $9, auto_message = $10, message_template = $11,
+		    attributes_json = $12::jsonb, enabled = $13, check_interval_seconds = $14, updated_at = NOW()
+		WHERE id = $15 AND user_id = $16
+	`, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, spec.AutoMessage, spec.MessageTemplate,
 		string(attributesJSON), spec.Enabled, int64(spec.CheckInterval/time.Second), spec.ID, spec.UserID,
 	)
@@ -547,20 +644,21 @@ func (s *PostgresStore) DeleteSearchConfig(id int64, userID string) error {
 	return err
 }
 
-func (s *PostgresStore) ListRecentListings(userID string, limit int) ([]models.Listing, error) {
+func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, price_type, image_urls,
+		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       last_seen
 		FROM listings
 		WHERE item_id LIKE $1
+		  AND ($2 = 0 OR profile_id = $2)
 		ORDER BY last_seen DESC
-		LIMIT $2
-	`, scopedItemPrefix(userID), limit)
+		LIMIT $3
+	`, scopedItemPrefix(userID), missionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +669,7 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int) ([]models.L
 		var listing models.Listing
 		var imageURLsJSON, riskFlagsJSON string
 		if err := rows.Scan(
-			&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
 			&listing.Reason, &riskFlagsJSON, &listing.Date,
@@ -633,14 +731,15 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
 	_, err := s.db.Exec(`
 		INSERT INTO listings (
-			item_id, title, price, price_type, score, query, image_urls,
+			item_id, title, price, price_type, score, query, profile_id, image_urls,
 			url, condition, marketplace_id,
 			fair_price, offer_price, confidence, reasoning, risk_flags,
 			first_seen, last_seen
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),NOW())
 		ON CONFLICT(item_id) DO UPDATE SET
 			price          = EXCLUDED.price,
 			score          = EXCLUDED.score,
+			profile_id     = EXCLUDED.profile_id,
 			image_urls     = EXCLUDED.image_urls,
 			url            = EXCLUDED.url,
 			condition      = EXCLUDED.condition,
@@ -652,7 +751,7 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 			risk_flags     = EXCLUDED.risk_flags,
 			last_seen      = NOW()
 	`,
-		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, string(imageURLsJSON),
+		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
 	)
@@ -754,6 +853,64 @@ func (s *PostgresStore) GetComparableDeals(userID, query, excludeItemID string, 
 	return deals, rows.Err()
 }
 
+func scanPGMission(scanner interface{ Scan(dest ...any) error }) (models.Mission, error) {
+	return scanPGMissionInternal(scanner, false)
+}
+
+func scanPGMissionWithStats(scanner interface{ Scan(dest ...any) error }) (models.Mission, error) {
+	return scanPGMissionInternal(scanner, true)
+}
+
+func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withStats bool) (models.Mission, error) {
+	var mission models.Mission
+	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON string
+	if withStats {
+		err := scanner.Scan(
+			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
+			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
+			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Active, &mission.CreatedAt, &mission.UpdatedAt, &mission.MatchCount, &mission.LastMatchAt,
+		)
+		if err != nil {
+			return mission, err
+		}
+	} else {
+		err := scanner.Scan(
+			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
+			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
+			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Active, &mission.CreatedAt, &mission.UpdatedAt,
+		)
+		if err != nil {
+			return mission, err
+		}
+	}
+	_ = json.Unmarshal([]byte(preferredJSON), &mission.PreferredCondition)
+	_ = json.Unmarshal([]byte(requiredJSON), &mission.RequiredFeatures)
+	_ = json.Unmarshal([]byte(niceJSON), &mission.NiceToHave)
+	_ = json.Unmarshal([]byte(queriesJSON), &mission.SearchQueries)
+	_ = json.Unmarshal([]byte(avoidFlagsJSON), &mission.AvoidFlags)
+	if mission.TravelRadius == 0 && mission.Distance > 0 {
+		mission.TravelRadius = mission.Distance / 1000
+	}
+	if strings.TrimSpace(mission.Status) == "" {
+		if mission.Active {
+			mission.Status = "active"
+		} else {
+			mission.Status = "paused"
+		}
+	}
+	if strings.TrimSpace(mission.Urgency) == "" {
+		mission.Urgency = "flexible"
+	}
+	if strings.TrimSpace(mission.Category) == "" {
+		mission.Category = "other"
+	}
+	return mission, nil
+}
+
 func scanPGUser(row *sql.Row) (*models.User, error) {
 	var user models.User
 	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.StripeCustomer, &user.CreatedAt, &user.UpdatedAt)
@@ -771,7 +928,7 @@ func scanPGSearchSpec(scanner interface{ Scan(dest ...any) error }) (models.Sear
 	var conditionJSON, attributesJSON string
 	var checkIntervalSeconds int64
 	err := scanner.Scan(
-		&spec.ID, &spec.UserID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
+		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
 		&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &spec.AutoMessage,
 		&spec.MessageTemplate, &attributesJSON, &spec.Enabled, &checkIntervalSeconds,
 	)
@@ -788,7 +945,7 @@ func scanShortlistEntry(scanner interface{ Scan(dest ...any) error }) (models.Sh
 	var entry models.ShortlistEntry
 	var concernsJSON, questionsJSON string
 	err := scanner.Scan(
-		&entry.ID, &entry.UserID, &entry.ProfileID, &entry.ItemID, &entry.Title, &entry.URL,
+		&entry.ID, &entry.UserID, &entry.MissionID, &entry.ItemID, &entry.Title, &entry.URL,
 		&entry.RecommendationLabel, &entry.RecommendationScore, &entry.AskPrice, &entry.FairPrice,
 		&entry.Verdict, &concernsJSON, &questionsJSON, &entry.Status, &entry.CreatedAt, &entry.UpdatedAt,
 	)

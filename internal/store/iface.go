@@ -5,7 +5,9 @@ import "github.com/TechXTT/marktbot/internal/models"
 type Reader interface {
 	GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error)
 	GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error)
-	GetActiveShoppingProfile(userID string) (*models.ShoppingProfile, error)
+	GetActiveMission(userID string) (*models.Mission, error)
+	GetMission(id int64) (*models.Mission, error)
+	ListMissions(userID string) ([]models.Mission, error)
 	GetShortlist(userID string) ([]models.ShortlistEntry, error)
 	GetShortlistEntry(userID, itemID string) (*models.ShortlistEntry, error)
 	GetAssistantSession(userID string) (*models.AssistantSession, error)
@@ -17,12 +19,13 @@ type Reader interface {
 	GetSearchConfigs(userID string) ([]models.SearchSpec, error)
 	GetAllEnabledSearchConfigs() ([]models.SearchSpec, error)
 	CountSearchConfigs(userID string) (int, error)
-	ListRecentListings(userID string, limit int) ([]models.Listing, error)
+	ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error)
 	ListActionDrafts(userID string) ([]models.ActionDraft, error)
 }
 
 type Writer interface {
-	UpsertShoppingProfile(profile models.ShoppingProfile) (int64, error)
+	UpsertMission(mission models.Mission) (int64, error)
+	UpdateMissionStatus(id int64, status string) error
 	SaveShortlistEntry(entry models.ShortlistEntry) error
 	SaveConversationArtifact(userID string, intent models.ConversationIntent, input, output string) error
 	SaveActionDraft(draft models.ActionDraft) error

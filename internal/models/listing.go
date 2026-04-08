@@ -6,6 +6,7 @@ type Listing struct {
 	MarketplaceID string
 	CanonicalID   string
 	ItemID        string
+	ProfileID     int64
 	Title         string
 	Description   string
 	Price         int    // cents
@@ -99,7 +100,7 @@ const (
 	IntentDraftMessage   ConversationIntent = "draft_message"
 )
 
-type ShoppingProfile struct {
+type Mission struct {
 	ID                 int64
 	UserID             string
 	Name               string
@@ -114,15 +115,26 @@ type ShoppingProfile struct {
 	ZipCode            string
 	Distance           int
 	SearchQueries      []string
+	Status             string
+	Urgency            string
+	AvoidFlags         []string
+	TravelRadius       int
+	Category           string
+	MatchCount         int
+	LastMatchAt        time.Time
 	Active             bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
 
+// ShoppingProfile is kept as an alias for backward compatibility while
+// the product vocabulary transitions to "Mission".
+type ShoppingProfile = Mission
+
 type Recommendation struct {
 	Listing        Listing
 	Scored         ScoredListing
-	Profile        ShoppingProfile
+	Mission        Mission
 	Label          RecommendationLabel
 	FitScore       float64
 	Verdict        string
@@ -135,7 +147,7 @@ type AssistantSession struct {
 	UserID           string
 	PendingIntent    ConversationIntent
 	PendingQuestion  string
-	DraftProfile     *ShoppingProfile
+	DraftMission     *Mission
 	LastAssistantMsg string
 	UpdatedAt        time.Time
 }
@@ -144,14 +156,14 @@ type AssistantReply struct {
 	Message         string
 	Expecting       bool
 	Intent          ConversationIntent
-	Profile         *ShoppingProfile
+	Mission         *Mission
 	Recommendations []Recommendation
 }
 
 type ShortlistEntry struct {
 	ID                  int64
 	UserID              string
-	ProfileID           int64
+	MissionID           int64
 	ItemID              string
 	Title               string
 	URL                 string

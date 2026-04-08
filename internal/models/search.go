@@ -5,6 +5,7 @@ import "time"
 type SearchSpec struct {
 	ID              int64
 	UserID          string
+	ProfileID       int64
 	Name            string
 	Query           string
 	MarketplaceID   string

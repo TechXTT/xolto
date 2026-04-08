@@ -7,7 +7,7 @@ import (
 	"github.com/TechXTT/marktbot/internal/models"
 )
 
-func TestShoppingProfileAndShortlistPersistence(t *testing.T) {
+func TestMissionAndShortlistPersistence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "marktbot-test.db")
 	st, err := New(dbPath)
 	if err != nil {
@@ -15,7 +15,7 @@ func TestShoppingProfileAndShortlistPersistence(t *testing.T) {
 	}
 	defer st.Close()
 
-	profileID, err := st.UpsertShoppingProfile(models.ShoppingProfile{
+	missionID, err := st.UpsertMission(models.Mission{
 		UserID:             "u1",
 		Name:               "Sony A7 III",
 		TargetQuery:        "sony a7 iii",
@@ -24,23 +24,26 @@ func TestShoppingProfileAndShortlistPersistence(t *testing.T) {
 		BudgetStretch:      1100,
 		PreferredCondition: []string{"Gebruikt", "Zo goed als nieuw"},
 		SearchQueries:      []string{"sony a7 iii", "sony alpha 7 iii"},
+		Status:             "active",
+		Urgency:            "flexible",
+		Category:           "camera",
 		Active:             true,
 	})
 	if err != nil {
-		t.Fatalf("UpsertShoppingProfile() error = %v", err)
+		t.Fatalf("UpsertMission() error = %v", err)
 	}
 
-	profile, err := st.GetActiveShoppingProfile("u1")
+	mission, err := st.GetActiveMission("u1")
 	if err != nil {
-		t.Fatalf("GetActiveShoppingProfile() error = %v", err)
+		t.Fatalf("GetActiveMission() error = %v", err)
 	}
-	if profile == nil || profile.ID != profileID {
-		t.Fatalf("expected active profile id %d, got %#v", profileID, profile)
+	if mission == nil || mission.ID != missionID {
+		t.Fatalf("expected active mission id %d, got %#v", missionID, mission)
 	}
 
 	err = st.SaveShortlistEntry(models.ShortlistEntry{
 		UserID:              "u1",
-		ProfileID:           profileID,
+		MissionID:           missionID,
 		ItemID:              "m1",
 		Title:               "Sony A7 III",
 		URL:                 "https://example.com/listing",
@@ -87,7 +90,7 @@ func TestListingQueriesAreScopedPerUser(t *testing.T) {
 		t.Fatalf("SaveListing(u2, m3) error = %v", err)
 	}
 
-	feed, err := st.ListRecentListings("u1", 10)
+	feed, err := st.ListRecentListings("u1", 10, 0)
 	if err != nil {
 		t.Fatalf("ListRecentListings() error = %v", err)
 	}

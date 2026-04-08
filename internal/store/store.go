@@ -53,6 +53,7 @@ func migrate(db *sql.DB) error {
 			score       REAL NOT NULL DEFAULT 0,
 			offered     INTEGER NOT NULL DEFAULT 0,
 			query       TEXT NOT NULL DEFAULT '',
+			profile_id  INTEGER NOT NULL DEFAULT 0,
 			image_urls  TEXT NOT NULL DEFAULT '[]',
 			first_seen  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -83,6 +84,11 @@ func migrate(db *sql.DB) error {
 			zip_code TEXT NOT NULL DEFAULT '',
 			distance INTEGER NOT NULL DEFAULT 0,
 			search_queries TEXT NOT NULL DEFAULT '[]',
+			status TEXT NOT NULL DEFAULT 'active',
+			urgency TEXT NOT NULL DEFAULT 'flexible',
+			avoid_flags TEXT NOT NULL DEFAULT '[]',
+			travel_radius INTEGER NOT NULL DEFAULT 0,
+			category TEXT NOT NULL DEFAULT 'other',
 			active INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -154,6 +160,7 @@ func migrate(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS search_configs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id TEXT NOT NULL,
+			profile_id INTEGER NOT NULL DEFAULT 0,
 			name TEXT NOT NULL DEFAULT '',
 			query TEXT NOT NULL DEFAULT '',
 			marketplace_id TEXT NOT NULL DEFAULT 'marktplaats',
@@ -172,6 +179,8 @@ func migrate(db *sql.DB) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_search_configs_user ON search_configs(user_id, enabled, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen);
 
 		CREATE TABLE IF NOT EXISTS stripe_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +201,15 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN confidence REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN risk_flags TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN urgency TEXT NOT NULL DEFAULT 'flexible'`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN avoid_flags TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN travel_radius INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN category TEXT NOT NULL DEFAULT 'other'`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen)`)
 	return nil
 }
 
@@ -232,52 +250,76 @@ func (s *SQLiteStore) Cleanup(includeListings, includePriceHistory bool) (Cleanu
 	return stats, nil
 }
 
-func (s *SQLiteStore) UpsertShoppingProfile(profile models.ShoppingProfile) (int64, error) {
-	conditionsJSON, err := json.Marshal(profile.PreferredCondition)
+func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
+	conditionsJSON, err := json.Marshal(mission.PreferredCondition)
 	if err != nil {
 		return 0, err
 	}
-	requiredJSON, err := json.Marshal(profile.RequiredFeatures)
+	requiredJSON, err := json.Marshal(mission.RequiredFeatures)
 	if err != nil {
 		return 0, err
 	}
-	niceToHaveJSON, err := json.Marshal(profile.NiceToHave)
+	niceToHaveJSON, err := json.Marshal(mission.NiceToHave)
 	if err != nil {
 		return 0, err
 	}
-	queriesJSON, err := json.Marshal(profile.SearchQueries)
+	queriesJSON, err := json.Marshal(mission.SearchQueries)
+	if err != nil {
+		return 0, err
+	}
+	avoidFlagsJSON, err := json.Marshal(mission.AvoidFlags)
 	if err != nil {
 		return 0, err
 	}
 
-	if profile.ID > 0 {
+	if strings.TrimSpace(mission.Status) == "" {
+		mission.Status = "active"
+	}
+	if strings.TrimSpace(mission.Urgency) == "" {
+		mission.Urgency = "flexible"
+	}
+	if strings.TrimSpace(mission.Category) == "" {
+		mission.Category = "other"
+	}
+	if mission.TravelRadius == 0 && mission.Distance > 0 {
+		mission.TravelRadius = mission.Distance / 1000
+	}
+	if mission.ID > 0 {
 		_, err = s.db.Exec(`
 			UPDATE shopping_profiles
 			SET name = ?, target_query = ?, category_id = ?, budget_max = ?, budget_stretch = ?,
 				preferred_condition = ?, required_features = ?, nice_to_have = ?, risk_tolerance = ?,
-				zip_code = ?, distance = ?, search_queries = ?, active = ?, updated_at = CURRENT_TIMESTAMP
+				zip_code = ?, distance = ?, search_queries = ?,
+				status = ?, urgency = ?, avoid_flags = ?, travel_radius = ?, category = ?,
+				active = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`,
-			profile.Name, profile.TargetQuery, profile.CategoryID, profile.BudgetMax, profile.BudgetStretch,
-			string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), profile.RiskTolerance,
-			profile.ZipCode, profile.Distance, string(queriesJSON), boolToInt(profile.Active), profile.ID,
+			mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
+			string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), mission.RiskTolerance,
+			mission.ZipCode, mission.Distance, string(queriesJSON),
+			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+			boolToInt(mission.Active), mission.ID,
 		)
 		if err != nil {
 			return 0, err
 		}
-		return profile.ID, nil
+		return mission.ID, nil
 	}
 
 	result, err := s.db.Exec(`
 		INSERT INTO shopping_profiles (
 			user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
-			zip_code, distance, search_queries, active
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			zip_code, distance, search_queries,
+			status, urgency, avoid_flags, travel_radius, category,
+			active
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		profile.UserID, profile.Name, profile.TargetQuery, profile.CategoryID, profile.BudgetMax, profile.BudgetStretch,
-		string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), profile.RiskTolerance,
-		profile.ZipCode, profile.Distance, string(queriesJSON), boolToInt(profile.Active),
+		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
+		string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), mission.RiskTolerance,
+		mission.ZipCode, mission.Distance, string(queriesJSON),
+		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+		boolToInt(mission.Active),
 	)
 	if err != nil {
 		return 0, err
@@ -285,42 +327,97 @@ func (s *SQLiteStore) UpsertShoppingProfile(profile models.ShoppingProfile) (int
 	return result.LastInsertId()
 }
 
-func (s *SQLiteStore) GetActiveShoppingProfile(userID string) (*models.ShoppingProfile, error) {
+func (s *SQLiteStore) GetActiveMission(userID string) (*models.Mission, error) {
 	row := s.db.QueryRow(`
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
-			zip_code, distance, search_queries, active, created_at, updated_at
+			zip_code, distance, search_queries,
+			status, urgency, avoid_flags, travel_radius, category,
+			active, created_at, updated_at
 		FROM shopping_profiles
-		WHERE user_id = ? AND active = 1
+		WHERE user_id = ? AND active = 1 AND status = 'active'
 		ORDER BY updated_at DESC
 		LIMIT 1
 	`, userID)
-
-	var profile models.ShoppingProfile
-	var preferredJSON, requiredJSON, niceJSON, queriesJSON string
-	var active int
-	var createdAt, updatedAt string
-	err := row.Scan(
-		&profile.ID, &profile.UserID, &profile.Name, &profile.TargetQuery, &profile.CategoryID,
-		&profile.BudgetMax, &profile.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
-		&profile.RiskTolerance, &profile.ZipCode, &profile.Distance, &queriesJSON, &active,
-		&createdAt, &updatedAt,
-	)
+	mission, err := scanSQLiteMission(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	return &mission, nil
+}
 
-	profile.Active = active == 1
-	_ = json.Unmarshal([]byte(preferredJSON), &profile.PreferredCondition)
-	_ = json.Unmarshal([]byte(requiredJSON), &profile.RequiredFeatures)
-	_ = json.Unmarshal([]byte(niceJSON), &profile.NiceToHave)
-	_ = json.Unmarshal([]byte(queriesJSON), &profile.SearchQueries)
-	profile.CreatedAt, _ = parseSQLiteTime(createdAt)
-	profile.UpdatedAt, _ = parseSQLiteTime(updatedAt)
-	return &profile, nil
+func (s *SQLiteStore) GetMission(id int64) (*models.Mission, error) {
+	row := s.db.QueryRow(`
+		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
+			preferred_condition, required_features, nice_to_have, risk_tolerance,
+			zip_code, distance, search_queries,
+			status, urgency, avoid_flags, travel_radius, category,
+			active, created_at, updated_at
+		FROM shopping_profiles
+		WHERE id = ?
+	`, id)
+	mission, err := scanSQLiteMission(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &mission, nil
+}
+
+func (s *SQLiteStore) ListMissions(userID string) ([]models.Mission, error) {
+	rows, err := s.db.Query(`
+		SELECT m.id, m.user_id, m.name, m.target_query, m.category_id, m.budget_max, m.budget_stretch,
+			m.preferred_condition, m.required_features, m.nice_to_have, m.risk_tolerance,
+			m.zip_code, m.distance, m.search_queries,
+			m.status, m.urgency, m.avoid_flags, m.travel_radius, m.category,
+			m.active, m.created_at, m.updated_at,
+			COUNT(l.item_id) AS match_count,
+			COALESCE(MAX(l.last_seen), '') AS last_match_at
+		FROM shopping_profiles m
+		LEFT JOIN listings l
+			ON l.profile_id = m.id AND l.item_id LIKE ?
+		WHERE m.user_id = ?
+		GROUP BY m.id
+		ORDER BY m.updated_at DESC, m.id DESC
+	`, scopedItemPrefix(userID), userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.Mission, 0)
+	for rows.Next() {
+		mission, err := scanSQLiteMissionWithStats(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mission)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpdateMissionStatus(id int64, status string) error {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "active", "paused", "completed":
+	default:
+		return fmt.Errorf("unsupported mission status %q", status)
+	}
+	active := 1
+	if status != "active" {
+		active = 0
+	}
+	_, err := s.db.Exec(`
+		UPDATE shopping_profiles
+		SET status = ?, active = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, status, active, id)
+	return err
 }
 
 func (s *SQLiteStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
@@ -352,7 +449,7 @@ func (s *SQLiteStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
 			status = excluded.status,
 			updated_at = CURRENT_TIMESTAMP
 	`,
-		entry.UserID, entry.ProfileID, entry.ItemID, entry.Title, entry.URL,
+		entry.UserID, entry.MissionID, entry.ItemID, entry.Title, entry.URL,
 		string(entry.RecommendationLabel), entry.RecommendationScore, entry.AskPrice, entry.FairPrice,
 		entry.Verdict, string(concernsJSON), string(questionsJSON), entry.Status,
 	)
@@ -377,7 +474,7 @@ func (s *SQLiteStore) GetShortlist(userID string) ([]models.ShortlistEntry, erro
 		var entry models.ShortlistEntry
 		var concernsJSON, questionsJSON, createdAt, updatedAt string
 		if err := rows.Scan(
-			&entry.ID, &entry.UserID, &entry.ProfileID, &entry.ItemID, &entry.Title, &entry.URL,
+			&entry.ID, &entry.UserID, &entry.MissionID, &entry.ItemID, &entry.Title, &entry.URL,
 			&entry.RecommendationLabel, &entry.RecommendationScore, &entry.AskPrice, &entry.FairPrice,
 			&entry.Verdict, &concernsJSON, &questionsJSON, &entry.Status, &createdAt, &updatedAt,
 		); err != nil {
@@ -403,7 +500,7 @@ func (s *SQLiteStore) GetShortlistEntry(userID, itemID string) (*models.Shortlis
 	var entry models.ShortlistEntry
 	var concernsJSON, questionsJSON, createdAt, updatedAt string
 	err := row.Scan(
-		&entry.ID, &entry.UserID, &entry.ProfileID, &entry.ItemID, &entry.Title, &entry.URL,
+		&entry.ID, &entry.UserID, &entry.MissionID, &entry.ItemID, &entry.Title, &entry.URL,
 		&entry.RecommendationLabel, &entry.RecommendationScore, &entry.AskPrice, &entry.FairPrice,
 		&entry.Verdict, &concernsJSON, &questionsJSON, &entry.Status, &createdAt, &updatedAt,
 	)
@@ -430,8 +527,8 @@ func (s *SQLiteStore) SaveConversationArtifact(userID string, intent models.Conv
 
 func (s *SQLiteStore) SaveAssistantSession(session models.AssistantSession) error {
 	draftJSON := ""
-	if session.DraftProfile != nil {
-		raw, err := json.Marshal(session.DraftProfile)
+	if session.DraftMission != nil {
+		raw, err := json.Marshal(session.DraftMission)
 		if err != nil {
 			return err
 		}
@@ -469,9 +566,9 @@ func (s *SQLiteStore) GetAssistantSession(userID string) (*models.AssistantSessi
 	}
 	session.PendingIntent = models.ConversationIntent(pendingIntent)
 	if strings.TrimSpace(draftJSON) != "" {
-		var draft models.ShoppingProfile
+		var draft models.Mission
 		if err := json.Unmarshal([]byte(draftJSON), &draft); err == nil {
-			session.DraftProfile = &draft
+			session.DraftMission = &draft
 		}
 	}
 	session.UpdatedAt, _ = parseSQLiteTime(updatedAt)
@@ -544,7 +641,7 @@ func (s *SQLiteStore) RecordStripeEvent(eventID string) error {
 
 func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 		       condition_json, offer_percentage, auto_message, message_template, attributes_json,
 		       enabled, check_interval_seconds
 		FROM search_configs
@@ -563,7 +660,7 @@ func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, erro
 		var autoMessage, enabled int
 		var checkIntervalSeconds int64
 		if err := rows.Scan(
-			&spec.ID, &spec.UserID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
+			&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
 			&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &autoMessage,
 			&spec.MessageTemplate, &attributesJSON, &enabled, &checkIntervalSeconds,
 		); err != nil {
@@ -587,7 +684,7 @@ func (s *SQLiteStore) CountSearchConfigs(userID string) (int, error) {
 
 func (s *SQLiteStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 		       condition_json, offer_percentage, auto_message, message_template, attributes_json,
 		       enabled, check_interval_seconds
 		FROM search_configs
@@ -610,20 +707,21 @@ func (s *SQLiteStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) 
 	return specs, rows.Err()
 }
 
-func (s *SQLiteStore) ListRecentListings(userID string, limit int) ([]models.Listing, error) {
+func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, price_type, image_urls,
+		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       last_seen
 		FROM listings
 		WHERE item_id LIKE ?
+		  AND (? = 0 OR profile_id = ?)
 		ORDER BY last_seen DESC
 		LIMIT ?
-	`, scopedItemPrefix(userID), limit)
+	`, scopedItemPrefix(userID), missionID, missionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +732,7 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int) ([]models.Lis
 		var listing models.Listing
 		var imageURLsJSON, riskFlagsJSON, lastSeen string
 		if err := rows.Scan(
-			&listing.ItemID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
 			&listing.Reason, &riskFlagsJSON, &lastSeen,
@@ -684,11 +782,11 @@ func (s *SQLiteStore) CreateSearchConfig(spec models.SearchSpec) (int64, error) 
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	result, err := s.db.Exec(`
 		INSERT INTO search_configs (
-			user_id, name, query, marketplace_id, category_id, max_price, min_price,
+			user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
 			condition_json, offer_percentage, auto_message, message_template, attributes_json,
 			enabled, check_interval_seconds
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, spec.UserID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, boolToInt(spec.AutoMessage), spec.MessageTemplate, string(attributesJSON),
 		boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second))
 	if err != nil {
@@ -702,11 +800,11 @@ func (s *SQLiteStore) UpdateSearchConfig(spec models.SearchSpec) error {
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	_, err := s.db.Exec(`
 		UPDATE search_configs
-		SET name = ?, query = ?, marketplace_id = ?, category_id = ?, max_price = ?, min_price = ?,
+		SET profile_id = ?, name = ?, query = ?, marketplace_id = ?, category_id = ?, max_price = ?, min_price = ?,
 		    condition_json = ?, offer_percentage = ?, auto_message = ?, message_template = ?,
 		    attributes_json = ?, enabled = ?, check_interval_seconds = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND user_id = ?
-	`, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+	`, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, boolToInt(spec.AutoMessage), spec.MessageTemplate,
 		string(attributesJSON), boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second), spec.ID, spec.UserID)
 	return err
@@ -746,14 +844,15 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
 	_, err := s.db.Exec(`
 		INSERT INTO listings (
-			item_id, title, price, price_type, score, query, image_urls,
+			item_id, title, price, price_type, score, query, profile_id, image_urls,
 			url, condition, marketplace_id,
 			fair_price, offer_price, confidence, reasoning, risk_flags,
 			first_seen, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(item_id) DO UPDATE SET
 			price          = excluded.price,
 			score          = excluded.score,
+			profile_id     = excluded.profile_id,
 			image_urls     = excluded.image_urls,
 			url            = excluded.url,
 			condition      = excluded.condition,
@@ -765,7 +864,7 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 			risk_flags     = excluded.risk_flags,
 			last_seen      = CURRENT_TIMESTAMP
 	`,
-		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, string(imageURLsJSON),
+		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
 	)
@@ -886,6 +985,75 @@ func (s *SQLiteStore) GetComparableDeals(userID, query, excludeItemID string, li
 	return deals, rows.Err()
 }
 
+func scanSQLiteMission(scanner interface{ Scan(dest ...any) error }) (models.Mission, error) {
+	return scanSQLiteMissionInternal(scanner, false)
+}
+
+func scanSQLiteMissionWithStats(scanner interface{ Scan(dest ...any) error }) (models.Mission, error) {
+	return scanSQLiteMissionInternal(scanner, true)
+}
+
+func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, withStats bool) (models.Mission, error) {
+	var mission models.Mission
+	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON string
+	var active int
+	var createdAt, updatedAt string
+
+	if withStats {
+		var lastMatchAt string
+		err := scanner.Scan(
+			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
+			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
+			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&active, &createdAt, &updatedAt, &mission.MatchCount, &lastMatchAt,
+		)
+		if err != nil {
+			return mission, err
+		}
+		if strings.TrimSpace(lastMatchAt) != "" {
+			mission.LastMatchAt, _ = parseSQLiteTime(lastMatchAt)
+		}
+	} else {
+		err := scanner.Scan(
+			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
+			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
+			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&active, &createdAt, &updatedAt,
+		)
+		if err != nil {
+			return mission, err
+		}
+	}
+
+	mission.Active = active == 1
+	_ = json.Unmarshal([]byte(preferredJSON), &mission.PreferredCondition)
+	_ = json.Unmarshal([]byte(requiredJSON), &mission.RequiredFeatures)
+	_ = json.Unmarshal([]byte(niceJSON), &mission.NiceToHave)
+	_ = json.Unmarshal([]byte(queriesJSON), &mission.SearchQueries)
+	_ = json.Unmarshal([]byte(avoidFlagsJSON), &mission.AvoidFlags)
+	mission.CreatedAt, _ = parseSQLiteTime(createdAt)
+	mission.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+	if mission.TravelRadius == 0 && mission.Distance > 0 {
+		mission.TravelRadius = mission.Distance / 1000
+	}
+	if strings.TrimSpace(mission.Status) == "" {
+		if mission.Active {
+			mission.Status = "active"
+		} else {
+			mission.Status = "paused"
+		}
+	}
+	if strings.TrimSpace(mission.Urgency) == "" {
+		mission.Urgency = "flexible"
+	}
+	if strings.TrimSpace(mission.Category) == "" {
+		mission.Category = "other"
+	}
+	return mission, nil
+}
+
 func parseSQLiteTime(value string) (time.Time, error) {
 	layouts := []string{
 		"2006-01-02 15:04:05",
@@ -925,7 +1093,7 @@ func scanSearchSpec(scanner interface {
 	var autoMessage, enabled int
 	var checkIntervalSeconds int64
 	err := scanner.Scan(
-		&spec.ID, &spec.UserID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
+		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
 		&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &autoMessage,
 		&spec.MessageTemplate, &attributesJSON, &enabled, &checkIntervalSeconds,
 	)
