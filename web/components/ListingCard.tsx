@@ -8,6 +8,8 @@ import { formatEuroFromCents } from "../lib/format";
 interface Props {
   listing: Listing;
   onShortlist?: (itemID: string) => Promise<void>;
+  onDraftOffer?: (itemID: string) => Promise<void>;
+  draftState?: { loading: boolean; text: string | null };
   isSaved?: boolean;
 }
 
@@ -27,7 +29,36 @@ const RISK_FLAG_LABELS: Record<string, string> = {
   refurbished_ambiguity: "Refurbished details unclear",
 };
 
-export function ListingCard({ listing, onShortlist, isSaved = false }: Props) {
+const HARD_RISK_FLAGS = ["anomaly_price"] as const;
+const SOFT_RISK_FLAGS = [
+  "missing_key_photos",
+  "no_battery_health",
+  "vague_condition",
+  "unclear_bundle",
+  "no_model_id",
+  "refurbished_ambiguity",
+] as const;
+const QUESTION_ORDER = [
+  "anomaly_price",
+  "vague_condition",
+  "no_battery_health",
+  "missing_key_photos",
+  "no_model_id",
+  "unclear_bundle",
+  "refurbished_ambiguity",
+] as const;
+
+const FLAG_TO_QUESTION: Record<string, string> = {
+  anomaly_price: "Why is this priced so far below market value?",
+  vague_condition: "Can you describe the exact condition in more detail?",
+  no_battery_health: "What's the current battery health percentage?",
+  missing_key_photos: "Could you share close-up photos of the item?",
+  no_model_id: "Which exact model or variant is this?",
+  unclear_bundle: "What exactly is included in this bundle?",
+  refurbished_ambiguity: "Is this seller-refurbished or manufacturer-refurbished?",
+};
+
+export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, isSaved = false }: Props) {
   const item = listing;
   const score = (listing.Score ?? 0) > 0 ? listing.Score : undefined;
   const fairPrice = (listing.FairPrice ?? 0) > 0 ? listing.FairPrice : undefined;
@@ -47,6 +78,11 @@ export function ListingCard({ listing, onShortlist, isSaved = false }: Props) {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleDraftOffer() {
+    if (!onDraftOffer || draftState?.loading) return;
+    await onDraftOffer(item.ItemID);
   }
 
   return (
@@ -117,11 +153,31 @@ export function ListingCard({ listing, onShortlist, isSaved = false }: Props) {
           </div>
         )}
         {suggestedQuestion && <p className="shortlist-question">Ask seller: {suggestedQuestion}</p>}
-        {item.URL && (
-          <div className="shortlist-actions">
+        <div className="shortlist-actions">
+          {item.URL && (
             <a href={item.URL} target="_blank" rel="noopener noreferrer" className="btn-secondary">
               Ask seller
             </a>
+          )}
+          {onDraftOffer && (
+            <button type="button" className="btn-primary" onClick={() => void handleDraftOffer()} disabled={draftState?.loading}>
+              {draftState?.loading ? "Drafting..." : "Draft seller note"}
+            </button>
+          )}
+        </div>
+        {draftState?.text && (
+          <div className="offer-draft-block">
+            <p>{draftState.text}</p>
+            <button
+              type="button"
+              className="btn-copy"
+              onClick={() => {
+                if (!draftState.text) return;
+                void navigator.clipboard.writeText(draftState.text);
+              }}
+            >
+              Copy
+            </button>
           </div>
         )}
       </div>
@@ -130,7 +186,7 @@ export function ListingCard({ listing, onShortlist, isSaved = false }: Props) {
 }
 
 function verdictLabel(score: number | undefined, riskFlags: string[]) {
-  if (riskFlags.includes("anomaly_price") || riskFlags.includes("refurbished_ambiguity")) {
+  if (hasHardRiskFlag(riskFlags)) {
     return "Suspicious";
   }
   if (!score) return "Fair price";
@@ -142,23 +198,27 @@ function verdictLabel(score: number | undefined, riskFlags: string[]) {
 }
 
 function confidenceCopy(confidence: number) {
-  if (confidence >= 0.75) return "Confidence: High";
-  if (confidence >= 0.5) return "Confidence: Medium";
-  return "Confidence: Low";
+  if (confidence >= 0.75) return "High confidence";
+  if (confidence >= 0.4) return "Medium confidence";
+  return "Low confidence";
 }
 
 function firstSuggestedQuestion(riskFlags: string[]) {
-  if (riskFlags.includes("no_battery_health")) {
-    return "Could you share battery health / cycle count?";
+  for (const flag of QUESTION_ORDER) {
+    if (riskFlags.includes(flag)) {
+      return FLAG_TO_QUESTION[flag];
+    }
   }
-  if (riskFlags.includes("missing_key_photos")) {
-    return "Could you send close-up photos of all sides and ports?";
-  }
-  if (riskFlags.includes("refurbished_ambiguity")) {
-    return "Is this refurbished by an official partner, and is there warranty?";
-  }
-  if (riskFlags.includes("vague_condition")) {
-    return "Can you confirm there are no faults and everything works fully?";
+  if (hasSoftRiskFlag(riskFlags)) {
+    return "Can you confirm condition and included accessories?";
   }
   return "Can you confirm condition and included accessories?";
+}
+
+function hasHardRiskFlag(riskFlags: string[]) {
+  return HARD_RISK_FLAGS.some((flag) => riskFlags.includes(flag));
+}
+
+function hasSoftRiskFlag(riskFlags: string[]) {
+  return SOFT_RISK_FLAGS.some((flag) => riskFlags.includes(flag));
 }
