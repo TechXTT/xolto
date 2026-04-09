@@ -74,8 +74,9 @@ export function ShortlistTable({
             <tbody>
               {items.map((item) => {
                 const savings = item.FairPrice > 0 && item.AskPrice > 0 ? item.FairPrice - item.AskPrice : 0;
+                const strongBuy = isStrongBuy(item);
                 return (
-                  <tr key={item.ItemID}>
+                  <tr key={item.ItemID} className={strongBuy ? "strong-buy-row" : ""}>
                     <td>
                       <input
                         type="checkbox"
@@ -111,9 +112,10 @@ export function ShortlistTable({
         {items.map((item) => {
           const config = LABEL_CONFIG[item.RecommendationLabel] ?? null;
           const savings = item.AskPrice > 0 && item.FairPrice > 0 ? item.FairPrice - item.AskPrice : 0;
+          const strongBuy = isStrongBuy(item);
 
           return (
-            <article key={item.ItemID} className="shortlist-card">
+            <article key={item.ItemID} className={`shortlist-card${strongBuy ? " strong-buy" : ""}`}>
               <div className="shortlist-card-top">
                 <div>
                   <a href={item.URL} target="_blank" rel="noopener noreferrer" className="shortlist-title">
@@ -212,4 +214,9 @@ export function ShortlistTable({
       </div>
     </div>
   );
+}
+
+function isStrongBuy(item: ShortlistEntry) {
+  if (item.RecommendationLabel === "buy_now") return true;
+  return item.Verdict.toLowerCase().includes("strong buy");
 }

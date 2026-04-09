@@ -45,6 +45,7 @@ const MIN_SCORE_OPTIONS = [
 export default function MatchesPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [error, setError] = useState("");
+  const [draftStates, setDraftStates] = useState<Record<string, { loading: boolean; text: string | null }>>({});
   const [newCount, setNewCount] = useState(0);
   const { missions, activeMissionId, setActiveMission, shortlist, addToShortlist, isShortlisted, refreshMissions } = useDashboardContext();
 
@@ -62,15 +63,21 @@ export default function MatchesPage() {
   useEffect(() => {
     let disconnect: (() => void) | undefined;
     let cancelled = false;
+    const selectedMissionStatus = missions.find((mission) => mission.ID === activeMissionId)?.Status?.toLowerCase() ?? "";
+    const shouldStream = activeMissionId === 0 || selectedMissionStatus === "" || selectedMissionStatus === "active";
 
     async function load() {
+      setError("");
+      setListings([]);
+      setNewCount(0);
+      setDraftStates({});
       try {
         const nextListings = activeMissionId > 0
           ? (await api.missions.matches(activeMissionId)).listings ?? []
           : (await api.listings.feed()).listings ?? [];
         if (cancelled) return;
         setListings(nextListings);
-        setNewCount(0);
+        if (!shouldStream) return;
         disconnect = connectDealStream((payload) => {
           if (!payload || typeof payload !== "object") return;
           const event = payload as {
@@ -112,7 +119,7 @@ export default function MatchesPage() {
       cancelled = true;
       disconnect?.();
     };
-  }, [activeMissionId]);
+  }, [activeMissionId, missions]);
 
   const filtered = useMemo(() => {
     let result = listings;
@@ -137,12 +144,27 @@ export default function MatchesPage() {
   const hasActiveFilters = marketplace !== "all" || condition !== "all" || minScore > 0 || sort !== "score";
   const currentMission = missions.find((mission) => mission.ID === activeMissionId) ?? null;
   const showLegacyFeedWithoutMissions = missions.length === 0 && listings.length > 0;
+  const currentMissionStatus = (currentMission?.Status || "active").toLowerCase();
+  const missionPaused = activeMissionId > 0 && currentMissionStatus === "paused";
+  const missionCompleted = activeMissionId > 0 && currentMissionStatus === "completed";
 
   function resetFilters() {
     setSort("score");
     setMarketplace("all");
     setCondition("all");
     setMinScore(0);
+  }
+
+  async function draftOffer(itemID: string) {
+    setDraftStates((prev) => ({ ...prev, [itemID]: { loading: true, text: prev[itemID]?.text ?? null } }));
+    setError("");
+    try {
+      const res = await api.shortlist.draftOffer(itemID);
+      setDraftStates((prev) => ({ ...prev, [itemID]: { loading: false, text: res.Content || "" } }));
+    } catch (err) {
+      setDraftStates((prev) => ({ ...prev, [itemID]: { loading: false, text: prev[itemID]?.text ?? null } }));
+      setError(err instanceof Error ? err.message : "Failed to draft seller message");
+    }
   }
 
   return (
@@ -176,6 +198,20 @@ export default function MatchesPage() {
       </section>
 
       {error && <div className="error-msg">{error}</div>}
+
+      {(missionPaused || missionCompleted) && (
+        <section className="surface-panel status-banner">
+          <p className="section-kicker">Mission status</p>
+          <p className="section-support">
+            {missionPaused
+              ? "This mission is paused. Monitors are not actively hunting until you resume it."
+              : "This mission is completed. Start or resume another mission to keep getting active matches."}
+          </p>
+          <Link href="/missions" className="btn-secondary">
+            Manage missions
+          </Link>
+        </section>
+      )}
 
       {showLegacyFeedWithoutMissions && (
         <section className="surface-panel">
@@ -275,6 +311,15 @@ export default function MatchesPage() {
             Start a mission
           </Link>
         </div>
+      ) : listings.length === 0 && (missionPaused || missionCompleted) && !error ? (
+        <div className="surface-panel empty-state">
+          <h3>{missionPaused ? "Mission is paused" : "Mission is completed"}</h3>
+          <p>
+            {missionPaused
+              ? "Resume this mission to start collecting fresh matches again."
+              : "Reactivate this mission or switch to an active mission to keep monitoring the market."}
+          </p>
+        </div>
       ) : listings.length === 0 && !error ? (
         <div className="surface-panel empty-state">
           <h3>No matches yet for this mission</h3>
@@ -296,6 +341,8 @@ export default function MatchesPage() {
               listing={listing}
               isSaved={isShortlisted(listing.ItemID)}
               onShortlist={addToShortlist}
+              onDraftOffer={draftOffer}
+              draftState={draftStates[listing.ItemID]}
             />
           ))}
         </div>

@@ -14,17 +14,28 @@ export default function SavedPage() {
   const [comparisonMode, setComparisonMode] = useState(false);
   const [selectedIDs, setSelectedIDs] = useState<string[]>([]);
 
+  const prioritizedShortlist = useMemo(() => {
+    return [...shortlist].sort((a, b) => {
+      const aStrong = a.RecommendationLabel === "buy_now" || a.Verdict.toLowerCase().includes("strong buy");
+      const bStrong = b.RecommendationLabel === "buy_now" || b.Verdict.toLowerCase().includes("strong buy");
+      if (aStrong === bStrong) return 0;
+      return aStrong ? -1 : 1;
+    });
+  }, [shortlist]);
+
   const selectedItems = useMemo(
-    () => shortlist.filter((item) => selectedIDs.includes(item.ItemID)),
-    [shortlist, selectedIDs],
+    () => prioritizedShortlist.filter((item) => selectedIDs.includes(item.ItemID)),
+    [prioritizedShortlist, selectedIDs],
   );
 
-  const totalOpportunity = shortlist.reduce((sum, item) => {
+  const totalOpportunity = prioritizedShortlist.reduce((sum, item) => {
     const savings = item.FairPrice > 0 && item.AskPrice > 0 ? item.FairPrice - item.AskPrice : 0;
     return sum + Math.max(0, savings);
   }, 0);
 
-  const buyNowCount = shortlist.filter((item) => item.RecommendationLabel === "buy_now").length;
+  const buyNowCount = prioritizedShortlist.filter(
+    (item) => item.RecommendationLabel === "buy_now" || item.Verdict.toLowerCase().includes("strong buy"),
+  ).length;
 
   async function draftOffer(itemID: string) {
     setDraftStates((prev) => ({ ...prev, [itemID]: { loading: true, text: prev[itemID]?.text ?? null } }));
@@ -59,7 +70,7 @@ export default function SavedPage() {
         <div className="stats-row">
           <div className="stat-card">
             <span className="metric-label">Saved deals</span>
-            <strong>{shortlist.length}</strong>
+            <strong>{prioritizedShortlist.length}</strong>
           </div>
           {buyNowCount > 0 && (
             <div className="stat-card live">
@@ -89,7 +100,7 @@ export default function SavedPage() {
       )}
 
       <ShortlistTable
-        items={shortlist}
+        items={prioritizedShortlist}
         draftStates={draftStates}
         onDraftOffer={draftOffer}
         comparisonMode={comparisonMode}

@@ -1259,6 +1259,12 @@
     border-color: var(--border-strong);
   }
 
+  .shortlist-card.strong-buy {
+    border-color: var(--border-brand);
+    background: linear-gradient(155deg, rgba(227, 244, 236, 0.64), rgba(255, 255, 255, 0.95));
+    box-shadow: 0 10px 28px rgba(15, 143, 103, 0.16);
+  }
+
   .shortlist-verdict {
     margin-top: 4px;
   }
@@ -1347,6 +1353,14 @@
     background: rgba(15, 143, 103, 0.05);
   }
 
+  .shortlist-compare-table tbody tr.strong-buy-row {
+    background: rgba(227, 244, 236, 0.64);
+  }
+
+  .shortlist-compare-table tbody tr.strong-buy-row td:first-child {
+    border-left: 3px solid var(--brand-600);
+  }
+
   .shortlist-compare-table a {
     color: var(--fg-900);
     font-weight: 700;
@@ -1355,6 +1369,13 @@
 
   .shortlist-compare-table a:hover {
     color: var(--brand-700);
+  }
+
+  .status-banner {
+    border-color: rgba(180, 83, 9, 0.25);
+    background: linear-gradient(160deg, rgba(255, 251, 235, 0.86), rgba(255, 255, 255, 0.95));
+    display: grid;
+    gap: 10px;
   }
 
   /* ──────────────────────────────────────────
