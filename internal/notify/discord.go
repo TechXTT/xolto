@@ -104,7 +104,7 @@ func (d *Discord) SendDeal(sl models.ScoredListing, queryName string) error {
 		URL:       sl.Listing.URL,
 		Color:     color,
 		Fields:    fields,
-		Footer:    &embedFooter{Text: truncate(fmt.Sprintf("MarktBot | %s", queryName), 2048)},
+		Footer:    &embedFooter{Text: truncate(fmt.Sprintf("markt | %s", queryName), 2048)},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 

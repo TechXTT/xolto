@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MarktBot — Find the deal before anyone else does",
+  title: "markt — Used electronics copilot",
   description:
-    "MarktBot watches European marketplaces, scores fresh listings, and helps you turn a vague buying goal into a sharp, automated search workflow.",
+    "markt scans second-hand electronics listings, estimates fair value, flags risks, and helps you decide which sellers to contact first.",
   openGraph: {
-    title: "MarktBot — AI-powered marketplace intelligence",
+    title: "markt — Used electronics copilot",
     description:
-      "Automated deal hunting across Marktplaats, Vinted, and more. AI scoring, fair-value estimates, and a smart assistant that remembers your brief.",
+      "Mission-based used electronics buying: live matches, fair-value scoring, risk flags, saved comparisons, and seller drafting.",
     type: "website",
   },
 };

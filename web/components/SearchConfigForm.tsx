@@ -126,7 +126,7 @@ export function SearchConfigForm({
         )}
       </div>
       <p className="section-support">
-        {description || "Set the marketplace, budget, timing, and condition guardrails you want MarktBot to follow."}
+        {description || "Set the marketplace, budget, timing, and condition guardrails you want markt to follow."}
       </p>
 
       {error && <div className="error-msg">{error}</div>}

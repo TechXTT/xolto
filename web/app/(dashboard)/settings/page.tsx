@@ -85,7 +85,7 @@ export default function SettingsPage() {
           <section className="surface-panel premium-card">
             <p className="section-kicker">Upgrade</p>
             <h3>Unlock faster scans and more active hunts</h3>
-            <p className="section-support">Choose the plan that fits how aggressively you want MarktBot to monitor the market.</p>
+            <p className="section-support">Choose the plan that fits how aggressively you want markt to monitor the market.</p>
 
             <div className="plan-grid">
               <PlanCard

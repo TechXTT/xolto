@@ -10,8 +10,8 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "MarktBot",
-  description: "Automated deal hunting for European marketplaces",
+  title: "markt — Used electronics copilot",
+  description: "Buy used electronics without overpaying. markt scans listings, estimates fair value, flags risks, and guides seller outreach.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

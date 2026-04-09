@@ -69,7 +69,7 @@ export default function LandingPage() {
       >
         <a href="/" className="flex items-center gap-2.5 font-bold text-[1.05rem] tracking-[-0.02em]">
           <LogoMark />
-          <span className="hidden sm:block">MarktBot</span>
+          <span className="hidden sm:block">markt</span>
         </a>
         <div className="flex items-center gap-2.5">
           <a href={`${APP_URL}/login`} className="btn btn-ghost btn-sm">Log in</a>
@@ -209,7 +209,7 @@ export default function LandingPage() {
                   </svg>
                 ),
                 title: "Live deal radar",
-                body: "Set a search once. MarktBot polls every marketplace on your behalf and streams new matches straight to your feed — no refreshing, no missed listings.",
+                body: "Set a mission once. markt polls every marketplace on your behalf and streams new matches to your dashboard — no refreshing, no missed listings.",
               },
               {
                 icon: (
@@ -311,10 +311,10 @@ export default function LandingPage() {
                 cta: "Upgrade to Pro",
               },
               {
-                name: "Team", price: "€29", featured: false,
-                features: ["50 active searches", "1 minute polling", "AI search generation", "Full assistant access", "Auto-messaging"],
+                name: "Power", price: "€29", featured: false,
+                features: ["Unlimited missions", "50 active searches", "1 minute polling", "AI search generation", "Full assistant access", "Auto-messaging"],
                 missing: [],
-                cta: "Get Team",
+                cta: "Get Power",
               },
             ].map((plan, i) => (
               <div
@@ -392,7 +392,7 @@ export default function LandingPage() {
           <div>
             <a href="/" className="flex items-center gap-2.5 font-bold text-[1.05rem] tracking-[-0.02em]">
               <LogoMark />
-              <span>MarktBot</span>
+              <span>markt</span>
             </a>
             <p className="text-[0.875rem] text-ink/38 mt-2 max-w-[32ch] leading-[1.55]">
               AI-powered deal intelligence for serious marketplace buyers.
@@ -425,7 +425,7 @@ export default function LandingPage() {
           className="text-center text-[0.8rem] text-ink/38 max-w-[1200px] mx-auto py-5"
           style={{ borderTop: "1px solid rgb(15 143 103 / 0.08)", padding: "20px clamp(20px, 4vw, 60px)" }}
         >
-          © 2026 MarktBot &nbsp;·&nbsp; Built for serious marketplace hunters
+          © 2026 markt &nbsp;·&nbsp; Built for serious electronics buyers
         </div>
       </div>
 

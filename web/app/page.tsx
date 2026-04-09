@@ -23,7 +23,7 @@ export default function HomePage() {
     return (
       <main className="fullscreen-shell landing-loading">
         <div className="loading-orb" />
-        <p className="loading-copy">Opening MarktBot…</p>
+        <p className="loading-copy">Loading markt…</p>
       </main>
     );
   }
