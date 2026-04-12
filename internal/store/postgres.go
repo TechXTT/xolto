@@ -44,6 +44,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			price      INTEGER NOT NULL,
 			price_type TEXT NOT NULL DEFAULT '',
 			score      DOUBLE PRECISION NOT NULL DEFAULT 0,
+			reasoning_source TEXT NOT NULL DEFAULT '',
 			offered    BOOLEAN NOT NULL DEFAULT FALSE,
 			query      TEXT NOT NULL DEFAULT '',
 			profile_id BIGINT NOT NULL DEFAULT 0,
@@ -193,8 +194,12 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS offer_price INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS reasoning TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS reasoning_source TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS risk_flags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS feedback TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS feedback_at TIMESTAMPTZ NULL`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_listings_feedback ON listings(profile_id, feedback)`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS urgency TEXT NOT NULL DEFAULT 'flexible'`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS avoid_flags JSONB NOT NULL DEFAULT '[]'::jsonb`)
@@ -203,6 +208,27 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen DESC)`)
+
+	// Admin & AI usage tracking.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE`)
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS ai_usage_log (
+			id BIGSERIAL PRIMARY KEY,
+			user_id TEXT NOT NULL DEFAULT '',
+			call_type TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			success BOOLEAN NOT NULL DEFAULT TRUE,
+			error_msg TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at DESC)`)
+
 	return nil
 }
 
@@ -341,6 +367,38 @@ func (s *PostgresStore) ListMissions(userID string) ([]models.Mission, error) {
 		out = append(out, mission)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeleteMission(id int64, userID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`DELETE FROM shopping_profiles WHERE id = $1 AND user_id = $2`, id, userID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	if _, err := tx.Exec(`DELETE FROM search_configs WHERE profile_id = $1 AND user_id = $2`, id, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM listings WHERE profile_id = $1 AND item_id LIKE $2`, id, scopedItemPrefix(userID)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM shortlist_entries WHERE profile_id = $1 AND user_id = $2`, id, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (s *PostgresStore) UpdateMissionStatus(id int64, status string) error {
@@ -515,7 +573,7 @@ func (s *PostgresStore) CreateUser(email, hash, name string) (string, error) {
 
 func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
 		FROM users WHERE email = $1
 	`, strings.ToLower(strings.TrimSpace(email)))
 	return scanPGUser(row)
@@ -523,7 +581,7 @@ func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *PostgresStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
 		FROM users WHERE id = $1
 	`, id)
 	return scanPGUser(row)
@@ -547,6 +605,101 @@ func (s *PostgresStore) UpdateUserTierByStripeCustomer(customerID, tier string) 
 func (s *PostgresStore) RecordStripeEvent(eventID string) error {
 	_, err := s.db.Exec(`INSERT INTO stripe_events (event_id) VALUES ($1) ON CONFLICT(event_id) DO NOTHING`, eventID)
 	return err
+}
+
+func (s *PostgresStore) SetUserAdmin(userID string, isAdmin bool) error {
+	_, err := s.db.Exec(`UPDATE users SET is_admin = $1, updated_at = NOW() WHERE id = $2`, isAdmin, userID)
+	return err
+}
+
+func (s *PostgresStore) RecordAIUsage(entry models.AIUsageEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO ai_usage_log (user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, entry.UserID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
+		entry.LatencyMs, entry.Success, entry.ErrorMsg)
+	return err
+}
+
+func (s *PostgresStore) ListAllUsers() ([]models.AdminUserSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
+		       COALESCE(m.cnt, 0) AS mission_count,
+		       COALESCE(sc.cnt, 0) AS search_count,
+		       COALESCE(ai.cnt, 0) AS ai_call_count,
+		       COALESCE(ai.tokens, 0) AS ai_tokens
+		FROM users u
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM shopping_profiles GROUP BY user_id) m ON m.user_id = u.id
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM search_configs GROUP BY user_id) sc ON sc.user_id = u.id
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt, COALESCE(SUM(total_tokens), 0) AS tokens FROM ai_usage_log GROUP BY user_id) ai ON ai.user_id = u.id
+		ORDER BY u.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.AdminUserSummary
+	for rows.Next() {
+		var s models.AdminUserSummary
+		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.IsAdmin, &s.StripeCustomer,
+			&s.CreatedAt, &s.UpdatedAt, &s.MissionCount, &s.SearchCount, &s.AICallCount, &s.AITokens); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetAIUsageStats(days int) (models.AIUsageStats, error) {
+	var stats models.AIUsageStats
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(prompt_tokens), 0),
+		       COALESCE(SUM(completion_tokens), 0),
+		       COALESCE(SUM(CASE WHEN NOT success THEN 1 ELSE 0 END), 0)
+		FROM ai_usage_log
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+	`, days).Scan(&stats.TotalCalls, &stats.TotalTokens, &stats.TotalPrompt, &stats.TotalCompletion, &stats.FailedCalls)
+	return stats, err
+}
+
+func (s *PostgresStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
+		FROM ai_usage_log
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		ORDER BY created_at DESC
+		LIMIT 500
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.AIUsageEntry
+	for rows.Next() {
+		var e models.AIUsageEntry
+		if err := rows.Scan(&e.ID, &e.UserID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
+			&e.TotalTokens, &e.LatencyMs, &e.Success, &e.ErrorMsg, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetUserAIUsageStats(userID string, days int) (models.AIUsageStats, error) {
+	var stats models.AIUsageStats
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(prompt_tokens), 0),
+		       COALESCE(SUM(completion_tokens), 0),
+		       COALESCE(SUM(CASE WHEN NOT success THEN 1 ELSE 0 END), 0)
+		FROM ai_usage_log
+		WHERE user_id = $1 AND created_at >= NOW() - MAKE_INTERVAL(days => $2)
+	`, userID, days).Scan(&stats.TotalCalls, &stats.TotalTokens, &stats.TotalPrompt, &stats.TotalCompletion, &stats.FailedCalls)
+	return stats, err
 }
 
 func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
@@ -652,10 +805,11 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       last_seen
+		       last_seen, feedback
 		FROM listings
 		WHERE item_id LIKE $1
 		  AND ($2 = 0 OR profile_id = $2)
+		  AND COALESCE(feedback, '') <> 'dismissed'
 		ORDER BY last_seen DESC
 		LIMIT $3
 	`, scopedItemPrefix(userID), missionID, limit)
@@ -672,7 +826,7 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &listing.Date,
+			&listing.Reason, &riskFlagsJSON, &listing.Date, &listing.Feedback,
 		); err != nil {
 			return nil, err
 		}
@@ -686,6 +840,61 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 		listings = append(listings, listing)
 	}
 	return listings, rows.Err()
+}
+
+// SetListingFeedback marks a listing as approved/dismissed or clears feedback.
+// feedback must be one of "", "approved", "dismissed".
+func (s *PostgresStore) SetListingFeedback(userID, itemID, feedback string) error {
+	feedback = strings.TrimSpace(feedback)
+	switch feedback {
+	case "", "approved", "dismissed":
+	default:
+		return fmt.Errorf("invalid feedback value %q", feedback)
+	}
+	_, err := s.db.Exec(`
+		UPDATE listings
+		SET feedback = $1,
+		    feedback_at = CASE WHEN $1 = '' THEN NULL ELSE NOW() END
+		WHERE item_id = $2
+	`, feedback, scopedItemID(userID, itemID))
+	return err
+}
+
+// GetApprovedComparables returns listings the user has explicitly approved for
+// this mission. They act as high-confidence comparables when scoring new
+// listings — the scorer treats them as ground-truth relevant hits so the
+// reasoner can calibrate fair value and relevance against confirmed matches.
+func (s *PostgresStore) GetApprovedComparables(userID string, missionID int64, limit int) ([]models.ComparableDeal, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.Query(`
+		SELECT item_id, title, price, score, last_seen
+		FROM listings
+		WHERE item_id LIKE $1
+		  AND feedback = 'approved'
+		  AND ($2 = 0 OR profile_id = $2)
+		  AND price > 0
+		ORDER BY feedback_at DESC
+		LIMIT $3
+	`, scopedItemPrefix(userID), missionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deals []models.ComparableDeal
+	for rows.Next() {
+		var deal models.ComparableDeal
+		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &deal.LastSeen); err != nil {
+			return nil, err
+		}
+		deal.ItemID = unscopedItemID(deal.ItemID)
+		deal.Similarity = 1.0
+		deal.MatchReason = "user-approved match"
+		deals = append(deals, deal)
+	}
+	return deals, rows.Err()
 }
 
 func (s *PostgresStore) ListActionDrafts(userID string) ([]models.ActionDraft, error) {
@@ -726,6 +935,21 @@ func (s *PostgresStore) GetListingScore(userID, itemID string) (float64, bool, e
 	return score, err == nil, err
 }
 
+func (s *PostgresStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error) {
+	err = s.db.QueryRow(`
+		SELECT price, reasoning_source
+		FROM listings
+		WHERE item_id = $1
+	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource)
+	if err == sql.ErrNoRows {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return price, reasoningSource, true, nil
+}
+
 func (s *PostgresStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
 	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
 	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
@@ -733,9 +957,9 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 		INSERT INTO listings (
 			item_id, title, price, price_type, score, query, profile_id, image_urls,
 			url, condition, marketplace_id,
-			fair_price, offer_price, confidence, reasoning, risk_flags,
+			fair_price, offer_price, confidence, reasoning, reasoning_source, risk_flags,
 			first_seen, last_seen
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),NOW())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
 		ON CONFLICT(item_id) DO UPDATE SET
 			price          = EXCLUDED.price,
 			score          = EXCLUDED.score,
@@ -748,13 +972,19 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 			offer_price    = EXCLUDED.offer_price,
 			confidence     = EXCLUDED.confidence,
 			reasoning      = EXCLUDED.reasoning,
+			reasoning_source = EXCLUDED.reasoning_source,
 			risk_flags     = EXCLUDED.risk_flags,
 			last_seen      = NOW()
 	`,
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
-		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
+		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
 	)
+	return err
+}
+
+func (s *PostgresStore) TouchListing(userID, itemID string) error {
+	_, err := s.db.Exec(`UPDATE listings SET last_seen = NOW() WHERE item_id = $1`, scopedItemID(userID, itemID))
 	return err
 }
 
@@ -831,7 +1061,11 @@ func (s *PostgresStore) GetComparableDeals(userID, query, excludeItemID string, 
 	rows, err := s.db.Query(`
 		SELECT item_id, title, price, score, last_seen
 		FROM listings
-		WHERE query = $1 AND item_id LIKE $2 AND item_id != $3 AND price > 0
+		WHERE query = $1
+		  AND item_id LIKE $2
+		  AND item_id != $3
+		  AND price > 0
+		  AND COALESCE(feedback, '') <> 'dismissed'
 		ORDER BY last_seen DESC
 		LIMIT $4
 	`, query, scopedItemPrefix(userID), scopedItemID(userID, excludeItemID), limit)
@@ -913,7 +1147,7 @@ func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withSta
 
 func scanPGUser(row *sql.Row) (*models.User, error) {
 	var user models.User
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.StripeCustomer, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

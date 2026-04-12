@@ -27,6 +27,7 @@ type Listing struct {
 	Confidence float64
 	Reason     string
 	RiskFlags  []string
+	Feedback   string // "", "approved", "dismissed"
 }
 
 type Seller struct {

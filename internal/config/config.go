@@ -74,14 +74,19 @@ func (c ScoringConfig) GetMarketSampleSize() int {
 }
 
 type AIConfig struct {
-	Enabled        bool    `yaml:"enabled"`
-	BaseURL        string  `yaml:"base_url"`
-	APIKey         string  `yaml:"api_key"`
-	Model          string  `yaml:"model"`
-	Temperature    float64 `yaml:"temperature"`
-	MaxComparables int     `yaml:"max_comparables"`
-	MinConfidence  float64 `yaml:"min_confidence"`
-	SearchAdvice   bool    `yaml:"search_advice"`
+	Enabled                bool    `yaml:"enabled"`
+	BaseURL                string  `yaml:"base_url"`
+	APIKey                 string  `yaml:"api_key"`
+	Model                  string  `yaml:"model"`
+	Temperature            float64 `yaml:"temperature"`
+	MaxComparables         int     `yaml:"max_comparables"`
+	MinConfidence          float64 `yaml:"min_confidence"`
+	SearchAdvice           bool    `yaml:"search_advice"`
+	SkipLLMConfidence      float64 `yaml:"skip_llm_confidence"`
+	SkipLLMScoreLow        float64 `yaml:"skip_llm_score_low"`
+	SkipLLMScoreHigh       float64 `yaml:"skip_llm_score_high"`
+	MaxCallsPerUserPerHour int     `yaml:"max_calls_per_user_per_hour"`
+	MaxCallsGlobalPerHour  int     `yaml:"max_calls_global_per_hour"`
 }
 
 func Load(path string) (*Config, error) {
@@ -144,15 +149,7 @@ func setDefaults(cfg *Config) {
 	if cfg.AI.BaseURL == "" {
 		cfg.AI.BaseURL = "https://api.openai.com/v1"
 	}
-	if cfg.AI.Temperature == 0 {
-		cfg.AI.Temperature = 0.2
-	}
-	if cfg.AI.MaxComparables == 0 {
-		cfg.AI.MaxComparables = 8
-	}
-	if cfg.AI.MinConfidence == 0 {
-		cfg.AI.MinConfidence = 0.55
-	}
+	cfg.AI = NormalizeAIConfig(cfg.AI)
 	for i := range cfg.Searches {
 		if cfg.Searches[i].MarketplaceID == "" {
 			cfg.Searches[i].MarketplaceID = "marktplaats"
@@ -161,6 +158,37 @@ func setDefaults(cfg *Config) {
 			cfg.Searches[i].OfferPercentage = 70
 		}
 	}
+}
+
+func NormalizeAIConfig(cfg AIConfig) AIConfig {
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "https://api.openai.com/v1"
+	}
+	if cfg.Temperature == 0 {
+		cfg.Temperature = 0.2
+	}
+	if cfg.MaxComparables == 0 {
+		cfg.MaxComparables = 5
+	}
+	if cfg.MinConfidence == 0 {
+		cfg.MinConfidence = 0.55
+	}
+	if cfg.SkipLLMConfidence == 0 {
+		cfg.SkipLLMConfidence = 0.75
+	}
+	if cfg.SkipLLMScoreLow == 0 {
+		cfg.SkipLLMScoreLow = 3.0
+	}
+	if cfg.SkipLLMScoreHigh == 0 {
+		cfg.SkipLLMScoreHigh = 9.0
+	}
+	if cfg.MaxCallsPerUserPerHour == 0 {
+		cfg.MaxCallsPerUserPerHour = 200
+	}
+	if cfg.MaxCallsGlobalPerHour == 0 {
+		cfg.MaxCallsGlobalPerHour = 2000
+	}
+	return cfg
 }
 
 func validate(cfg *Config) error {
@@ -198,6 +226,24 @@ func validate(cfg *Config) error {
 		}
 		if cfg.AI.MinConfidence < 0 || cfg.AI.MinConfidence > 1 {
 			return fmt.Errorf("ai: min_confidence must be between 0 and 1")
+		}
+		if cfg.AI.SkipLLMConfidence < 0 || cfg.AI.SkipLLMConfidence > 1 {
+			return fmt.Errorf("ai: skip_llm_confidence must be between 0 and 1")
+		}
+		if cfg.AI.SkipLLMScoreLow < 1 || cfg.AI.SkipLLMScoreLow > 10 {
+			return fmt.Errorf("ai: skip_llm_score_low must be between 1 and 10")
+		}
+		if cfg.AI.SkipLLMScoreHigh < 1 || cfg.AI.SkipLLMScoreHigh > 10 {
+			return fmt.Errorf("ai: skip_llm_score_high must be between 1 and 10")
+		}
+		if cfg.AI.SkipLLMScoreLow >= cfg.AI.SkipLLMScoreHigh {
+			return fmt.Errorf("ai: skip_llm_score_low must be less than skip_llm_score_high")
+		}
+		if cfg.AI.MaxCallsPerUserPerHour < 0 {
+			return fmt.Errorf("ai: max_calls_per_user_per_hour must be >= 0")
+		}
+		if cfg.AI.MaxCallsGlobalPerHour < 0 {
+			return fmt.Errorf("ai: max_calls_global_per_hour must be >= 0")
 		}
 	}
 	return nil

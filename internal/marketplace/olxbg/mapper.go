@@ -3,10 +3,34 @@ package olxbg
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/TechXTT/marktbot/internal/models"
 )
+
+// BGNPerEUR is the fixed BGN→EUR exchange rate (currency board peg).
+// 1 EUR = 1.95583 BGN. OLX BG quotes prices in BGN stotinki but the rest of
+// the system — scorer comparables, UI formatting, mission budgets — operates
+// in EUR cents, so we convert at the edge.
+const BGNPerEUR = 1.95583
+
+// BGNStotinkiToEURCents converts BGN stotinki (1/100 BGN) to EUR cents.
+func BGNStotinkiToEURCents(bgnStotinki int) int {
+	if bgnStotinki <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(bgnStotinki) / BGNPerEUR))
+}
+
+// EURCentsToBGNWhole converts EUR cents to whole BGN units, which is the
+// shape OLX API v1 expects for price[from]/price[to] filters.
+func EURCentsToBGNWhole(eurCents int) int {
+	if eurCents <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(eurCents) / 100 * BGNPerEUR))
+}
 
 // flexString unmarshals a JSON field that may be a string, number, or array.
 // For arrays it takes the first element.
@@ -52,17 +76,8 @@ type searchResponse struct {
 
 type apiOffer struct {
 	ID    flexString `json:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title"`
-	Price struct {
-		Value struct {
-			Value         float64 `json:"value"`
-			PriceForWhole float64 `json:"price_for_whole"`
-		} `json:"value"`
-		Negotiable bool   `json:"negotiable"`
-		Currency   string `json:"currency"`
-		Type       string `json:"type"` // "price" | "free" | "exchange" | "negotiable"
-	} `json:"price"`
+	URL   string     `json:"url"`
+	Title string     `json:"title"`
 	Photos []struct {
 		Link string `json:"link"`
 	} `json:"photos"`
@@ -77,27 +92,36 @@ type apiOffer struct {
 	Contact struct {
 		Name string `json:"name"`
 	} `json:"contact"`
-	Params []struct {
-		Key   string `json:"key"`
-		Name  string `json:"name"`
-		Value struct {
-			Key   flexString `json:"key"`
-			Label string     `json:"label"`
-		} `json:"value"`
-	} `json:"params"`
-	IsActive bool `json:"is_active"`
+	Params []apiParam `json:"params"`
+	// OLX API v1 exposes advert status as a string ("active", "removed_by_user", etc.)
+	// instead of the legacy `is_active` boolean.
+	Status string `json:"status"`
+}
+
+// apiParam represents a single entry in the offer's params array. OLX nests
+// price and condition into this same shape — price has numeric `value.value`
+// plus `negotiable`/`type`, condition/state uses `value.key` + `value.label`.
+// A single flat shape tolerates both because absent fields decode to zero.
+type apiParam struct {
+	Key   string     `json:"key"`
+	Name  string     `json:"name"`
+	Value paramValue `json:"value"`
+}
+
+type paramValue struct {
+	// Price-shaped params:
+	Value      float64 `json:"value"`
+	Negotiable bool    `json:"negotiable"`
+	Currency   string  `json:"currency"`
+	Type       string  `json:"type"` // "price" | "free" | "exchange"
+	// State/enum-shaped params:
+	Key   flexString `json:"key"`
+	Label string     `json:"label"`
 }
 
 func mapListing(offer apiOffer) models.Listing {
-	priceCents := parsePriceToCents(offer.Price.Value.Value)
-	priceType := "fixed"
-	if offer.Price.Negotiable {
-		priceType = "negotiable"
-	} else if offer.Price.Type == "free" {
-		priceType = "free"
-	} else if offer.Price.Type == "exchange" {
-		priceType = "negotiable"
-	}
+	bgnStotinki, priceType := priceFromParams(offer.Params)
+	eurCents := BGNStotinkiToEURCents(bgnStotinki)
 
 	var imageURLs []string
 	for _, photo := range offer.Photos {
@@ -114,7 +138,7 @@ func mapListing(offer apiOffer) models.Listing {
 		CanonicalID:   fmt.Sprintf("olxbg:%s", string(offer.ID)),
 		MarketplaceID: "olxbg",
 		Title:         offer.Title,
-		Price:         priceCents,
+		Price:         eurCents,
 		PriceType:     priceType,
 		Condition:     condition,
 		URL:           offer.URL,
@@ -123,22 +147,41 @@ func mapListing(offer apiOffer) models.Listing {
 			Name: offer.Contact.Name,
 		},
 		Attributes: map[string]string{
-			"city":     city,
-			"currency": "BGN",
+			"city":            city,
+			"currency":        "EUR",
+			"price_local":     fmt.Sprintf("%d", bgnStotinki),
+			"price_local_ccy": "BGN",
 		},
 	}
 }
 
+// priceFromParams extracts the raw price in BGN stotinki and the normalized
+// price type from the offer's params array. OLX nests the price under a param
+// with key "price" whose value carries the numeric amount plus negotiable/type
+// hints. The caller is expected to convert to EUR cents before storing on the
+// listing. Returns (0, "") when the price param is missing.
+func priceFromParams(params []apiParam) (int, string) {
+	for _, p := range params {
+		if p.Key != "price" {
+			continue
+		}
+		priceType := "fixed"
+		switch {
+		case p.Value.Negotiable:
+			priceType = "negotiable"
+		case p.Value.Type == "free":
+			priceType = "free"
+		case p.Value.Type == "exchange":
+			priceType = "negotiable"
+		}
+		return parsePriceToCents(p.Value.Value), priceType
+	}
+	return 0, ""
+}
+
 // conditionFromParams extracts a normalized condition string from OLX params.
 // OLX BG uses Bulgarian condition labels under the "state" or "condition" param key.
-func conditionFromParams(params []struct {
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	Value struct {
-		Key   flexString `json:"key"`
-		Label string     `json:"label"`
-	} `json:"value"`
-}) string {
+func conditionFromParams(params []apiParam) string {
 	for _, p := range params {
 		if p.Key == "state" || p.Key == "condition" {
 			return normalizeCondition(string(p.Value.Key), p.Value.Label)

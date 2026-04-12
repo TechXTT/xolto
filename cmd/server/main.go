@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	marktplaatsmp "github.com/TechXTT/marktbot/internal/marketplace/marktplaats"
 	"github.com/TechXTT/marktbot/internal/marketplace/olxbg"
 	"github.com/TechXTT/marktbot/internal/marketplace/vinted"
+	"github.com/TechXTT/marktbot/internal/models"
 	"github.com/TechXTT/marktbot/internal/notify"
 	"github.com/TechXTT/marktbot/internal/reasoner"
 	"github.com/TechXTT/marktbot/internal/scorer"
@@ -41,17 +43,37 @@ func main() {
 	appCfg := &config.Config{
 		Marktplaats: config.MarktplaatsConfig{},
 		Scoring:     config.ScoringConfig{MinScore: 7, MarketSampleSize: 20},
-		AI: config.AIConfig{
+		AI: config.NormalizeAIConfig(config.AIConfig{
 			Enabled: cfg.AIAPIKey != "",
 			BaseURL: cfg.AIBaseURL,
 			APIKey:  cfg.AIAPIKey,
 			Model:   cfg.AIModel,
-		},
+		}),
 	}
 	provider := marktplaatsmp.New(appCfg.Marktplaats)
 	rsn := reasoner.New(appCfg.AI)
 	sc := scorer.New(db, appCfg.Scoring, rsn)
 	asst := assistant.New(appCfg, db, provider, sc)
+
+	// Wire AI usage tracking: each module reports token counts via a callback,
+	// and we persist them to the ai_usage_log table.
+	usageCB := func(userID string) func(string, string, int, int, int, bool, string) {
+		return func(callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
+			_ = db.RecordAIUsage(models.AIUsageEntry{
+				UserID:           userID,
+				CallType:         callType,
+				Model:            model,
+				PromptTokens:     prompt,
+				CompletionTokens: completion,
+				TotalTokens:      prompt + completion,
+				LatencyMs:        latencyMs,
+				Success:          success,
+				ErrorMsg:         errMsg,
+			})
+		}
+	}
+	rsn.SetUsageCallback(usageCB(""))
+	asst.SetUsageCallback(usageCB(""))
 	broker := api.NewSSEBroker()
 	dispatcher := notify.NewSSEDispatcher(broker)
 	registry := marketplace.NewRegistry()
@@ -64,7 +86,11 @@ func main() {
 	pool.Start(context.Background())
 	defer pool.Stop()
 
-	srv := api.NewServer(cfg, db, asst, broker, pool)
+	// Backfill marketplace coverage for missions created before all-marketplace
+	// auto-deploy was enabled. AutoDeployHunts is idempotent (skips dupes).
+	backfillMissionHunts(context.Background(), db, asst)
+
+	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
 	httpServer := &http.Server{
 		Addr:    cfg.Address,
 		Handler: srv.Handler(),
@@ -89,6 +115,50 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Printf("server shutdown error: %v", err)
 	}
+}
+
+func backfillMissionHunts(ctx context.Context, db store.Store, asst *assistant.Assistant) {
+	specs, err := db.GetAllEnabledSearchConfigs()
+	if err != nil {
+		log.Printf("backfill: failed to load search configs: %v", err)
+		return
+	}
+	log.Printf("backfill: scanning %d existing search configs", len(specs))
+	seen := map[string]bool{}
+	deployed := 0
+	for _, spec := range specs {
+		if spec.UserID == "" || spec.ProfileID <= 0 {
+			log.Printf("backfill: skipping spec id=%d user=%q profile=%d (missing user or mission link)", spec.ID, spec.UserID, spec.ProfileID)
+			continue
+		}
+		key := spec.UserID + "|" + strconv.FormatInt(spec.ProfileID, 10)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		mission, err := db.GetMission(spec.ProfileID)
+		if err != nil {
+			log.Printf("backfill: GetMission(%d) err=%v", spec.ProfileID, err)
+			continue
+		}
+		if mission == nil {
+			log.Printf("backfill: mission %d not found", spec.ProfileID)
+			continue
+		}
+		if mission.UserID != spec.UserID {
+			log.Printf("backfill: mission %d user mismatch", spec.ProfileID)
+			continue
+		}
+		log.Printf("backfill: deploying hunts for mission=%d name=%q queries=%d", mission.ID, mission.Name, len(mission.SearchQueries))
+		count, err := asst.AutoDeployHunts(ctx, spec.UserID, *mission)
+		if err != nil {
+			log.Printf("backfill: AutoDeployHunts mission=%d err=%v", mission.ID, err)
+			continue
+		}
+		log.Printf("backfill: mission=%d added %d new hunts", mission.ID, count)
+		deployed += count
+	}
+	log.Printf("backfill: scanned %d unique missions, deployed %d new hunts", len(seen), deployed)
 }
 
 func openServerStore(ctx context.Context, databaseURL string) (interface {

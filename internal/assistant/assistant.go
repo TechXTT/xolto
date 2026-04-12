@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -20,10 +21,63 @@ import (
 	"github.com/TechXTT/marktbot/internal/store"
 )
 
+// pricePhrasePattern strips natural-language budget qualifiers from search
+// queries. Budget belongs in BudgetMax; leaving phrases like "under 500" in the
+// literal query pollutes marketplace results and defeats title matching.
+var pricePhrasePattern = regexp.MustCompile(`(?i)\b(under|below|less\s+than|up\s+to|max(?:imum)?|onder|tot|maximaal|above|over|more\s+than|min(?:imum)?)\s*[€$]?\s*\d+([.,]\d+)?\s*(eur|euro|usd|\$|€)?\b`)
+
+// priceWordPattern catches trailing price hints like "500 eur" that lack a
+// leading qualifier.
+var priceWordPattern = regexp.MustCompile(`(?i)\b\d+([.,]\d+)?\s*(eur|euro|euros|usd|\$|€)\b`)
+
+// conditionWordPattern removes condition qualifiers — those belong in the
+// Condition filter, not the free-text query.
+var conditionWordPattern = regexp.MustCompile(`(?i)\b(brand\s+new|like\s+new|new\s+in\s+box|nib|mint|used|second\s*hand|refurbished|fair|good)\b`)
+
+// sanitizeSearchQuery trims price/condition qualifiers and collapses whitespace.
+// Returns "" if nothing meaningful remains.
+func sanitizeSearchQuery(raw string) string {
+	q := strings.ToLower(strings.TrimSpace(raw))
+	q = pricePhrasePattern.ReplaceAllString(q, " ")
+	q = priceWordPattern.ReplaceAllString(q, " ")
+	q = conditionWordPattern.ReplaceAllString(q, " ")
+	q = strings.Join(strings.Fields(q), " ")
+	return q
+}
+
+// isQueryTooBroad rejects category-level queries (single generic noun, or two
+// generic words with no distinctive identifier). These produce enormous volumes
+// of unrelated results on marketplaces and should be replaced by the main
+// target query.
+func isQueryTooBroad(q string) bool {
+	broad := map[string]bool{
+		"laptop": true, "notebook": true, "computer": true, "pc": true,
+		"camera": true, "lens": true, "mirrorless": true, "dslr": true,
+		"smartphone": true, "phone": true, "tablet": true,
+		"tv": true, "television": true, "monitor": true,
+		"headphones": true, "earbuds": true, "headset": true,
+		"console": true, "gpu": true, "cpu": true,
+	}
+	tokens := strings.Fields(q)
+	if len(tokens) == 0 {
+		return true
+	}
+	// If every token is broad/generic, reject.
+	for _, t := range tokens {
+		if !broad[t] {
+			return false
+		}
+	}
+	return true
+}
+
 const (
 	defaultMatchLimit      = 5
 	maxListingsToScoreLive = 30 // cap per query for live assistant calls; background workers score all
 )
+
+// UsageCallback is called after each LLM request with token counts and timing.
+type UsageCallback func(callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
 type Assistant struct {
 	cfg      *config.Config
@@ -31,6 +85,7 @@ type Assistant struct {
 	searcher marketplace.Marketplace
 	scorer   *scorer.Scorer
 	client   *http.Client
+	onUsage  UsageCallback
 }
 
 func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, sc *scorer.Scorer) *Assistant {
@@ -42,6 +97,14 @@ func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, s
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
+	}
+}
+
+func (a *Assistant) SetUsageCallback(cb UsageCallback) { a.onUsage = cb }
+
+func (a *Assistant) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+	if a.onUsage != nil {
+		a.onUsage(callType, a.cfg.AI.Model, prompt, completion, latencyMs, success, errMsg)
 	}
 }
 
@@ -490,12 +553,40 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 		existingKeys[strings.ToLower(s.Query)+"|"+s.MarketplaceID] = true
 	}
 
-	queries := mission.SearchQueries
-	if len(queries) == 0 && mission.TargetQuery != "" {
-		queries = []string{mission.TargetQuery}
+	rawQueries := mission.SearchQueries
+	if len(rawQueries) == 0 && mission.TargetQuery != "" {
+		rawQueries = []string{mission.TargetQuery}
+	}
+	if len(rawQueries) == 0 {
+		rawQueries = []string{mission.Name}
+	}
+
+	// Always include the mission's primary target query — it is the most
+	// specific anchor and the LLM sometimes omits it from search_queries.
+	if strings.TrimSpace(mission.TargetQuery) != "" {
+		rawQueries = append([]string{mission.TargetQuery}, rawQueries...)
+	}
+
+	// Sanitize + dedupe. Drop broad category-only queries that produce noise.
+	queries := make([]string, 0, len(rawQueries))
+	seenQ := make(map[string]bool, len(rawQueries))
+	for _, q := range rawQueries {
+		cleaned := sanitizeSearchQuery(q)
+		if cleaned == "" || isQueryTooBroad(cleaned) {
+			continue
+		}
+		if seenQ[cleaned] {
+			continue
+		}
+		seenQ[cleaned] = true
+		queries = append(queries, cleaned)
 	}
 	if len(queries) == 0 {
-		queries = []string{mission.Name}
+		// Last-ditch fallback so the mission still deploys something useful.
+		fallback := sanitizeSearchQuery(mission.Name)
+		if fallback != "" {
+			queries = []string{fallback}
+		}
 	}
 
 	interval := intervalForTier(user.Tier)
@@ -541,14 +632,9 @@ func intervalForTier(tier string) time.Duration {
 }
 
 func marketplacesForTier(tier string) []string {
-	switch tier {
-	case "power", "team":
-		return []string{"marktplaats", "vinted", "olxbg"}
-	case "pro":
-		return []string{"marktplaats", "vinted"}
-	default:
-		return []string{"marktplaats"}
-	}
+	// All tiers scrape every supported marketplace; tier still controls
+	// concurrency / interval (see intervalForTier).
+	return []string{"marktplaats", "vinted", "olxbg"}
 }
 
 func (a *Assistant) findRecommendationByItemID(ctx context.Context, userID, itemID string, missionID int64) (*models.Recommendation, *models.Mission, error) {
@@ -1096,7 +1182,8 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 				"content": "You are an expert buying assistant helping users find great second-hand deals on European marketplaces (Marktplaats, Vinted, OLX). " +
 					"Extract the user's buying intent into a structured JSON profile. Rules:\n" +
 					"- name: short human-readable label (e.g. 'Sony A6700', 'Camera + 2 lenses', 'Vintage Levi jacket'). No slugs, no hyphens, no URL encoding.\n" +
-					"- search_queries: exactly 3 to 5 terms. Include the main search term, one common abbreviation if applicable, one broader variant. No more.\n" +
+					"- search_queries: 1 to 3 SPECIFIC product queries. Each entry must identify the exact product — include brand + model (or distinctive identifier). Include at most one common abbreviation or alternate spelling. DO NOT emit broad category queries like 'mirrorless camera', 'laptop', or 'smartphone' — those return unrelated noise. DO NOT include price qualifiers like 'under 500' or 'max 300 eur' — budget belongs in budget_max. DO NOT include condition words ('new', 'used', 'like new') — condition belongs in preferred_condition.\n" +
+					"- target_query: the single most representative specific query (brand + model). Strip price and condition words.\n" +
 					"- budget values are whole euros (integers). budget_stretch = budget_max if not specified.\n" +
 					"- preferred_condition: 'new', 'like_new', 'good', 'fair'. Default to ['like_new','good'] if unspecified.\n" +
 					"Return ONLY valid JSON — no explanation, no markdown fences.",
@@ -1117,14 +1204,19 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AI.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := a.client.Do(req)
+	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		a.reportUsage("brief_parser", 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		a.reportUsage("brief_parser", 0, 0, latencyMs, false, errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
 		Choices []struct {
@@ -1132,10 +1224,16 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		a.reportUsage("brief_parser", 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
+	a.reportUsage("brief_parser", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("no ai choices")
 	}
@@ -1203,7 +1301,7 @@ func (a *Assistant) compareWithAI(ctx context.Context, entries []models.Shortlis
 			{"role": "user", "content": "Compare these shortlisted deals and tell me which one to go for:\n" + mustJSON(entries)},
 		},
 	}
-	return a.chatText(ctx, payload)
+	return a.chatText(ctx, "compare", payload)
 }
 
 func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry) (string, error) {
@@ -1222,10 +1320,10 @@ func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry
 			{"role": "user", "content": "Draft a seller message for this listing:\n" + mustJSON(entry)},
 		},
 	}
-	return a.chatText(ctx, payload)
+	return a.chatText(ctx, "draft", payload)
 }
 
-func (a *Assistant) chatText(ctx context.Context, payload map[string]any) (string, error) {
+func (a *Assistant) chatText(ctx context.Context, callType string, payload map[string]any) (string, error) {
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.cfg.AI.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
@@ -1233,14 +1331,19 @@ func (a *Assistant) chatText(ctx context.Context, payload map[string]any) (strin
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AI.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	start := time.Now()
 	resp, err := a.client.Do(req)
+	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		a.reportUsage(callType, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		a.reportUsage(callType, 0, 0, latencyMs, false, errMsg)
+		return "", fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
 		Choices []struct {
@@ -1248,10 +1351,16 @@ func (a *Assistant) chatText(ctx context.Context, payload map[string]any) (strin
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		a.reportUsage(callType, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
+	a.reportUsage(callType, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return "", fmt.Errorf("no ai choices")
 	}

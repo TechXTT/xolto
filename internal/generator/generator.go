@@ -20,9 +20,13 @@ const (
 	lensCategoryID    = 495
 )
 
+// UsageCallback is called after each LLM request with token counts and timing.
+type UsageCallback func(callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
+
 type Generator struct {
-	aiCfg  config.AIConfig
-	client *http.Client
+	aiCfg   config.AIConfig
+	client  *http.Client
+	onUsage UsageCallback
 }
 
 func New(aiCfg config.AIConfig) *Generator {
@@ -33,6 +37,8 @@ func New(aiCfg config.AIConfig) *Generator {
 		},
 	}
 }
+
+func (g *Generator) SetUsageCallback(cb UsageCallback) { g.onUsage = cb }
 
 func (g *Generator) GenerateSearches(ctx context.Context, topic string) ([]config.SearchConfig, error) {
 	normalized := strings.TrimSpace(strings.ToLower(topic))
@@ -102,20 +108,29 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 	req.Header.Set("Authorization", "Bearer "+g.aiCfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := g.client.Do(req)
+	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		g.reportUsage("generator", 0, 0, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("call ai provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("ai provider returned status %d", resp.StatusCode)
+		errMsg := fmt.Sprintf("ai provider returned status %d", resp.StatusCode)
+		g.reportUsage("generator", 0, 0, latencyMs, false, errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	var completion chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		g.reportUsage("generator", 0, 0, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("decode ai response: %w", err)
 	}
+
+	g.reportUsage("generator", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("ai response contained no choices")
 	}
@@ -353,4 +368,15 @@ type chatCompletionResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+func (g *Generator) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+	if g.onUsage != nil {
+		g.onUsage(callType, g.aiCfg.Model, prompt, completion, latencyMs, success, errMsg)
+	}
 }

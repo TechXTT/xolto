@@ -16,7 +16,9 @@ import (
 	"github.com/TechXTT/marktbot/internal/billing"
 	"github.com/TechXTT/marktbot/internal/config"
 	"github.com/TechXTT/marktbot/internal/generator"
+	"github.com/TechXTT/marktbot/internal/marketplace/listingfetcher"
 	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/marktbot/internal/scorer"
 	"github.com/TechXTT/marktbot/internal/store"
 	"github.com/stripe/stripe-go/v81"
 	portalsession "github.com/stripe/stripe-go/v81/billingportal/session"
@@ -36,10 +38,12 @@ type Server struct {
 	assistant *assistant.Assistant
 	broker    *SSEBroker
 	runner    SearchRunner
+	scorer    *scorer.Scorer
+	fetcher   *listingfetcher.Fetcher
 	mux       *http.ServeMux
 }
 
-func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistant, broker *SSEBroker, runner SearchRunner) *Server {
+func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistant, broker *SSEBroker, runner SearchRunner, sc *scorer.Scorer) *Server {
 	if broker == nil {
 		broker = NewSSEBroker()
 	}
@@ -50,6 +54,8 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 		assistant: asst,
 		broker:    broker,
 		runner:    runner,
+		scorer:    sc,
+		fetcher:   listingfetcher.New(),
 		mux:       mux,
 	}
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -65,6 +71,8 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/missions", s.requireAuth(s.handleMissions))
 	mux.HandleFunc("/missions/", s.requireAuth(s.handleMissionByID))
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
+	mux.HandleFunc("/matches/feedback", s.requireAuth(s.handleMatchFeedback))
+	mux.HandleFunc("/matches/analyze", s.requireAuth(s.handleAnalyzeListing))
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
 	mux.HandleFunc("/shortlist/", s.requireAuth(s.handleShortlistItem))
 	mux.HandleFunc("/assistant/converse", s.requireAuth(s.handleConverse))
@@ -74,6 +82,10 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/billing/checkout", s.requireAuth(s.handleBillingCheckout))
 	mux.HandleFunc("/billing/portal", s.requireAuth(s.handleBillingPortal))
 	mux.HandleFunc("/billing/webhook", s.handleBillingWebhook)
+	// Admin routes
+	mux.HandleFunc("/admin/stats", s.requireAdmin(s.handleAdminStats))
+	mux.HandleFunc("/admin/users", s.requireAdmin(s.handleAdminUsers))
+	mux.HandleFunc("/admin/usage", s.requireAdmin(s.handleAdminUsageTimeline))
 	return s
 }
 
@@ -159,6 +171,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load created user")
 		return
 	}
+	s.syncAdminFlag(user)
 	accessToken, refreshToken, err := s.issueSessionTokens(*user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -194,6 +207,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	s.syncAdminFlag(user)
 	accessToken, refreshToken, err := s.issueSessionTokens(*user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -347,6 +361,7 @@ func (s *Server) handleGenerateSearches(w http.ResponseWriter, r *http.Request, 
 		Temperature: 0.2,
 	}
 	gen := generator.New(aiCfg)
+	gen.SetUsageCallback(s.makeUsageCallback(user.ID))
 	searches, err := gen.GenerateSearches(r.Context(), req.Topic)
 	if err != nil && len(searches) == 0 {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -640,8 +655,15 @@ func (s *Server) handleMissionByID(w http.ResponseWriter, r *http.Request, user 
 		}
 		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_updated", "mission": updated}))
 		writeJSON(w, http.StatusOK, updated)
+	case http.MethodDelete:
+		if err := s.db.DeleteMission(id, user.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_deleted", "mission_id": id}))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
-		writeMethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -700,6 +722,143 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request, user *models
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"listings": listings, "user_id": user.ID})
+}
+
+// handleMatchFeedback records user feedback (approve/dismiss/clear) on a
+// listing. Approved listings become high-weight comparables for the mission's
+// future scoring; dismissed listings are filtered out of reads and never
+// resurface in matches or comparables.
+func (s *Server) handleMatchFeedback(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var body struct {
+		ItemID string `json:"item_id"`
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	itemID := strings.TrimSpace(body.ItemID)
+	if itemID == "" {
+		writeError(w, http.StatusBadRequest, "item_id is required")
+		return
+	}
+	var feedback string
+	switch strings.ToLower(strings.TrimSpace(body.Action)) {
+	case "approve", "approved":
+		feedback = "approved"
+	case "dismiss", "dismissed":
+		feedback = "dismissed"
+	case "clear", "":
+		feedback = ""
+	default:
+		writeError(w, http.StatusBadRequest, "action must be approve, dismiss, or clear")
+		return
+	}
+	if err := s.db.SetListingFeedback(user.ID, itemID, feedback); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "feedback": feedback})
+}
+
+// handleAnalyzeListing accepts a marketplace URL, fetches the listing
+// metadata, runs it through the scorer (which in turn invokes the AI
+// reasoner) and returns the verdict. An optional mission_id anchors the
+// analysis — when set, the scorer uses that mission's approved comparables
+// and search context so the verdict reflects the user's actual buying goal.
+func (s *Server) handleAnalyzeListing(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if s.scorer == nil {
+		writeError(w, http.StatusServiceUnavailable, "scorer is not configured")
+		return
+	}
+
+	var body struct {
+		URL       string `json:"url"`
+		MissionID int64  `json:"mission_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rawURL := strings.TrimSpace(body.URL)
+	if rawURL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+
+	// Fetching can hit a slow third party — cap at 25s so we don't hold the
+	// request connection open indefinitely on a misbehaving origin.
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	listing, err := s.fetcher.Fetch(fetchCtx, rawURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to load listing: "+err.Error())
+		return
+	}
+
+	// Build the SearchSpec the scorer expects. When the user supplies a
+	// mission we anchor the analysis to that mission's goal (query, budget,
+	// ProfileID so approved comparables flow through). Otherwise we fall back
+	// to a minimal spec built from the listing title so the AI at least gets
+	// coherent relevance context.
+	spec := models.SearchSpec{
+		UserID:          user.ID,
+		MarketplaceID:   listing.MarketplaceID,
+		Query:           listing.Title,
+		OfferPercentage: 72,
+	}
+	if body.MissionID > 0 {
+		mission, err := s.db.GetMission(body.MissionID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if mission == nil || mission.UserID != user.ID {
+			writeError(w, http.StatusNotFound, "mission not found")
+			return
+		}
+		spec.ProfileID = mission.ID
+		spec.Name = mission.Name
+		spec.CategoryID = mission.CategoryID
+		spec.Condition = mission.PreferredCondition
+		if mission.BudgetMax > 0 {
+			spec.MaxPrice = mission.BudgetMax * 100
+		}
+		if q := strings.TrimSpace(mission.TargetQuery); q != "" {
+			spec.Query = q
+		}
+		listing.ProfileID = mission.ID
+	}
+
+	scored := s.scorer.Score(fetchCtx, listing, spec)
+
+	// Fold the scorer's verdict into the Listing struct so the frontend can
+	// render it through the same ListingCard it uses everywhere else. We also
+	// expose the search advice + comparables as sibling fields for the
+	// analyze panel's "why" section.
+	enriched := scored.Listing
+	enriched.Score = scored.Score
+	enriched.FairPrice = scored.FairPrice
+	enriched.OfferPrice = scored.OfferPrice
+	enriched.Confidence = scored.Confidence
+	enriched.Reason = scored.Reason
+	enriched.RiskFlags = scored.RiskFlags
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"listing":          enriched,
+		"reasoning_source": scored.ReasoningSource,
+		"search_advice":    scored.SearchAdvice,
+		"comparables":      scored.ComparableDeals,
+		"market_average":   scored.MarketAverage,
+	})
 }
 
 func (s *Server) handleShortlist(w http.ResponseWriter, r *http.Request, user *models.User) {
@@ -974,6 +1133,87 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// --- Admin endpoints ---
+
+func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	daysStr := r.URL.Query().Get("days")
+	days := 30
+	if v, err := strconv.Atoi(daysStr); err == nil && v > 0 && v <= 365 {
+		days = v
+	}
+	stats, err := s.db.GetAIUsageStats(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Estimate cost: gpt-4o-mini input $0.15/M, output $0.60/M tokens.
+	stats.EstimatedCostUSD = float64(stats.TotalPrompt)*0.15/1_000_000 + float64(stats.TotalCompletion)*0.60/1_000_000
+	writeJSON(w, http.StatusOK, map[string]any{"stats": stats, "days": days})
+}
+
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	users, err := s.db.ListAllUsers()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Sanitize — don't send password hashes to the frontend.
+	type safeUser struct {
+		ID           string `json:"id"`
+		Email        string `json:"email"`
+		Name         string `json:"name"`
+		Tier         string `json:"tier"`
+		IsAdmin      bool   `json:"is_admin"`
+		CreatedAt    string `json:"created_at"`
+		MissionCount int    `json:"mission_count"`
+		SearchCount  int    `json:"search_count"`
+		AICallCount  int    `json:"ai_call_count"`
+		AITokens     int    `json:"ai_tokens"`
+	}
+	safe := make([]safeUser, len(users))
+	for i, u := range users {
+		safe[i] = safeUser{
+			ID:           u.ID,
+			Email:        u.Email,
+			Name:         u.Name,
+			Tier:         u.Tier,
+			IsAdmin:      u.IsAdmin,
+			CreatedAt:    u.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			MissionCount: u.MissionCount,
+			SearchCount:  u.SearchCount,
+			AICallCount:  u.AICallCount,
+			AITokens:     u.AITokens,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": safe})
+}
+
+func (s *Server) handleAdminUsageTimeline(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	daysStr := r.URL.Query().Get("days")
+	days := 7
+	if v, err := strconv.Atoi(daysStr); err == nil && v > 0 && v <= 90 {
+		days = v
+	}
+	entries, err := s.db.GetAIUsageTimeline(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "days": days})
+}
+
 func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, err := s.currentUser(r)
@@ -983,6 +1223,16 @@ func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *mode
 		}
 		next(w, r, user)
 	}
+}
+
+func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, user *models.User) {
+		if !user.IsAdmin {
+			writeError(w, http.StatusForbidden, "admin access required")
+			return
+		}
+		next(w, r, user)
+	})
 }
 
 func (s *Server) currentUser(r *http.Request) (*models.User, error) {
@@ -1091,13 +1341,44 @@ func parseIDFromPath(path, prefix string) (int64, error) {
 	return strconv.ParseInt(raw, 10, 64)
 }
 
+// makeUsageCallback returns a UsageCallback that records AI usage for the given user.
+func (s *Server) makeUsageCallback(userID string) func(string, string, int, int, int, bool, string) {
+	return func(callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
+		_ = s.db.RecordAIUsage(models.AIUsageEntry{
+			UserID:           userID,
+			CallType:         callType,
+			Model:            model,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+			LatencyMs:        latencyMs,
+			Success:          success,
+			ErrorMsg:         errMsg,
+		})
+	}
+}
+
+// syncAdminFlag promotes or demotes a user based on the ADMIN_EMAILS env var.
+// Called on login/register so the flag stays in sync without manual SQL.
+func (s *Server) syncAdminFlag(user *models.User) {
+	shouldBeAdmin := s.cfg.IsAdminEmail(user.Email)
+	if user.IsAdmin != shouldBeAdmin {
+		_ = s.db.SetUserAdmin(user.ID, shouldBeAdmin)
+		user.IsAdmin = shouldBeAdmin
+	}
+}
+
 func sanitizeUser(user models.User) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id":    user.ID,
 		"email": user.Email,
 		"name":  user.Name,
 		"tier":  user.Tier,
 	}
+	if user.IsAdmin {
+		m["is_admin"] = true
+	}
+	return m
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

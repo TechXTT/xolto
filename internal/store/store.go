@@ -51,6 +51,7 @@ func migrate(db *sql.DB) error {
 			price       INTEGER NOT NULL,
 			price_type  TEXT NOT NULL DEFAULT '',
 			score       REAL NOT NULL DEFAULT 0,
+			reasoning_source TEXT NOT NULL DEFAULT '',
 			offered     INTEGER NOT NULL DEFAULT 0,
 			query       TEXT NOT NULL DEFAULT '',
 			profile_id  INTEGER NOT NULL DEFAULT 0,
@@ -200,8 +201,12 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN offer_price INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN confidence REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning_source TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN risk_flags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback_at DATETIME NULL`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_listings_feedback ON listings(profile_id, feedback)`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN urgency TEXT NOT NULL DEFAULT 'flexible'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN avoid_flags TEXT NOT NULL DEFAULT '[]'`)
@@ -210,6 +215,27 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen)`)
+
+	// Admin & AI usage tracking.
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS ai_usage_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL DEFAULT '',
+			call_type TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			success INTEGER NOT NULL DEFAULT 1,
+			error_msg TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at)`)
+
 	return nil
 }
 
@@ -399,6 +425,38 @@ func (s *SQLiteStore) ListMissions(userID string) ([]models.Mission, error) {
 		out = append(out, mission)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteMission(id int64, userID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`DELETE FROM shopping_profiles WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	if _, err := tx.Exec(`DELETE FROM search_configs WHERE profile_id = ? AND user_id = ?`, id, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM listings WHERE profile_id = ? AND item_id LIKE ?`, id, scopedItemPrefix(userID)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM shortlist_entries WHERE profile_id = ? AND user_id = ?`, id, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) UpdateMissionStatus(id int64, status string) error {
@@ -605,7 +663,7 @@ func (s *SQLiteStore) CreateUser(email, hash, name string) (string, error) {
 
 func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
 		FROM users WHERE email = ?
 	`, strings.ToLower(strings.TrimSpace(email)))
 	return scanUser(row)
@@ -613,7 +671,7 @@ func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *SQLiteStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
 		FROM users WHERE id = ?
 	`, id)
 	return scanUser(row)
@@ -637,6 +695,116 @@ func (s *SQLiteStore) UpdateUserTierByStripeCustomer(customerID, tier string) er
 func (s *SQLiteStore) RecordStripeEvent(eventID string) error {
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO stripe_events (event_id) VALUES (?)`, eventID)
 	return err
+}
+
+func (s *SQLiteStore) SetUserAdmin(userID string, isAdmin bool) error {
+	v := 0
+	if isAdmin {
+		v = 1
+	}
+	_, err := s.db.Exec(`UPDATE users SET is_admin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, userID)
+	return err
+}
+
+func (s *SQLiteStore) RecordAIUsage(entry models.AIUsageEntry) error {
+	success := 1
+	if !entry.Success {
+		success = 0
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO ai_usage_log (user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, entry.UserID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
+		entry.LatencyMs, success, entry.ErrorMsg)
+	return err
+}
+
+func (s *SQLiteStore) ListAllUsers() ([]models.AdminUserSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
+		       COALESCE(m.cnt, 0) AS mission_count,
+		       COALESCE(sc.cnt, 0) AS search_count,
+		       COALESCE(ai.cnt, 0) AS ai_call_count,
+		       COALESCE(ai.tokens, 0) AS ai_tokens
+		FROM users u
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM shopping_profiles GROUP BY user_id) m ON m.user_id = u.id
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM search_configs GROUP BY user_id) sc ON sc.user_id = u.id
+		LEFT JOIN (SELECT user_id, COUNT(*) AS cnt, COALESCE(SUM(total_tokens), 0) AS tokens FROM ai_usage_log GROUP BY user_id) ai ON ai.user_id = u.id
+		ORDER BY u.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.AdminUserSummary
+	for rows.Next() {
+		var s models.AdminUserSummary
+		var createdAt, updatedAt string
+		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.IsAdmin, &s.StripeCustomer,
+			&createdAt, &updatedAt, &s.MissionCount, &s.SearchCount, &s.AICallCount, &s.AITokens); err != nil {
+			return nil, err
+		}
+		s.CreatedAt, _ = parseSQLiteTime(createdAt)
+		s.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) GetAIUsageStats(days int) (models.AIUsageStats, error) {
+	var stats models.AIUsageStats
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(prompt_tokens), 0),
+		       COALESCE(SUM(completion_tokens), 0),
+		       COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0)
+		FROM ai_usage_log
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+	`, days).Scan(&stats.TotalCalls, &stats.TotalTokens, &stats.TotalPrompt, &stats.TotalCompletion, &stats.FailedCalls)
+	return stats, err
+}
+
+func (s *SQLiteStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
+		FROM ai_usage_log
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+		ORDER BY created_at DESC
+		LIMIT 500
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.AIUsageEntry
+	for rows.Next() {
+		var e models.AIUsageEntry
+		var successInt int
+		var createdAt string
+		if err := rows.Scan(&e.ID, &e.UserID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
+			&e.TotalTokens, &e.LatencyMs, &successInt, &e.ErrorMsg, &createdAt); err != nil {
+			return nil, err
+		}
+		e.Success = successInt != 0
+		e.CreatedAt, _ = parseSQLiteTime(createdAt)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) GetUserAIUsageStats(userID string, days int) (models.AIUsageStats, error) {
+	var stats models.AIUsageStats
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(prompt_tokens), 0),
+		       COALESCE(SUM(completion_tokens), 0),
+		       COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0)
+		FROM ai_usage_log
+		WHERE user_id = ? AND created_at >= datetime('now', '-' || ? || ' days')
+	`, userID, days).Scan(&stats.TotalCalls, &stats.TotalTokens, &stats.TotalPrompt, &stats.TotalCompletion, &stats.FailedCalls)
+	return stats, err
 }
 
 func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
@@ -715,10 +883,11 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       last_seen
+		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
+		  AND COALESCE(feedback, '') <> 'dismissed'
 		ORDER BY last_seen DESC
 		LIMIT ?
 	`, scopedItemPrefix(userID), missionID, missionID, limit)
@@ -735,7 +904,7 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &lastSeen,
+			&listing.Reason, &riskFlagsJSON, &lastSeen, &listing.Feedback,
 		); err != nil {
 			return nil, err
 		}
@@ -750,6 +919,64 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 		listings = append(listings, listing)
 	}
 	return listings, rows.Err()
+}
+
+// SetListingFeedback marks a listing as approved/dismissed or clears feedback.
+// feedback must be one of "", "approved", "dismissed".
+func (s *SQLiteStore) SetListingFeedback(userID, itemID, feedback string) error {
+	feedback = strings.TrimSpace(feedback)
+	switch feedback {
+	case "", "approved", "dismissed":
+	default:
+		return fmt.Errorf("invalid feedback value %q", feedback)
+	}
+	_, err := s.db.Exec(`
+		UPDATE listings
+		SET feedback = ?,
+		    feedback_at = CASE WHEN ? = '' THEN NULL ELSE CURRENT_TIMESTAMP END
+		WHERE item_id = ?
+	`, feedback, feedback, scopedItemID(userID, itemID))
+	return err
+}
+
+// GetApprovedComparables returns listings the user has explicitly approved for
+// this mission, to be used as high-confidence comparables when scoring new
+// listings.
+func (s *SQLiteStore) GetApprovedComparables(userID string, missionID int64, limit int) ([]models.ComparableDeal, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.Query(`
+		SELECT item_id, title, price, score, last_seen
+		FROM listings
+		WHERE item_id LIKE ?
+		  AND feedback = 'approved'
+		  AND (? = 0 OR profile_id = ?)
+		  AND price > 0
+		ORDER BY feedback_at DESC
+		LIMIT ?
+	`, scopedItemPrefix(userID), missionID, missionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deals []models.ComparableDeal
+	for rows.Next() {
+		var deal models.ComparableDeal
+		var lastSeen string
+		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &lastSeen); err != nil {
+			return nil, err
+		}
+		deal.ItemID = unscopedItemID(deal.ItemID)
+		if t, err := parseSQLiteTime(lastSeen); err == nil {
+			deal.LastSeen = t
+		}
+		deal.Similarity = 1.0
+		deal.MatchReason = "user-approved match"
+		deals = append(deals, deal)
+	}
+	return deals, rows.Err()
 }
 
 func (s *SQLiteStore) ListActionDrafts(userID string) ([]models.ActionDraft, error) {
@@ -838,6 +1065,21 @@ func (s *SQLiteStore) GetListingScore(userID, itemID string) (float64, bool, err
 	return score, true, nil
 }
 
+func (s *SQLiteStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error) {
+	err = s.db.QueryRow(`
+		SELECT price, reasoning_source
+		FROM listings
+		WHERE item_id = ?
+	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource)
+	if err == sql.ErrNoRows {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return price, reasoningSource, true, nil
+}
+
 // SaveListing stores or updates a listing and its scored analysis.
 func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
 	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
@@ -846,9 +1088,9 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 		INSERT INTO listings (
 			item_id, title, price, price_type, score, query, profile_id, image_urls,
 			url, condition, marketplace_id,
-			fair_price, offer_price, confidence, reasoning, risk_flags,
+			fair_price, offer_price, confidence, reasoning, reasoning_source, risk_flags,
 			first_seen, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(item_id) DO UPDATE SET
 			price          = excluded.price,
 			score          = excluded.score,
@@ -861,13 +1103,19 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 			offer_price    = excluded.offer_price,
 			confidence     = excluded.confidence,
 			reasoning      = excluded.reasoning,
+			reasoning_source = excluded.reasoning_source,
 			risk_flags     = excluded.risk_flags,
 			last_seen      = CURRENT_TIMESTAMP
 	`,
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
-		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, string(riskFlagsJSON),
+		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
 	)
+	return err
+}
+
+func (s *SQLiteStore) TouchListing(userID, itemID string) error {
+	_, err := s.db.Exec(`UPDATE listings SET last_seen = CURRENT_TIMESTAMP WHERE item_id = ?`, scopedItemID(userID, itemID))
 	return err
 }
 
@@ -958,7 +1206,11 @@ func (s *SQLiteStore) GetComparableDeals(userID, query, excludeItemID string, li
 	rows, err := s.db.Query(`
 		SELECT item_id, title, price, score, last_seen
 		FROM listings
-		WHERE query = ? AND item_id LIKE ? AND item_id != ? AND price > 0
+		WHERE query = ?
+		  AND item_id LIKE ?
+		  AND item_id != ?
+		  AND price > 0
+		  AND COALESCE(feedback, '') <> 'dismissed'
 		ORDER BY last_seen DESC
 		LIMIT ?
 	`, query, scopedItemPrefix(userID), scopedItemID(userID, excludeItemID), limit)
@@ -1073,7 +1325,7 @@ func parseSQLiteTime(value string) (time.Time, error) {
 func scanUser(row *sql.Row) (*models.User, error) {
 	var user models.User
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.StripeCustomer, &createdAt, &updatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

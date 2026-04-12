@@ -44,7 +44,7 @@ func TestHandleRunAllSearchesRequiresAuthAndTriggersRunner(t *testing.T) {
 	srv := NewServer(config.ServerConfig{
 		JWTSecret:  "test-secret",
 		AppBaseURL: "http://localhost:3000",
-	}, st, nil, nil, runner)
+	}, st, nil, nil, runner, nil)
 
 	unauthorizedReq := httptest.NewRequest(http.MethodPost, "/searches/run", nil)
 	unauthorizedRes := httptest.NewRecorder()

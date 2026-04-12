@@ -114,3 +114,49 @@ func TestListingQueriesAreScopedPerUser(t *testing.T) {
 		t.Fatalf("expected comparable item m2, got %#v", comparables[0])
 	}
 }
+
+func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "marktbot-scoring-state.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	listing := models.Listing{
+		ItemID:    "m1",
+		Title:     "Sony A7 III",
+		Price:     95000,
+		PriceType: "fixed",
+	}
+	scored := models.ScoredListing{
+		Score:           8.9,
+		FairPrice:       102000,
+		OfferPrice:      90000,
+		Confidence:      0.88,
+		Reason:          "strong comparable support",
+		ReasoningSource: "ai",
+	}
+
+	if err := st.SaveListing("u1", listing, "sony camera", scored); err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	price, source, found, err := st.GetListingScoringState("u1", "m1")
+	if err != nil {
+		t.Fatalf("GetListingScoringState() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected stored scoring state")
+	}
+	if price != listing.Price {
+		t.Fatalf("expected stored price %d, got %d", listing.Price, price)
+	}
+	if source != "ai" {
+		t.Fatalf("expected reasoning source %q, got %q", "ai", source)
+	}
+
+	if err := st.TouchListing("u1", "m1"); err != nil {
+		t.Fatalf("TouchListing() error = %v", err)
+	}
+}

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type ServerConfig struct {
@@ -23,6 +24,7 @@ type ServerConfig struct {
 	SMTPPass            string
 	SMTPFrom            string
 	AlertScore          float64
+	AdminEmails         []string
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -44,6 +46,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		SMTPPass:            os.Getenv("SMTP_PASS"),
 		SMTPFrom:            getenvDefault("SMTP_FROM", "alerts@marktbot.app"),
 		AlertScore:          parseFloatDefault(os.Getenv("ALERT_SCORE"), 8.0),
+		AdminEmails:         parseAdminEmails(os.Getenv("ADMIN_EMAILS")),
 	}
 	if cfg.DatabaseURL == "" {
 		cfg.DatabaseURL = "marktbot-server.db"
@@ -54,12 +57,36 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	return cfg, nil
 }
 
+func (c ServerConfig) IsAdminEmail(email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	for _, admin := range c.AdminEmails {
+		if admin == email {
+			return true
+		}
+	}
+	return false
+}
+
 func getenvDefault(key, fallback string) string {
 	value := os.Getenv(key)
 	if value == "" {
 		return fallback
 	}
 	return value
+}
+
+func parseAdminEmails(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, e := range strings.Split(s, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func parseFloatDefault(s string, def float64) float64 {

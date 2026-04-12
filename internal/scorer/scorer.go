@@ -24,6 +24,20 @@ type Scorer struct {
 	reasoner *reasoner.Reasoner
 }
 
+func (sc *Scorer) shouldSkipLLM(listing models.Listing, search models.SearchSpec, heuristic models.DealAnalysis) bool {
+	if search.MaxPrice > 0 && listing.Price > search.MaxPrice*3/2 {
+		return true
+	}
+	if heuristic.Confidence >= 0.70 && heuristic.FairPrice > 0 {
+		ratio := float64(listing.Price) / float64(heuristic.FairPrice)
+		score := clamp(10.0-10.0*ratio+5.0, 1, 10)
+		if score < 3.0 {
+			return true
+		}
+	}
+	return false
+}
+
 func New(s store.Reader, cfg interface {
 	GetMinScore() float64
 	GetMarketSampleSize() int
@@ -76,6 +90,30 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		slog.Warn("failed to load comparable deals", "item", listing.ItemID, "error", err)
 	}
 
+	// Prepend user-approved matches from this mission. They're ground-truth
+	// relevant items, so they anchor both fair-price calibration and the
+	// reasoner's relevance judgement. Deduped by ItemID against `comparables`
+	// so an already-seen listing doesn't appear twice.
+	if search.ProfileID > 0 {
+		approved, aerr := sc.store.GetApprovedComparables(search.UserID, search.ProfileID, 10)
+		if aerr != nil {
+			slog.Warn("failed to load approved comparables", "mission", search.ProfileID, "error", aerr)
+		} else if len(approved) > 0 {
+			seen := make(map[string]bool, len(comparables))
+			for _, c := range comparables {
+				seen[c.ItemID] = true
+			}
+			merged := make([]models.ComparableDeal, 0, len(approved)+len(comparables))
+			for _, a := range approved {
+				if a.ItemID == listing.ItemID || seen[a.ItemID] {
+					continue
+				}
+				merged = append(merged, a)
+			}
+			comparables = append(merged, comparables...)
+		}
+	}
+
 	analysis := models.DealAnalysis{
 		FairPrice:  marketAvg,
 		Confidence: 0.35,
@@ -83,9 +121,16 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		Source:     "heuristic",
 	}
 	if sc.reasoner != nil {
-		analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
-		if err != nil {
-			slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+		heuristic := sc.reasoner.HeuristicAnalysis(listing, search, marketAvg, comparables)
+		analysis = heuristic
+		if sc.shouldSkipLLM(listing, search, heuristic) {
+			analysis.Source = "prefilter"
+		} else {
+			analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
+			if err != nil {
+				analysis = heuristic
+				slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+			}
 		}
 	}
 

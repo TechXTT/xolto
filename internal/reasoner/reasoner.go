@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -17,19 +18,28 @@ import (
 	"github.com/TechXTT/marktbot/internal/models"
 )
 
+// UsageCallback is called after each LLM request with token counts and timing.
+type UsageCallback func(callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
+
 type Reasoner struct {
-	cfg    config.AIConfig
-	client *http.Client
+	cfg     config.AIConfig
+	client  *http.Client
+	limiter *rateLimiter
+	onUsage UsageCallback
 }
 
 func New(cfg config.AIConfig) *Reasoner {
+	cfg = config.NormalizeAIConfig(cfg)
 	return &Reasoner{
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
+		limiter: newRateLimiter(cfg.MaxCallsPerUserPerHour, cfg.MaxCallsGlobalPerHour),
 	}
 }
+
+func (r *Reasoner) SetUsageCallback(cb UsageCallback) { r.onUsage = cb }
 
 func (r *Reasoner) Enabled() bool {
 	return r.cfg.Enabled && r.cfg.APIKey != "" && r.cfg.Model != ""
@@ -43,14 +53,26 @@ func (r *Reasoner) Analyze(
 	comparables []models.ComparableDeal,
 ) (models.DealAnalysis, error) {
 	ranked := r.rankComparables(listing, comparables)
-	heuristic := r.heuristicAnalysis(listing, search, marketAvg, ranked)
+	heuristic := r.HeuristicAnalysis(listing, search, marketAvg, ranked)
 
 	if !r.Enabled() {
 		return heuristic, nil
 	}
 
+	if heuristic.Confidence >= r.cfg.SkipLLMConfidence {
+		score := heuristicDealScore(listing.Price, heuristic.FairPrice)
+		if score <= r.cfg.SkipLLMScoreLow || score >= r.cfg.SkipLLMScoreHigh {
+			heuristic.Source = "heuristic-confident"
+			return heuristic, nil
+		}
+	}
+
 	llmAnalysis, err := r.callLLM(ctx, listing, search, marketAvg, ranked)
 	if err != nil {
+		if errors.Is(err, errRateLimited) {
+			heuristic.Source = "rate-limited"
+			return heuristic, nil
+		}
 		return heuristic, err
 	}
 
@@ -74,7 +96,7 @@ func (r *Reasoner) Analyze(
 	return llmAnalysis, nil
 }
 
-func (r *Reasoner) heuristicAnalysis(
+func (r *Reasoner) HeuristicAnalysis(
 	listing models.Listing,
 	search models.SearchSpec,
 	marketAvg int,
@@ -168,6 +190,8 @@ func (r *Reasoner) rankComparables(listing models.Listing, comparables []models.
 	return ranked
 }
 
+var errRateLimited = errors.New("reasoner llm rate limited")
+
 func (r *Reasoner) callLLM(
 	ctx context.Context,
 	listing models.Listing,
@@ -175,12 +199,16 @@ func (r *Reasoner) callLLM(
 	marketAvg int,
 	comparables []models.ComparableDeal,
 ) (models.DealAnalysis, error) {
+	if r.limiter != nil && !r.limiter.Allow(search.UserID) {
+		return models.DealAnalysis{}, errRateLimited
+	}
+
 	payload := chatCompletionRequest{
 		Model:       r.cfg.Model,
 		Temperature: r.cfg.Temperature,
 		Messages: []chatMessage{
 			{
-				Role:    "system",
+				Role: "system",
 				Content: "You analyze secondhand marketplace listings for resale and value hunting. " +
 					"You must also judge whether the listing is actually relevant to what the user searched for — " +
 					"a listing is NOT relevant if it is a completely different product category than the search intent " +
@@ -206,20 +234,29 @@ func (r *Reasoner) callLLM(
 	req.Header.Set("Authorization", "Bearer "+r.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := r.client.Do(req)
+	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		r.reportUsage("reasoner", 0, 0, latencyMs, false, err.Error())
 		return models.DealAnalysis{}, fmt.Errorf("call ai provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return models.DealAnalysis{}, fmt.Errorf("ai provider returned status %d", resp.StatusCode)
+		errMsg := fmt.Sprintf("ai provider returned status %d", resp.StatusCode)
+		r.reportUsage("reasoner", 0, 0, latencyMs, false, errMsg)
+		return models.DealAnalysis{}, fmt.Errorf("%s", errMsg)
 	}
 
 	var completion chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		r.reportUsage("reasoner", 0, 0, latencyMs, false, err.Error())
 		return models.DealAnalysis{}, fmt.Errorf("decode ai response: %w", err)
 	}
+
+	r.reportUsage("reasoner", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+
 	if len(completion.Choices) == 0 {
 		return models.DealAnalysis{}, fmt.Errorf("ai response contained no choices")
 	}
@@ -251,6 +288,12 @@ func (r *Reasoner) callLLM(
 	}, nil
 }
 
+func (r *Reasoner) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+	if r.onUsage != nil {
+		r.onUsage(callType, r.cfg.Model, prompt, completion, latencyMs, success, errMsg)
+	}
+}
+
 func buildPrompt(
 	listing models.Listing,
 	search models.SearchSpec,
@@ -258,48 +301,79 @@ func buildPrompt(
 	comparables []models.ComparableDeal,
 	includeAdvice bool,
 ) string {
-	type comparableInput struct {
-		Index      int     `json:"index"`
-		Title      string  `json:"title"`
-		PriceCents int     `json:"price_cents"`
-		Similarity float64 `json:"similarity"`
-		Reason     string  `json:"reason"`
+	type promptListing struct {
+		Title     string `json:"t"`
+		Desc      string `json:"d,omitempty"`
+		Price     int    `json:"p"`
+		PriceType string `json:"pt,omitempty"`
+		Condition string `json:"c,omitempty"`
+	}
+	type promptSearch struct {
+		Query    string `json:"q"`
+		MaxPrice int    `json:"max,omitempty"`
+		MinPrice int    `json:"min,omitempty"`
+	}
+	type promptComparable struct {
+		Index int     `json:"i"`
+		Title string  `json:"t"`
+		Price int     `json:"p"`
+		Sim   float64 `json:"s"`
 	}
 
 	input := struct {
-		Listing          models.Listing    `json:"listing"`
-		Search           models.SearchSpec `json:"search"`
-		MarketAvgCents   int               `json:"market_avg_cents"`
-		NeedSearchAdvice bool              `json:"need_search_advice"`
-		Comparables      []comparableInput `json:"comparables"`
+		Listing          promptListing      `json:"l"`
+		Search           promptSearch       `json:"s"`
+		MarketAvgCents   int                `json:"m,omitempty"`
+		NeedSearchAdvice bool               `json:"a,omitempty"`
+		Comparables      []promptComparable `json:"c,omitempty"`
 	}{
-		Listing:          listing,
-		Search:           search,
+		Listing: promptListing{
+			Title:     listing.Title,
+			Desc:      trimPromptText(listing.Description, 300),
+			Price:     listing.Price,
+			PriceType: listing.PriceType,
+			Condition: listing.Condition,
+		},
+		Search: promptSearch{
+			Query:    search.Query,
+			MaxPrice: search.MaxPrice,
+			MinPrice: search.MinPrice,
+		},
 		MarketAvgCents:   marketAvg,
 		NeedSearchAdvice: includeAdvice,
-		Comparables:      make([]comparableInput, 0, len(comparables)),
+		Comparables:      make([]promptComparable, 0, len(comparables)),
 	}
 
 	for i, comp := range comparables {
-		input.Comparables = append(input.Comparables, comparableInput{
-			Index:      i,
-			Title:      comp.Title,
-			PriceCents: comp.Price,
-			Similarity: comp.Similarity,
-			Reason:     comp.MatchReason,
+		input.Comparables = append(input.Comparables, promptComparable{
+			Index: i,
+			Title: comp.Title,
+			Price: comp.Price,
+			Sim:   roundPromptFloat(comp.Similarity),
 		})
 	}
 
 	raw, _ := json.Marshal(input)
 	return strings.Join([]string{
-		"Analyze this marketplace listing against the provided comparables and search query.",
-		"First decide: is this listing actually the kind of product the user searched for?",
-		"Set relevant=false if the listing is a different product category than the search intent.",
-		"Return JSON with this shape only:",
-		`{"relevant":true,"fair_price_cents":12345,"confidence":0.72,"reasoning":"short explanation","search_advice":"optional search refinement advice","comparable_indexes":[0,2]}`,
-		"Confidence must be between 0 and 1. Use comparable_indexes for the strongest matches only.",
+		`Analyze listing vs comparables. Set relevant=false if wrong product category. Return JSON: {"relevant":true,"fair_price_cents":N,"confidence":0.0-1.0,"reasoning":"...","search_advice":"...","comparable_indexes":[0,2]}`,
 		string(raw),
 	}, "\n")
+}
+
+func trimPromptText(value string, maxChars int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxChars {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:maxChars]))
+}
+
+func roundPromptFloat(value float64) float64 {
+	return math.Round(value*100) / 100
 }
 
 func heuristicSearchAdvice(listing models.Listing, search models.SearchSpec, comparables []models.ComparableDeal) string {
@@ -418,6 +492,14 @@ func clamp(v, min, max float64) float64 {
 	return v
 }
 
+func heuristicDealScore(listingPrice, fairPrice int) float64 {
+	if listingPrice <= 0 || fairPrice <= 0 {
+		return 5.0
+	}
+	ratio := float64(listingPrice) / float64(fairPrice)
+	return clamp(10.0-10.0*ratio+5.0, 1, 10)
+}
+
 var stopWords = map[string]bool{
 	"the": true, "and": true, "for": true, "with": true, "from": true,
 	"this": true, "that": true, "are": true, "has": true, "have": true,
@@ -440,6 +522,11 @@ type chatCompletionResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 type aiListingAnalysis struct {
