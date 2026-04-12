@@ -11,13 +11,18 @@ import (
 type apiItem struct {
 	ID         int64    `json:"id"`
 	Title      string   `json:"title"`
-	Price      string   `json:"price"`
+	Price      apiPrice `json:"price"`
 	Currency   string   `json:"currency"`
 	Status     string   `json:"status"`
 	URL        string   `json:"url"`
 	Photo      apiPhoto `json:"photo"`
 	User       apiUser  `json:"user"`
 	BrandTitle string   `json:"brand_title"`
+}
+
+type apiPrice struct {
+	Amount       string `json:"amount"`
+	CurrencyCode string `json:"currency_code"`
 }
 
 type apiPhoto struct {
@@ -30,7 +35,7 @@ type apiUser struct {
 }
 
 func mapListing(item apiItem) models.Listing {
-	priceCents := parsePrice(item.Price)
+	priceCents := parsePrice(item.Price.Amount)
 	return models.Listing{
 		ItemID:        fmt.Sprintf("v%d", item.ID),
 		CanonicalID:   fmt.Sprintf("vinted:%d", item.ID),

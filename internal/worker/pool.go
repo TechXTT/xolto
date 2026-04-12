@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -71,6 +72,13 @@ func (p *Pool) RunAllNow(ctx context.Context) error {
 		return err
 	}
 	due := p.filterDue(specs)
+	mpCounts := map[string]int{}
+	for _, s := range due {
+		mpCounts[s.MarketplaceID]++
+	}
+	if len(due) > 0 {
+		slog.Info("worker pool tick", "total_specs", len(specs), "due", len(due), "marketplaces", mpCounts)
+	}
 	if len(due) == 0 {
 		return nil
 	}

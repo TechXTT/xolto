@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -31,6 +32,7 @@ func newClient() *client {
 func (c *client) search(ctx context.Context, spec models.SearchSpec) ([]models.Listing, error) {
 	var all []models.Listing
 
+	var rawCount, droppedPrice, droppedCondition int
 	for page := 0; page < olxMaxPages; page++ {
 		batch, total, err := c.fetchPage(ctx, spec, page*olxPageLimit)
 		if err != nil {
@@ -40,12 +42,15 @@ func (c *client) search(ctx context.Context, spec models.SearchSpec) ([]models.L
 			// Partial failure: return what we have so far.
 			break
 		}
+		rawCount += len(batch)
 		for _, offer := range batch {
 			listing := mapListing(offer)
 			if !matchesPrice(listing.Price, spec.MinPrice, spec.MaxPrice) {
+				droppedPrice++
 				continue
 			}
 			if !matchesCondition(listing.Condition, spec.Condition) {
+				droppedCondition++
 				continue
 			}
 			all = append(all, listing)
@@ -55,6 +60,13 @@ func (c *client) search(ctx context.Context, spec models.SearchSpec) ([]models.L
 		}
 	}
 
+	slog.Info("olxbg search completed",
+		"query", spec.Query,
+		"raw", rawCount,
+		"dropped_price", droppedPrice,
+		"dropped_condition", droppedCondition,
+		"kept", len(all),
+	)
 	return all, nil
 }
 
@@ -64,11 +76,12 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 	params.Set("offset", strconv.Itoa(offset))
 	params.Set("limit", strconv.Itoa(olxPageLimit))
 
+	// spec min/max are EUR cents; OLX API v1 expects whole BGN.
 	if spec.MinPrice > 0 {
-		params.Set("price[from]", strconv.Itoa(spec.MinPrice/100))
+		params.Set("price[from]", strconv.Itoa(EURCentsToBGNWhole(spec.MinPrice)))
 	}
 	if spec.MaxPrice > 0 {
-		params.Set("price[to]", strconv.Itoa(spec.MaxPrice/100))
+		params.Set("price[to]", strconv.Itoa(EURCentsToBGNWhole(spec.MaxPrice)))
 	}
 	if spec.CategoryID > 0 {
 		params.Set("category_id", strconv.Itoa(spec.CategoryID))
@@ -99,10 +112,12 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 		return nil, 0, err
 	}
 
-	// Filter out inactive listings.
+	// Filter out inactive listings. OLX API v1 now exposes the state as a
+	// string ("active", "removed_by_user", "outdated", etc.) — earlier it was
+	// the `is_active` boolean, which no longer appears in the payload.
 	active := payload.Data[:0]
 	for _, offer := range payload.Data {
-		if offer.IsActive {
+		if offer.Status == "" || offer.Status == "active" {
 			active = append(active, offer)
 		}
 	}
