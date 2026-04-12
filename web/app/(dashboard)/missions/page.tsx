@@ -29,7 +29,7 @@ function formatLastMatch(value?: string) {
 
 export default function MissionsPage() {
   const router = useRouter();
-  const { missions, refreshMissions, setActiveMission, activeMissionId } = useDashboardContext();
+  const { missions, refreshMissions, setActiveMission, activeMissionId, refreshShortlist } = useDashboardContext();
   const [error, setError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [showAssistant, setShowAssistant] = useState(false);
@@ -45,6 +45,26 @@ export default function MissionsPage() {
       if (nextStatus === "active") setActiveMission(mission.ID);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update mission status");
+    } finally {
+      setUpdatingID(null);
+    }
+  }
+
+  async function deleteMission(mission: Mission) {
+    if (!mission.ID) return;
+    const confirmed = window.confirm(
+      `Delete mission "${mission.Name}"? This removes its searches, matches, and saved items.`,
+    );
+    if (!confirmed) return;
+    setError("");
+    setUpdatingID(mission.ID);
+    try {
+      await api.missions.delete(mission.ID);
+      if (activeMissionId === mission.ID) setActiveMission(0);
+      await refreshMissions();
+      await refreshShortlist();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete mission");
     } finally {
       setUpdatingID(null);
     }
@@ -176,6 +196,14 @@ export default function MissionsPage() {
                       Complete
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="btn-secondary danger"
+                    onClick={() => void deleteMission(mission)}
+                    disabled={isUpdating || !mission.ID}
+                  >
+                    Delete
+                  </button>
                   {activeMissionId === mission.ID && <span className="success-badge">Active context</span>}
                 </div>
               </article>

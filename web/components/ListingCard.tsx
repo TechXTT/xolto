@@ -9,6 +9,8 @@ interface Props {
   listing: Listing;
   onShortlist?: (itemID: string) => Promise<void>;
   onDraftOffer?: (itemID: string) => Promise<void>;
+  onApprove?: (itemID: string) => Promise<void>;
+  onDismiss?: (itemID: string) => Promise<void>;
   draftState?: { loading: boolean; text: string | null };
   isSaved?: boolean;
 }
@@ -58,7 +60,7 @@ const FLAG_TO_QUESTION: Record<string, string> = {
   refurbished_ambiguity: "Is this seller-refurbished or manufacturer-refurbished?",
 };
 
-export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, isSaved = false }: Props) {
+export function ListingCard({ listing, onShortlist, onDraftOffer, onApprove, onDismiss, draftState, isSaved = false }: Props) {
   const item = listing;
   const score = (listing.Score ?? 0) > 0 ? listing.Score : undefined;
   const fairPrice = (listing.FairPrice ?? 0) > 0 ? listing.FairPrice : undefined;
@@ -67,8 +69,10 @@ export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, is
   const verdict = verdictLabel(score, listing.RiskFlags ?? []);
   const confidenceLabel = confidenceCopy(confidence);
   const suggestedQuestion = firstSuggestedQuestion(listing.RiskFlags ?? []);
+  const feedback = listing.Feedback ?? "";
 
   const [saving, setSaving] = useState(false);
+  const [feedbackPending, setFeedbackPending] = useState(false);
 
   async function handleShortlist() {
     if (!onShortlist || saving || isSaved) return;
@@ -83,6 +87,26 @@ export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, is
   async function handleDraftOffer() {
     if (!onDraftOffer || draftState?.loading) return;
     await onDraftOffer(item.ItemID);
+  }
+
+  async function handleApprove() {
+    if (!onApprove || feedbackPending || feedback === "approved") return;
+    setFeedbackPending(true);
+    try {
+      await onApprove(item.ItemID);
+    } finally {
+      setFeedbackPending(false);
+    }
+  }
+
+  async function handleDismiss() {
+    if (!onDismiss || feedbackPending) return;
+    setFeedbackPending(true);
+    try {
+      await onDismiss(item.ItemID);
+    } finally {
+      setFeedbackPending(false);
+    }
   }
 
   return (
@@ -118,6 +142,7 @@ export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, is
               <span className="subtle-pill">{verdict}</span>
               {score !== undefined && <span className="subtle-pill">Score {score.toFixed(1)}</span>}
               <span className="subtle-pill">{confidenceLabel}</span>
+              {feedback === "approved" && <span className="approved-badge">Approved</span>}
             </div>
           </div>
 
@@ -162,6 +187,28 @@ export function ListingCard({ listing, onShortlist, onDraftOffer, draftState, is
           {onDraftOffer && (
             <button type="button" className="btn-primary" onClick={() => void handleDraftOffer()} disabled={draftState?.loading}>
               {draftState?.loading ? "Drafting..." : "Draft seller note"}
+            </button>
+          )}
+          {onApprove && (
+            <button
+              type="button"
+              className={`btn-approve${feedback === "approved" ? " active" : ""}`}
+              onClick={() => void handleApprove()}
+              disabled={feedbackPending || feedback === "approved"}
+              title="Approve this match — future matches will lean on it as a ground-truth example"
+            >
+              {feedback === "approved" ? "✓ Approved" : "Approve"}
+            </button>
+          )}
+          {onDismiss && (
+            <button
+              type="button"
+              className="btn-dismiss"
+              onClick={() => void handleDismiss()}
+              disabled={feedbackPending}
+              title="Dismiss — hide this match and avoid similar ones"
+            >
+              Dismiss
             </button>
           )}
         </div>

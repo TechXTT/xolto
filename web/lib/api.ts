@@ -7,6 +7,7 @@ export type User = {
   email: string;
   name: string;
   tier: string;
+  is_admin?: boolean;
 };
 
 export type SearchSpec = {
@@ -44,7 +45,10 @@ export type Listing = {
   Confidence?: number;
   Reason?: string;
   RiskFlags?: string[];
+  Feedback?: "" | "approved" | "dismissed";
 };
+
+export type MatchFeedbackAction = "approve" | "dismiss" | "clear";
 
 export type Mission = {
   ID?: number;
@@ -295,6 +299,24 @@ export const api = {
       return apiFetch<{ listings: Listing[]; user_id: string }>(`/listings/feed${query}`);
     },
   },
+  matches: {
+    feedback: async (itemID: string, action: MatchFeedbackAction) =>
+      apiFetch<{ ok: boolean; feedback: string }>("/matches/feedback", {
+        method: "POST",
+        body: JSON.stringify({ item_id: itemID, action }),
+      }),
+    analyze: async (url: string, missionID?: number) =>
+      apiFetch<{
+        listing: Listing;
+        reasoning_source: string;
+        search_advice: string;
+        comparables?: Array<{ ItemID: string; Title: string; Price: number; Similarity: number; MatchReason: string }>;
+        market_average: number;
+      }>("/matches/analyze", {
+        method: "POST",
+        body: JSON.stringify({ url, mission_id: missionID && missionID > 0 ? missionID : 0 }),
+      }),
+  },
   missions: {
     list: async () => apiFetch<{ missions: Mission[] }>("/missions"),
     create: async (mission: Partial<Mission>) =>
@@ -304,6 +326,8 @@ export const api = {
       apiFetch<Mission>(`/missions/${id}`, { method: "PUT", body: JSON.stringify(mission) }),
     updateStatus: async (id: number, status: "active" | "paused" | "completed") =>
       apiFetch<Mission>(`/missions/${id}/status`, { method: "PUT", body: JSON.stringify({ status }) }),
+    delete: async (id: number) =>
+      apiFetch<{ ok: boolean }>(`/missions/${id}`, { method: "DELETE" }),
     matches: async (id: number, params?: { limit?: number }) => {
       const limit = params?.limit ? `?limit=${params.limit}` : "";
       return apiFetch<{ mission: Mission; listings: Listing[] }>(`/missions/${id}/matches${limit}`);
@@ -333,4 +357,48 @@ export const api = {
       }),
     portal: async () => apiFetch<{ url: string }>("/billing/portal"),
   },
+  admin: {
+    stats: async (days = 30) =>
+      apiFetch<{ stats: AdminAIStats; days: number }>(`/admin/stats?days=${days}`),
+    users: async () =>
+      apiFetch<{ users: AdminUser[] }>("/admin/users"),
+    usage: async (days = 7) =>
+      apiFetch<{ entries: AdminUsageEntry[]; days: number }>(`/admin/usage?days=${days}`),
+  },
+};
+
+export type AdminAIStats = {
+  TotalCalls: number;
+  TotalTokens: number;
+  TotalPrompt: number;
+  TotalCompletion: number;
+  FailedCalls: number;
+  EstimatedCostUSD: number;
+};
+
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string;
+  tier: string;
+  is_admin: boolean;
+  created_at: string;
+  mission_count: number;
+  search_count: number;
+  ai_call_count: number;
+  ai_tokens: number;
+};
+
+export type AdminUsageEntry = {
+  ID: number;
+  UserID: string;
+  CallType: string;
+  Model: string;
+  PromptTokens: number;
+  CompletionTokens: number;
+  TotalTokens: number;
+  LatencyMs: number;
+  Success: boolean;
+  ErrorMsg: string;
+  CreatedAt: string;
 };

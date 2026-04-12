@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
 import { DashboardProvider } from "../../components/DashboardContext";
+import { OnboardingOverlay, shouldShowOnboarding } from "../../components/OnboardingOverlay";
 import { api, Mission, ShortlistEntry, User } from "../../lib/api";
 
 function IconAI() {
@@ -47,12 +48,24 @@ function IconSettings() {
   );
 }
 
+function IconAdmin() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 1v2M8 13v2M1 8h2M13 8h2" />
+      <circle cx="8" cy="8" r="3" />
+      <path d="M4.2 4.2l1.4 1.4M10.4 10.4l1.4 1.4M4.2 11.8l1.4-1.4M10.4 5.6l1.4-1.4" opacity="0.5" />
+    </svg>
+  );
+}
+
 const NAV = [
   { href: "/missions", label: "Missions", description: "Define what to buy", Icon: IconAI },
   { href: "/matches", label: "Matches", description: "Mission-scoped deals", Icon: IconRadar },
   { href: "/saved", label: "Saved", description: "Compare top picks", Icon: IconSaved },
   { href: "/settings", label: "Settings", description: "Account and billing", Icon: IconSettings },
 ];
+
+const ADMIN_NAV = { href: "/admin", label: "Admin", description: "Usage & users", Icon: IconAdmin };
 
 function initialsForUser(user: User | null) {
   if (!user?.name) return user?.email.slice(0, 1).toUpperCase() || "?";
@@ -84,6 +97,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [shortlist, setShortlist] = useState<ShortlistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
@@ -137,7 +151,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           }
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setShowOnboarding(shouldShowOnboarding());
+        }
       }
     }
 
@@ -176,7 +193,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     setShortlist((prev) => prev.filter((item) => item.ItemID !== itemID));
   }
 
-  const currentNav = NAV.find((item) => pathname === item.href || pathname?.startsWith(`${item.href}/`)) ?? NAV[0];
+  const allNav = user?.is_admin ? [...NAV, ADMIN_NAV] : NAV;
+  const currentNav = allNav.find((item) => pathname === item.href || pathname?.startsWith(`${item.href}/`)) ?? NAV[0];
 
   if (loading) {
     return (
@@ -203,6 +221,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         isShortlisted: (itemID: string) => shortlistIDs.has(itemID),
       }}
     >
+      {showOnboarding && <OnboardingOverlay onComplete={() => setShowOnboarding(false)} />}
       <div className="app-shell">
         {menuOpen && <button type="button" className="app-overlay" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
 
@@ -239,6 +258,19 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 </Link>
               );
             })}
+            {user?.is_admin && (() => {
+              const { href, label, description, Icon } = ADMIN_NAV;
+              const active = pathname === href || pathname?.startsWith(`${href}/`);
+              return (
+                <Link href={href} className={`nav-item${active ? " active" : ""}`}>
+                  <div className="nav-icon"><Icon /></div>
+                  <div>
+                    <p className="nav-label">{label}</p>
+                    <p className="nav-meta">{description}</p>
+                  </div>
+                </Link>
+              );
+            })()}
           </nav>
 
           <div className="sidebar-footer">

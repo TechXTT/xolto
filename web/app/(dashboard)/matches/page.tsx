@@ -42,6 +42,9 @@ const MIN_SCORE_OPTIONS = [
   { value: 9, label: "Score ≥ 9" },
 ];
 
+const PAGE_SIZE = 20;
+const MATCHES_FETCH_LIMIT = 200;
+
 export default function MatchesPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [error, setError] = useState("");
@@ -53,6 +56,13 @@ export default function MatchesPage() {
   const [marketplace, setMarketplace] = useState<MarketplaceFilter>("all");
   const [condition, setCondition] = useState<ConditionFilter>("all");
   const [minScore, setMinScore] = useState(0);
+  const [page, setPage] = useState(1);
+
+  const [analyzeURL, setAnalyzeURL] = useState("");
+  const [analyzeLoading, setAnalyzeLoading] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState("");
+  const [analyzeResult, setAnalyzeResult] = useState<Listing | null>(null);
+  const [analyzeSource, setAnalyzeSource] = useState("");
 
   useEffect(() => {
     if (missions.length === 0) {
@@ -73,7 +83,7 @@ export default function MatchesPage() {
       setDraftStates({});
       try {
         const nextListings = activeMissionId > 0
-          ? (await api.missions.matches(activeMissionId)).listings ?? []
+          ? (await api.missions.matches(activeMissionId, { limit: MATCHES_FETCH_LIMIT })).listings ?? []
           : (await api.listings.feed()).listings ?? [];
         if (cancelled) return;
         setListings(nextListings);
@@ -141,6 +151,18 @@ export default function MatchesPage() {
     });
   }, [listings, sort, marketplace, condition, minScore]);
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const pageEnd = pageStart + PAGE_SIZE;
+  const pagedListings = filtered.slice(pageStart, pageEnd);
+
+  // Reset to page 1 whenever filters, sort, or the active mission change so the
+  // user isn't stranded on a page that no longer exists after the list shrinks.
+  useEffect(() => {
+    setPage(1);
+  }, [activeMissionId, sort, marketplace, condition, minScore]);
+
   const hasActiveFilters = marketplace !== "all" || condition !== "all" || minScore > 0 || sort !== "score";
   const currentMission = missions.find((mission) => mission.ID === activeMissionId) ?? null;
   const showLegacyFeedWithoutMissions = missions.length === 0 && listings.length > 0;
@@ -153,6 +175,53 @@ export default function MatchesPage() {
     setMarketplace("all");
     setCondition("all");
     setMinScore(0);
+  }
+
+  async function approveMatch(itemID: string) {
+    setError("");
+    // Optimistically flag as approved so the badge lights up immediately.
+    const prev = listings;
+    setListings((list) =>
+      list.map((l) => (l.ItemID === itemID ? { ...l, Feedback: "approved" } : l))
+    );
+    try {
+      await api.matches.feedback(itemID, "approve");
+    } catch (err) {
+      setListings(prev);
+      setError(err instanceof Error ? err.message : "Failed to approve match");
+    }
+  }
+
+  async function dismissMatch(itemID: string) {
+    setError("");
+    // Optimistically remove it — dismissed listings are excluded from the feed
+    // server-side anyway, so we just match that here.
+    const prev = listings;
+    setListings((list) => list.filter((l) => l.ItemID !== itemID));
+    try {
+      await api.matches.feedback(itemID, "dismiss");
+    } catch (err) {
+      setListings(prev);
+      setError(err instanceof Error ? err.message : "Failed to dismiss match");
+    }
+  }
+
+  async function analyzeListingURL() {
+    const url = analyzeURL.trim();
+    if (!url || analyzeLoading) return;
+    setAnalyzeLoading(true);
+    setAnalyzeError("");
+    setAnalyzeResult(null);
+    setAnalyzeSource("");
+    try {
+      const res = await api.matches.analyze(url, activeMissionId);
+      setAnalyzeResult(res.listing);
+      setAnalyzeSource(res.reasoning_source || "");
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : "Failed to analyze listing");
+    } finally {
+      setAnalyzeLoading(false);
+    }
   }
 
   async function draftOffer(itemID: string) {
@@ -198,6 +267,49 @@ export default function MatchesPage() {
       </section>
 
       {error && <div className="error-msg">{error}</div>}
+
+      <section className="surface-panel analyze-panel">
+        <div>
+          <p className="section-kicker">Analyze any listing</p>
+          <p className="section-support">
+            Paste a Marktplaats, Vinted, or OLX BG URL and markt will score it with the same AI that ranks your mission feed.
+            {activeMissionId > 0 && " The active mission's goal and approved comparables will be used as context."}
+          </p>
+        </div>
+        <div className="generator-bar">
+          <input
+            type="url"
+            className="input"
+            placeholder="https://www.marktplaats.nl/v/.../m1234567890-..."
+            value={analyzeURL}
+            onChange={(e) => setAnalyzeURL(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void analyzeListingURL();
+            }}
+            disabled={analyzeLoading}
+          />
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void analyzeListingURL()}
+            disabled={analyzeLoading || !analyzeURL.trim()}
+          >
+            {analyzeLoading ? "Analyzing…" : "Run analysis"}
+          </button>
+        </div>
+        {analyzeError && <p className="error-msg" style={{ marginTop: 12 }}>{analyzeError}</p>}
+        {analyzeResult && (
+          <div style={{ marginTop: 16 }}>
+            {analyzeSource && (
+              <p className="section-support" style={{ marginBottom: 8 }}>
+                Reasoning source: <strong>{analyzeSource === "ai" ? "AI" : "Heuristic fallback"}</strong>
+              </p>
+            )}
+            <ListingCard listing={analyzeResult} />
+          </div>
+        )}
+      </section>
+
 
       {(missionPaused || missionCompleted) && (
         <section className="surface-panel status-banner">
@@ -334,18 +446,45 @@ export default function MatchesPage() {
           </button>
         </div>
       ) : (
-        <div className="listing-stack">
-          {filtered.map((listing) => (
-            <ListingCard
-              key={listing.ItemID}
-              listing={listing}
-              isSaved={isShortlisted(listing.ItemID)}
-              onShortlist={addToShortlist}
-              onDraftOffer={draftOffer}
-              draftState={draftStates[listing.ItemID]}
-            />
-          ))}
-        </div>
+        <>
+          <div className="listing-stack">
+            {pagedListings.map((listing) => (
+              <ListingCard
+                key={listing.ItemID}
+                listing={listing}
+                isSaved={isShortlisted(listing.ItemID)}
+                onShortlist={addToShortlist}
+                onDraftOffer={draftOffer}
+                onApprove={activeMissionId > 0 ? approveMatch : undefined}
+                onDismiss={activeMissionId > 0 ? dismissMatch : undefined}
+                draftState={draftStates[listing.ItemID]}
+              />
+            ))}
+          </div>
+          {totalPages > 1 && (
+            <nav className="pagination-bar" aria-label="Matches pagination">
+              <button
+                type="button"
+                className="feed-pill"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+              >
+                ← Prev
+              </button>
+              <span className="pagination-status">
+                Page {currentPage} of {totalPages} · showing {pageStart + 1}–{Math.min(pageEnd, filtered.length)} of {filtered.length}
+              </span>
+              <button
+                type="button"
+                className="feed-pill"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+              >
+                Next →
+              </button>
+            </nav>
+          )}
+        </>
       )}
     </div>
   );
