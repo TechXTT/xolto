@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 const (
@@ -104,7 +104,7 @@ func (d *Discord) SendDeal(sl models.ScoredListing, queryName string) error {
 		URL:       sl.Listing.URL,
 		Color:     color,
 		Fields:    fields,
-		Footer:    &embedFooter{Text: truncate(fmt.Sprintf("markt | %s", queryName), 2048)},
+		Footer:    &embedFooter{Text: truncate(fmt.Sprintf("xolto | %s", queryName), 2048)},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 

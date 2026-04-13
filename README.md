@@ -1,124 +1,68 @@
-# markt
+# xolto
 
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=nextdotjs)
 ![Status](https://img.shields.io/badge/status-active%20prototype-orange)
 
-`markt` is a used electronics copilot.
+`xolto` is a used electronics copilot.
 
-It helps you run a mission-driven buying loop:
+Buy used electronics without overpaying.
 
-1. Define a buy mission
-2. Monitor mission-scoped matches
-3. Save and compare top options
-4. Draft seller outreach with context
+This repo now contains the backend/runtime layer:
 
-The repo contains:
+- Go API server: `cmd/server`
+- Go CLI runtime: `cmd/xolto`
+- Compatibility CLI shim: `cmd/marktbot`
 
-- a Go API server (`cmd/server`)
-- a Go CLI worker/runtime (`cmd/marktbot`)
-- the split product app repo (`../xolto-app`)
-- the split landing site repo (`../xolto-landing`)
+The split frontend repos live alongside this repo:
 
-## At A Glance
-
-- Mission-first workflow: Missions -> Matches -> Saved -> Seller outreach
-- Marketplace integrations with scoring and risk flags
-- AI-assisted reasoning with rule-based fallback
-- Multi-user auth/session flow in server mode
-- SQLite local default, Postgres support for server mode
-- Optional Discord assistant and webhook alerts
+- `../xolto-app`
+- `../xolto-landing`
 
 ## Product Flow
 
-The primary app flow is now:
+The product remains mission-first:
 
-1. Create a mission (example: "iPhone 15 Pro under EUR 850")
-2. Review mission-scoped matches with verdict + confidence + risk flags
-3. Save promising listings to comparison
-4. Draft a seller message when you are ready to act
+1. Create a mission
+2. Review mission-scoped matches
+3. Save and compare strong options
+4. Draft seller outreach
 
-App routes:
+User-facing routes remain:
 
 - `/missions`
 - `/matches`
 - `/saved`
 - `/settings`
 
-Legacy listings with no mission link (`profile_id = 0`) still appear in "All missions" mode on Matches.
-
-## Repository Layout
-
-```text
-markt/
-|-- cmd/
-|   |-- marktbot/   # CLI entrypoint
-|   `-- server/     # HTTP API server entrypoint
-|-- internal/
-|   |-- api/
-|   |-- assistant/
-|   |-- auth/
-|   |-- billing/
-|   |-- cliapp/
-|   |-- config/
-|   |-- discordbot/
-|   |-- marketplace/
-|   |-- messenger/
-|   |-- models/
-|   |-- notify/
-|   |-- reasoner/
-|   |-- scheduler/
-|   |-- scorer/
-|   |-- store/
-|   `-- worker/
-|-- migrations/
-|-- config.yaml.example
-|-- .env.example
-`-- README.md
-```
-
 ## Requirements
 
 - Go `1.25.0+`
-- Node.js `18+`
-- npm
+- npm / Node.js `18+` only if you also work on the split frontend repos
 - Chrome/Chromium only if you enable browser messaging automation
 
 ## Quick Start
 
-1. Install dependencies:
-
 ```bash
 go mod download
-```
-
-2. Create local config files:
-
-```bash
 cp config.yaml.example config.yaml
 cp .env.example .env
-```
-
-3. Set at least `JWT_SECRET` in `.env` (32+ random chars).
-
-4. Run API server:
-
-```bash
 go run ./cmd/server
 ```
 
 Defaults:
 
 - API server: `http://localhost:8000`
-
-The split frontends now live in sibling repos:
-
-- `../xolto-app`
-- `../xolto-landing`
+- `DATABASE_URL`: `xolto-server.db` when unset
 
 ## CLI Mode
 
-Use CLI mode when you want local polling/automation workflows without the web stack.
+Use the CLI when you want local polling and automation without the web stack.
+
+```bash
+go run ./cmd/xolto --config config.yaml
+```
+
+Compatibility shim:
 
 ```bash
 go run ./cmd/marktbot --config config.yaml
@@ -132,41 +76,42 @@ Useful flags:
 - `--generate-searches "<topic>"`
 - `--cleanup listings|history|all`
 
-Examples:
-
-```bash
-go run ./cmd/marktbot --config config.yaml --once --dry-run --verbose
-go run ./cmd/marktbot --config config.yaml --generate-searches "sony cameras"
-go run ./cmd/marktbot --config config.yaml --cleanup all
-```
-
-## Config Notes
-
-- `config.yaml` uses whole-euro prices for `min_price`/`max_price`; backend converts to cents.
-- If `discord.assistant_enabled: true`, `discord.bot_token` is required.
-- If `messenger.enabled: true`, messaging credentials are required.
-- If `ai.enabled: true`, `api_key` and `model` are required.
-
-## Environment Notes
+## Configuration
 
 Important `.env` values:
 
-- `JWT_SECRET` (required)
-- `DATABASE_URL` (default SQLite file)
-- `APP_BASE_URL` (must match app origin for auth cookies/CORS)
+- `JWT_SECRET`
+- `DATABASE_URL`
+- `APP_BASE_URL`
 - `SERVER_ADDR`
 - `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`
 - `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRO_PRICE_ID` / `STRIPE_TEAM_PRICE_ID`
+- `STRIPE_PRO_PRICE_ID` / `STRIPE_POWER_PRICE_ID`
+- `ADMIN_EMAILS`
 
-`DATABASE_URL` behavior:
+`config.yaml` uses whole-euro prices for `min_price` / `max_price`; the backend converts them to cents.
 
-- File path -> SQLite
-- `postgres://` or `postgresql://` -> Postgres
+## Development Commands
+
+Backend:
+
+```bash
+GOTOOLCHAIN=auto go test ./...
+go build ./...
+go run ./cmd/server
+go run ./cmd/xolto --once --dry-run --verbose
+```
+
+Split frontends:
+
+```bash
+cd ../xolto-app && npm run build
+cd ../xolto-landing && npm run build
+```
 
 ## API Surface
 
-Current HTTP endpoints include:
+Core endpoints include:
 
 - `GET /healthz`
 - `POST /auth/register`
@@ -174,97 +119,17 @@ Current HTTP endpoints include:
 - `POST /auth/refresh`
 - `POST /auth/logout`
 - `GET /users/me`
-
 - `GET /missions`
 - `POST /missions`
-- `GET /missions/{id}`
-- `PUT /missions/{id}`
-- `PUT /missions/{id}/status`
-- `GET /missions/{id}/matches`
-
-- `GET /searches`
-- `POST /searches`
-- `POST /searches/run`
-- `POST /searches/generate`
-- `PUT /searches/{id}`
-- `DELETE /searches/{id}`
-- `POST /searches/{id}/run`
-
 - `GET /listings/feed`
 - `GET /shortlist`
-- `POST /shortlist/{itemID}`
-- `DELETE /shortlist/{itemID}`
-- `POST /shortlist/{itemID}/draft`
-
 - `POST /assistant/converse`
-- `GET /assistant/session`
-- `GET /actions`
-- `GET /events`
-
 - `POST /billing/checkout`
 - `GET /billing/portal`
 - `POST /billing/webhook`
 
-## Discord Assistant
+## Notes
 
-Discord assistant mode is optional and still supported.
-
-Typical commands:
-
-- `/brief`
-- `/profile`
-- `/matches`
-- `/why`
-- `/shortlist`
-- `/shortlist-add`
-- `/compare`
-- `/draft`
-- `/chat`
-- `/help`
-
-## Development Commands
-
-Backend:
-
-```bash
-go test ./...
-go build ./...
-go run ./cmd/server
-go run ./cmd/marktbot --once --dry-run --verbose
-```
-
-## Status
-
-The mission-centric product shape is implemented and usable:
-
-- mission creation and mission-scoped matching
-- shortlist/save and comparison flow
-- seller draft generation
-- dashboard + API + billing skeleton
-
-Still in active hardening:
-
-- lifecycle edge cases across mission state transitions
-- scoring/verdict trust calibration
-- production polish and release readiness
-
-## Roadmap
-
-Near-term priorities:
-
-- tighten mission lifecycle consistency
-- improve verdict/risk consistency and explainability
-- strengthen onboarding and first-run flow
-- harden integrations and observability
-
-Later expansion:
-
-- additional marketplaces
-- richer collaboration workflows
-- deeper AI-assisted buying guidance
-
-## Security
-
-- Never commit real secrets.
-- Rotate keys that have been committed previously.
-- Treat Discord tokens, webhook URLs, AI keys, and Stripe secrets as sensitive.
+- DB schemas, table names, and applied migration filenames are intentionally unchanged.
+- Session cookie names now use the `xolto_*` prefix.
+- Frontend token/storage key changes now live in `../xolto-app`.

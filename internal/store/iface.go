@@ -1,6 +1,6 @@
 package store
 
-import "github.com/TechXTT/marktbot/internal/models"
+import "github.com/TechXTT/xolto/internal/models"
 
 type Reader interface {
 	GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error)

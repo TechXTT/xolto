@@ -6,14 +6,14 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	"github.com/TechXTT/marktbot/internal/messenger"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/notify"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/messenger"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 type Scheduler struct {

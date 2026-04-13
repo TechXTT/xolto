@@ -4,11 +4,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 func TestMissionAndShortlistPersistence(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "marktbot-test.db")
+	dbPath := filepath.Join(t.TempDir(), "xolto-test.db")
 	st, err := New(dbPath)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -70,7 +70,7 @@ func TestMissionAndShortlistPersistence(t *testing.T) {
 }
 
 func TestListingQueriesAreScopedPerUser(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "marktbot-scope-test.db")
+	dbPath := filepath.Join(t.TempDir(), "xolto-scope-test.db")
 	st, err := New(dbPath)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -116,7 +116,7 @@ func TestListingQueriesAreScopedPerUser(t *testing.T) {
 }
 
 func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "marktbot-scoring-state.db")
+	dbPath := filepath.Join(t.TempDir(), "xolto-scoring-state.db")
 	st, err := New(dbPath)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

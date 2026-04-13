@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 type apiItem struct {

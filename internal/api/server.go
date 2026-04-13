@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/assistant"
-	"github.com/TechXTT/marktbot/internal/auth"
-	"github.com/TechXTT/marktbot/internal/billing"
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/generator"
-	"github.com/TechXTT/marktbot/internal/marketplace/listingfetcher"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/assistant"
+	"github.com/TechXTT/xolto/internal/auth"
+	"github.com/TechXTT/xolto/internal/billing"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/generator"
+	"github.com/TechXTT/xolto/internal/marketplace/listingfetcher"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 	"github.com/stripe/stripe-go/v81"
 	portalsession "github.com/stripe/stripe-go/v81/billingportal/session"
 	"github.com/stripe/stripe-go/v81/checkout/session"
@@ -126,7 +126,7 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "marktbot-server"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "xolto-server"})
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +228,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	refreshToken := strings.TrimSpace(r.Header.Get("X-Refresh-Token"))
 	if refreshToken == "" {
-		if cookie, err := r.Cookie("marktbot_refresh"); err == nil {
+		if cookie, err := r.Cookie("xolto_refresh"); err == nil {
 			refreshToken = strings.TrimSpace(cookie.Value)
 		}
 	}
@@ -1184,7 +1184,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *
 			ID:           u.ID,
 			Email:        u.Email,
 			Name:         u.Name,
-			Tier:         u.Tier,
+			Tier:         billing.NormalizeTier(u.Tier),
 			IsAdmin:      u.IsAdmin,
 			CreatedAt:    u.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			MissionCount: u.MissionCount,
@@ -1238,7 +1238,7 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *mod
 func (s *Server) currentUser(r *http.Request) (*models.User, error) {
 	token := bearerToken(r)
 	if token == "" {
-		if cookie, err := r.Cookie("marktbot_session"); err == nil {
+		if cookie, err := r.Cookie("xolto_session"); err == nil {
 			token = strings.TrimSpace(cookie.Value)
 		}
 	}
@@ -1263,7 +1263,7 @@ func (s *Server) issueToken(user models.User, tokenType string, ttl time.Duratio
 	return auth.IssueToken(s.cfg.JWTSecret, auth.Claims{
 		UserID:    user.ID,
 		Email:     user.Email,
-		Tier:      user.Tier,
+		Tier:      billing.NormalizeTier(user.Tier),
 		TokenType: tokenType,
 	}, ttl)
 }
@@ -1287,7 +1287,7 @@ func (s *Server) setSessionCookies(w http.ResponseWriter, accessToken, refreshTo
 
 func (s *Server) setAccessCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     "marktbot_session",
+		Name:     "xolto_session",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
@@ -1299,7 +1299,7 @@ func (s *Server) setAccessCookie(w http.ResponseWriter, token string) {
 
 func (s *Server) setRefreshCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     "marktbot_refresh",
+		Name:     "xolto_refresh",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
@@ -1310,7 +1310,7 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, token string) {
 }
 
 func (s *Server) clearSessionCookies(w http.ResponseWriter) {
-	for _, name := range []string{"marktbot_session", "marktbot_refresh"} {
+	for _, name := range []string{"xolto_session", "xolto_refresh"} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
 			Value:    "",
@@ -1373,7 +1373,7 @@ func sanitizeUser(user models.User) map[string]any {
 		"id":    user.ID,
 		"email": user.Email,
 		"name":  user.Name,
-		"tier":  user.Tier,
+		"tier":  billing.NormalizeTier(user.Tier),
 	}
 	if user.IsAdmin {
 		m["is_admin"] = true
@@ -1426,7 +1426,7 @@ func (s *Server) subscriptionTier(priceID string) (string, bool) {
 		return "", false
 	case strings.TrimSpace(s.cfg.StripeProPriceID):
 		return "pro", true
-	case strings.TrimSpace(s.cfg.StripeTeamPriceID):
+	case strings.TrimSpace(s.cfg.StripePowerPriceID):
 		return "power", true
 	default:
 		return "", false
@@ -1434,12 +1434,9 @@ func (s *Server) subscriptionTier(priceID string) (string, bool) {
 }
 
 func (s *Server) subscriptionTierFromMetadata(metadata map[string]string) (string, bool) {
-	tier := strings.TrimSpace(metadata["tier"])
+	tier := billing.NormalizeTier(metadata["tier"])
 	switch tier {
-	case "pro", "power", "team":
-		if tier == "team" {
-			return "power", true
-		}
+	case "pro", "power":
 		return tier, true
 	default:
 		return "", false

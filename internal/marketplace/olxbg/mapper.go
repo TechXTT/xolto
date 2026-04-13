@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 // BGNPerEUR is the fixed BGN→EUR exchange rate (currency board peg).
@@ -75,9 +75,9 @@ type searchResponse struct {
 }
 
 type apiOffer struct {
-	ID    flexString `json:"id"`
-	URL   string     `json:"url"`
-	Title string     `json:"title"`
+	ID     flexString `json:"id"`
+	URL    string     `json:"url"`
+	Title  string     `json:"title"`
 	Photos []struct {
 		Link string `json:"link"`
 	} `json:"photos"`

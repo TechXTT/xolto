@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/TechXTT/marktbot/internal/assistant"
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/assistant"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/models"
 	"github.com/bwmarrin/discordgo"
 )
 

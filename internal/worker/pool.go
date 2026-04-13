@@ -6,26 +6,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/notify"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 const minPollInterval = 30 * time.Second
 
 type Pool struct {
-	db         store.Store
-	registry   *marketplace.Registry
-	scorer     *scorer.Scorer
-	notifier   notify.Dispatcher
+	db            store.Store
+	registry      *marketplace.Registry
+	scorer        *scorer.Scorer
+	notifier      notify.Dispatcher
 	emailNotifier *notify.EmailNotifier
-	minScore   float64
-	mu         sync.Mutex
-	lastRun    map[int64]time.Time // keyed by SearchSpec.ID
-	runningCtx context.Context
-	cancel     context.CancelFunc
+	minScore      float64
+	mu            sync.Mutex
+	lastRun       map[int64]time.Time // keyed by SearchSpec.ID
+	runningCtx    context.Context
+	cancel        context.CancelFunc
 }
 
 func NewPool(db store.Store, registry *marketplace.Registry, sc *scorer.Scorer, notifier notify.Dispatcher, minScore float64, _ time.Duration) *Pool {

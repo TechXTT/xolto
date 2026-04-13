@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/config"
+	"github.com/TechXTT/xolto/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

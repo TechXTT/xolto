@@ -10,13 +10,13 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 const (
-	olxBGBaseURL  = "https://www.olx.bg/api/v1/offers/"
-	olxPageLimit  = 40 // max items per page for OLX API v1
-	olxMaxPages   = 5  // cap at 200 results per search cycle
+	olxBGBaseURL = "https://www.olx.bg/api/v1/offers/"
+	olxPageLimit = 40 // max items per page for OLX API v1
+	olxMaxPages  = 5  // cap at 200 results per search cycle
 )
 
 type client struct {

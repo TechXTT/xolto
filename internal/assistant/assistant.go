@@ -13,12 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/billing"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 // pricePhrasePattern strips natural-language budget qualifiers from search
@@ -621,8 +622,8 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 }
 
 func intervalForTier(tier string) time.Duration {
-	switch tier {
-	case "power", "team":
+	switch billing.NormalizeTier(tier) {
+	case "power":
 		return time.Minute
 	case "pro":
 		return 5 * time.Minute

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 const (

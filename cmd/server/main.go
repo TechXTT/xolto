@@ -11,19 +11,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/api"
-	"github.com/TechXTT/marktbot/internal/assistant"
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	marktplaatsmp "github.com/TechXTT/marktbot/internal/marketplace/marktplaats"
-	"github.com/TechXTT/marktbot/internal/marketplace/olxbg"
-	"github.com/TechXTT/marktbot/internal/marketplace/vinted"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/notify"
-	"github.com/TechXTT/marktbot/internal/reasoner"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
-	"github.com/TechXTT/marktbot/internal/worker"
+	"github.com/TechXTT/xolto/internal/api"
+	"github.com/TechXTT/xolto/internal/assistant"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	marktplaatsmp "github.com/TechXTT/xolto/internal/marketplace/marktplaats"
+	"github.com/TechXTT/xolto/internal/marketplace/olxbg"
+	"github.com/TechXTT/xolto/internal/marketplace/vinted"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/reasoner"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
+	"github.com/TechXTT/xolto/internal/worker"
 	"github.com/joho/godotenv"
 )
 
@@ -98,7 +98,7 @@ func main() {
 
 	// Start server in background.
 	go func() {
-		log.Printf("marktbot server listening on %s", cfg.Address)
+		log.Printf("xolto server listening on %s", cfg.Address)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

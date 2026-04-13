@@ -8,11 +8,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/notify"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 // wordTokenRe extracts alphanumeric runs as discrete tokens. We intentionally

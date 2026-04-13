@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/auth"
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/auth"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 type stubRunner struct {

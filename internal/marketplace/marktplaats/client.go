@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 	"golang.org/x/time/rate"
 )
 

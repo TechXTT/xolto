@@ -13,7 +13,7 @@ type ServerConfig struct {
 	StripeSecret        string
 	StripeWebhookSecret string
 	StripeProPriceID    string
-	StripeTeamPriceID   string
+	StripePowerPriceID  string
 	AppBaseURL          string
 	AIAPIKey            string
 	AIBaseURL           string
@@ -35,7 +35,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		StripeSecret:        os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		StripeProPriceID:    os.Getenv("STRIPE_PRO_PRICE_ID"),
-		StripeTeamPriceID:   os.Getenv("STRIPE_TEAM_PRICE_ID"),
+		StripePowerPriceID:  os.Getenv("STRIPE_POWER_PRICE_ID"),
 		AppBaseURL:          getenvDefault("APP_BASE_URL", "http://localhost:3000"),
 		AIAPIKey:            os.Getenv("AI_API_KEY"),
 		AIBaseURL:           getenvDefault("AI_BASE_URL", "https://api.openai.com/v1"),
@@ -44,12 +44,12 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		SMTPPort:            getenvDefault("SMTP_PORT", "587"),
 		SMTPUser:            os.Getenv("SMTP_USER"),
 		SMTPPass:            os.Getenv("SMTP_PASS"),
-		SMTPFrom:            getenvDefault("SMTP_FROM", "alerts@marktbot.app"),
+		SMTPFrom:            getenvDefault("SMTP_FROM", "alerts@xolto.app"),
 		AlertScore:          parseFloatDefault(os.Getenv("ALERT_SCORE"), 8.0),
 		AdminEmails:         parseAdminEmails(os.Getenv("ADMIN_EMAILS")),
 	}
 	if cfg.DatabaseURL == "" {
-		cfg.DatabaseURL = "marktbot-server.db"
+		cfg.DatabaseURL = "xolto-server.db"
 	}
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("JWT_SECRET is required")

@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/reasoner"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/reasoner"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 func TestScorePrefiltersObviouslyOverBudgetListing(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "marktbot-scorer.db")
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer.db")
 	st, err := store.New(dbPath)
 	if err != nil {
 		t.Fatalf("store.New() error = %v", err)

@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 // UsageCallback is called after each LLM request with token counts and timing.

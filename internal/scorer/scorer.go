@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/format"
-	"github.com/TechXTT/marktbot/internal/models"
-	"github.com/TechXTT/marktbot/internal/reasoner"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/reasoner"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 const minOfferCents = 1000 // EUR10 minimum offer

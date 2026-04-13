@@ -3,7 +3,7 @@ package assistant
 import (
 	"testing"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 func TestBuildRecommendationBuyNow(t *testing.T) {

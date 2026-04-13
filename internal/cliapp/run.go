@@ -9,18 +9,18 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/TechXTT/marktbot/internal/assistant"
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/discordbot"
-	"github.com/TechXTT/marktbot/internal/generator"
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	marktplaatsmp "github.com/TechXTT/marktbot/internal/marketplace/marktplaats"
-	"github.com/TechXTT/marktbot/internal/messenger"
-	"github.com/TechXTT/marktbot/internal/notify"
-	"github.com/TechXTT/marktbot/internal/reasoner"
-	"github.com/TechXTT/marktbot/internal/scheduler"
-	"github.com/TechXTT/marktbot/internal/scorer"
-	"github.com/TechXTT/marktbot/internal/store"
+	"github.com/TechXTT/xolto/internal/assistant"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/discordbot"
+	"github.com/TechXTT/xolto/internal/generator"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	marktplaatsmp "github.com/TechXTT/xolto/internal/marketplace/marktplaats"
+	"github.com/TechXTT/xolto/internal/messenger"
+	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/reasoner"
+	"github.com/TechXTT/xolto/internal/scheduler"
+	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 var (
@@ -61,7 +61,7 @@ func Run() {
 		os.Exit(1)
 	}
 
-	db, err := store.New("marktbot.db")
+	db, err := store.New("xolto.db")
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
@@ -143,13 +143,13 @@ func runGenerator() {
 
 func printBanner() {
 	fmt.Print(`
-  __  __            _    _   ____        _
- |  \/  | __ _ _ __| | _| |_| __ )  ___ | |_
- | |\/| |/ _' | '__| |/ / __|  _ \ / _ \| __|
- | |  | | (_| | |  |   <| |_| |_) | (_) | |_
- |_|  |_|\__,_|_|  |_|\_\\__|____/ \___/ \__|
+  _  __     _ _
+ | |/ /___ | | |_ ___
+ | ' // _ \| | __/ _ \
+ | . \ (_) | | || (_) |
+ |_|\_\___/|_|\__\___/
 
-  Marktplaats Deal Finder & Auto-Negotiator
+  Used electronics copilot
 `)
 }
 
@@ -168,7 +168,7 @@ func runCleanup(mode string) error {
 		return fmt.Errorf("unsupported cleanup mode %q (use listings, history, or all)", mode)
 	}
 
-	db, err := store.New("marktbot.db")
+	db, err := store.New("xolto.db")
 	if err != nil {
 		return fmt.Errorf("opening database for cleanup: %w", err)
 	}

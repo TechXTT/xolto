@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/smtp"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 // EmailNotifier sends deal alert emails via SMTP.
@@ -28,7 +28,7 @@ func (n *EmailNotifier) SendDealAlert(to string, listing models.Listing, score f
 	auth := smtp.PlainAuth("", n.user, n.pass, n.host)
 	subject := "Strong deal found: " + listing.Title
 	body := buildDealEmailHTML(listing, score)
-	msg := "From: markt <" + n.from + ">\r\n" +
+	msg := "From: xolto <" + n.from + ">\r\n" +
 		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
@@ -41,7 +41,7 @@ func buildDealEmailHTML(listing models.Listing, score float64) string {
 	return fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:Inter,sans-serif;background:#edf2ef;padding:32px">
 <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden">
   <div style="background:#0a1410;padding:24px 28px">
-    <h1 style="color:#68e2b8;margin:0;font-size:1.1rem">markt found a strong deal</h1>
+    <h1 style="color:#68e2b8;margin:0;font-size:1.1rem">xolto found a strong deal</h1>
   </div>
   <div style="padding:28px">
     <p style="font-size:1.1rem;font-weight:600;color:#081510;margin:0 0 8px">%s</p>

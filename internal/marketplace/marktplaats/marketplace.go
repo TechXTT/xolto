@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/marketplace"
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/models"
 	"golang.org/x/time/rate"
 	"net/http"
 )

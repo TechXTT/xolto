@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TechXTT/marktbot/internal/config"
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

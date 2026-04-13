@@ -1,4 +1,4 @@
-module github.com/TechXTT/marktbot
+module github.com/TechXTT/xolto
 
 go 1.25.0
 

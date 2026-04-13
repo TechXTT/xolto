@@ -3,7 +3,7 @@ package marketplace
 import (
 	"context"
 
-	"github.com/TechXTT/marktbot/internal/models"
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 type Marketplace interface {
