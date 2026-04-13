@@ -43,13 +43,6 @@ web/out/
 web/.vercel/
 web/.turbo/
 
-# Landing / Next.js
-landing/node_modules/
-landing/.next/
-landing/out/
-landing/.vercel/
-landing/.turbo/
-
 # IDEs
 .idea/
 .vscode/

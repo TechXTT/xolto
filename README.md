@@ -18,7 +18,7 @@ The repo contains:
 - a Go API server (`cmd/server`)
 - a Go CLI worker/runtime (`cmd/marktbot`)
 - a Next.js product app (`web/`)
-- a Next.js landing site (`landing/`)
+- the split landing site repo (`../xolto-landing`)
 
 ## At A Glance
 
@@ -73,7 +73,6 @@ markt/
 |   `-- worker/
 |-- migrations/
 |-- web/            # Product dashboard
-|-- landing/        # Marketing site
 |-- config.yaml.example
 |-- .env.example
 `-- README.md
@@ -93,7 +92,6 @@ markt/
 ```bash
 go mod download
 npm --prefix web install
-npm --prefix landing install
 ```
 
 2. Create local config files:
@@ -118,17 +116,10 @@ go run ./cmd/server
 npm --prefix web run dev
 ```
 
-6. Run landing site (optional):
-
-```bash
-npm --prefix landing run dev
-```
-
 Defaults:
 
 - API server: `http://localhost:8000`
 - Product app: `http://localhost:3000`
-- Landing site: `http://localhost:3001`
 
 ## CLI Mode
 
@@ -252,8 +243,6 @@ Frontend:
 ```bash
 npm --prefix web run dev
 npm --prefix web run build
-npm --prefix landing run dev
-npm --prefix landing run build
 ```
 
 ## Status
