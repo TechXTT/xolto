@@ -2,11 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "markt — Used electronics copilot",
+  title: "xolto — Used electronics copilot",
   description:
-    "markt scans second-hand electronics listings, estimates fair value, flags risks, and helps you decide which sellers to contact first.",
+    "Buy used electronics without overpaying. xolto scans second-hand electronics listings, estimates fair value, flags risks, and helps you decide which sellers to contact first.",
   openGraph: {
-    title: "markt — Used electronics copilot",
+    title: "xolto — Used electronics copilot",
     description:
       "Mission-based used electronics buying: live matches, fair-value scoring, risk flags, saved comparisons, and seller drafting.",
     type: "website",

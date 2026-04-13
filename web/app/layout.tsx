@@ -10,8 +10,8 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "markt — Used electronics copilot",
-  description: "Buy used electronics without overpaying. markt scans listings, estimates fair value, flags risks, and guides seller outreach.",
+  title: "xolto — Used electronics copilot",
+  description: "Buy used electronics without overpaying. xolto scans listings, estimates fair value, flags risks, and guides seller outreach.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

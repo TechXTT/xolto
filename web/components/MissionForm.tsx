@@ -82,7 +82,7 @@ export function MissionForm({
       <div className="section-heading">
         <div>
           <p className="section-kicker">Structured mission</p>
-          <h3>Tell markt exactly what to hunt</h3>
+          <h3>Tell xolto exactly what to hunt</h3>
         </div>
       </div>
 

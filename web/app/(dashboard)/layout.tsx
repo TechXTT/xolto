@@ -233,7 +233,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               </svg>
             </div>
             <div>
-              <p className="brand-title">markt</p>
+              <p className="brand-title">xolto</p>
               <p className="brand-subtitle">Used electronics copilot</p>
             </div>
           </div>
@@ -307,7 +307,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <span />
               </button>
               <div>
-                <p className="topbar-eyebrow">markt</p>
+                <p className="topbar-eyebrow">xolto</p>
                 <h1 className="topbar-title">{currentNav.label}</h1>
               </div>
             </div>

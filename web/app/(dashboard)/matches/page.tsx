@@ -272,7 +272,7 @@ export default function MatchesPage() {
         <div>
           <p className="section-kicker">Analyze any listing</p>
           <p className="section-support">
-            Paste a Marktplaats, Vinted, or OLX BG URL and markt will score it with the same AI that ranks your mission feed.
+            Paste a Marktplaats, Vinted, or OLX BG URL and xolto will score it with the same AI that ranks your mission feed.
             {activeMissionId > 0 && " The active mission's goal and approved comparables will be used as context."}
           </p>
         </div>

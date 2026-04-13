@@ -32,7 +32,7 @@ export default function LoginPage() {
         <span className="landing-kicker">Welcome back</span>
         <h1>Log in and pick up where your market watch left off.</h1>
         <p>
-          markt keeps your missions, matches, saved comparisons, and seller drafts in sync so you can jump straight back into the buying loop.
+          xolto keeps your missions, matches, saved comparisons, and seller drafts in sync so you can jump straight back into the buying loop.
         </p>
         <p className="auth-panel-switch">
           No account yet?{" "}

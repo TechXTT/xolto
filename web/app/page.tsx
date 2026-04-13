@@ -23,7 +23,7 @@ export default function HomePage() {
     return (
       <main className="fullscreen-shell landing-loading">
         <div className="loading-orb" />
-        <p className="loading-copy">Loading markt…</p>
+        <p className="loading-copy">Loading xolto…</p>
       </main>
     );
   }
@@ -35,7 +35,7 @@ export default function HomePage() {
           <span className="landing-kicker">Premium marketplace intelligence</span>
           <h1>Buy used electronics without overpaying.</h1>
           <p>
-            markt scans second-hand listings, estimates fair value, flags risks, and tells you exactly which sellers to contact first.
+            xolto scans second-hand listings, estimates fair value, flags risks, and tells you exactly which sellers to contact first.
           </p>
           <div className="hero-actions">
             <Link href="/login" className="btn-primary">

@@ -12,7 +12,7 @@ interface Step {
 
 const STEPS: Step[] = [
   {
-    title: "Welcome to markt",
+    title: "Welcome to xolto",
     description:
       "Your AI-powered copilot for buying used electronics. We'll walk you through the core workflow so you can start finding deals in minutes.",
     icon: (
@@ -41,7 +41,7 @@ const STEPS: Step[] = [
   {
     title: "Review Matches",
     description:
-      "markt continuously scans marketplaces for listings that fit your mission. Each match gets an AI-generated score, fair price estimate, and risk flags so you can spot the best deals instantly.",
+      "xolto continuously scans marketplaces for listings that fit your mission. Each match gets an AI-generated score, fair price estimate, and risk flags so you can spot the best deals instantly.",
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
         <circle cx="12" cy="12" r="3" />
@@ -63,7 +63,7 @@ const STEPS: Step[] = [
   {
     title: "You're all set",
     description:
-      "Create your first mission and let markt do the heavy lifting. The AI keeps hunting 24/7 so you never miss a deal.",
+      "Create your first mission and let xolto do the heavy lifting. The AI keeps hunting 24/7 so you never miss a deal.",
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
         <path d="M20 6 9 17l-5-5" />
