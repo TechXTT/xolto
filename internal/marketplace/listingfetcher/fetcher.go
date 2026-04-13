@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ var (
 	// Matches <script type="application/ld+json">...</script> blocks.
 	jsonLDRe = regexp.MustCompile(`(?is)<script[^>]*type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
 	// olxBGIDRe captures the trailing "IDxxxx.html" OLX uses in every listing URL.
-	olxBGIDRe = regexp.MustCompile(`ID([A-Za-z0-9]+)\.html`)
+	olxBGIDRe = regexp.MustCompile(`(?:ID([A-Za-z0-9]+)\.html|/([0-9]+)(?:/|$))`)
 )
 
 // Fetcher resolves a listing URL. One Fetcher is safe for concurrent use.
@@ -100,6 +101,10 @@ func (f *Fetcher) fetchJSONLD(ctx context.Context, rawURL, marketplace string) (
 	}
 
 	priceCents, currency := product.priceCents()
+	if marketplace == "olxbg" && strings.EqualFold(currency, "BGN") {
+		priceCents = olxbg.BGNStotinkiToEURCents(priceCents)
+		currency = "EUR"
+	}
 	listing := models.Listing{
 		MarketplaceID: marketplace,
 		Title:         strings.TrimSpace(product.Name),
@@ -135,10 +140,13 @@ func (f *Fetcher) fetchJSONLD(ctx context.Context, rawURL, marketplace string) (
 // client-rendered HTML.
 func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listing, error) {
 	match := olxBGIDRe.FindStringSubmatch(rawURL)
-	if len(match) < 2 {
+	if len(match) < 3 {
 		return models.Listing{}, fmt.Errorf("could not extract olx id from url")
 	}
 	id := match[1]
+	if id == "" {
+		id = match[2]
+	}
 
 	endpoint := "https://www.olx.bg/api/v1/offers/" + id + "/"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -244,6 +252,32 @@ func detectMarketplace(rawURL string) string {
 // .html suffix, which works for Marktplaats (m2380271704-sony-a6000),
 // Vinted (8610035327-sony-alpha-a6000), and OLX BG (…-CID632-ID9Zs7B.html).
 func extractIDFromURL(marketplace, rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err == nil {
+		if marketplace == "olxbg" {
+			if match := olxBGIDRe.FindStringSubmatch(parsed.EscapedPath()); len(match) >= 3 {
+				if match[1] != "" {
+					return match[1]
+				}
+				if match[2] != "" {
+					return match[2]
+				}
+			}
+		}
+
+		trimmedPath := strings.TrimRight(parsed.Path, "/")
+		lastSlash := strings.LastIndex(trimmedPath, "/")
+		if lastSlash < 0 {
+			return ""
+		}
+		segment := trimmedPath[lastSlash+1:]
+		segment = strings.TrimSuffix(segment, ".html")
+		if dash := strings.Index(segment, "-"); dash > 0 {
+			return segment[:dash]
+		}
+		return segment
+	}
+
 	trimmed := strings.TrimRight(rawURL, "/")
 	lastSlash := strings.LastIndex(trimmed, "/")
 	if lastSlash < 0 {
@@ -251,6 +285,12 @@ func extractIDFromURL(marketplace, rawURL string) string {
 	}
 	segment := trimmed[lastSlash+1:]
 	segment = strings.TrimSuffix(segment, ".html")
+	if q := strings.Index(segment, "?"); q >= 0 {
+		segment = segment[:q]
+	}
+	if hash := strings.Index(segment, "#"); hash >= 0 {
+		segment = segment[:hash]
+	}
 	if dash := strings.Index(segment, "-"); dash > 0 {
 		return segment[:dash]
 	}
