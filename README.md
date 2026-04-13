@@ -11,7 +11,6 @@ This repo now contains the backend/runtime layer:
 
 - Go API server: `cmd/server`
 - Go CLI runtime: `cmd/xolto`
-- Compatibility CLI shim: `cmd/marktbot`
 
 The split frontend repos live alongside this repo:
 
@@ -60,12 +59,6 @@ Use the CLI when you want local polling and automation without the web stack.
 
 ```bash
 go run ./cmd/xolto --config config.yaml
-```
-
-Compatibility shim:
-
-```bash
-go run ./cmd/marktbot --config config.yaml
 ```
 
 Useful flags:
