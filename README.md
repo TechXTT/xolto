@@ -17,7 +17,7 @@ The repo contains:
 
 - a Go API server (`cmd/server`)
 - a Go CLI worker/runtime (`cmd/marktbot`)
-- a Next.js product app (`web/`)
+- the split product app repo (`../xolto-app`)
 - the split landing site repo (`../xolto-landing`)
 
 ## At A Glance
@@ -72,7 +72,6 @@ markt/
 |   |-- store/
 |   `-- worker/
 |-- migrations/
-|-- web/            # Product dashboard
 |-- config.yaml.example
 |-- .env.example
 `-- README.md
@@ -85,13 +84,12 @@ markt/
 - npm
 - Chrome/Chromium only if you enable browser messaging automation
 
-## Quick Start (Full Local Stack)
+## Quick Start
 
 1. Install dependencies:
 
 ```bash
 go mod download
-npm --prefix web install
 ```
 
 2. Create local config files:
@@ -99,7 +97,6 @@ npm --prefix web install
 ```bash
 cp config.yaml.example config.yaml
 cp .env.example .env
-cp web/.env.example web/.env.local
 ```
 
 3. Set at least `JWT_SECRET` in `.env` (32+ random chars).
@@ -110,16 +107,14 @@ cp web/.env.example web/.env.local
 go run ./cmd/server
 ```
 
-5. Run product app:
-
-```bash
-npm --prefix web run dev
-```
-
 Defaults:
 
 - API server: `http://localhost:8000`
-- Product app: `http://localhost:3000`
+
+The split frontends now live in sibling repos:
+
+- `../xolto-app`
+- `../xolto-landing`
 
 ## CLI Mode
 
@@ -236,13 +231,6 @@ go test ./...
 go build ./...
 go run ./cmd/server
 go run ./cmd/marktbot --once --dry-run --verbose
-```
-
-Frontend:
-
-```bash
-npm --prefix web run dev
-npm --prefix web run build
 ```
 
 ## Status

@@ -36,13 +36,6 @@ coverage.out
 *.log
 logs/
 
-# Web / Next.js
-web/node_modules/
-web/.next/
-web/out/
-web/.vercel/
-web/.turbo/
-
 # IDEs
 .idea/
 .vscode/
