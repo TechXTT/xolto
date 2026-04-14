@@ -349,12 +349,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name"`
+		Email    string `json:"email" validate:"required,email"`
+		Password string `json:"password" validate:"required,min=8"`
+		Name     string `json:"name" validate:"omitempty,max=120"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if strings.TrimSpace(req.Email) == "" || len(req.Password) < 8 {
@@ -410,11 +410,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email    string `json:"email" validate:"required,email"`
+		Password string `json:"password" validate:"required,min=1"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	user, err := s.db.GetUserByEmail(req.Email)
@@ -509,16 +509,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, user *models.U
 		writeJSON(w, http.StatusOK, payload)
 	case http.MethodPut:
 		var req struct {
-			Name               string `json:"name"`
-			CountryCode        string `json:"country_code"`
-			Region             string `json:"region"`
-			City               string `json:"city"`
-			PostalCode         string `json:"postal_code"`
-			PreferredRadiusKm  int    `json:"preferred_radius_km"`
+			Name               string `json:"name" validate:"omitempty,max=120"`
+			CountryCode        string `json:"country_code" validate:"omitempty,len=2"`
+			Region             string `json:"region" validate:"omitempty,max=80"`
+			City               string `json:"city" validate:"omitempty,max=80"`
+			PostalCode         string `json:"postal_code" validate:"omitempty,max=32"`
+			PreferredRadiusKm  int    `json:"preferred_radius_km" validate:"omitempty,min=1,max=2000"`
 			CrossBorderEnabled bool   `json:"cross_border_enabled"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		next := *user
@@ -579,8 +579,8 @@ func (s *Server) handleSearches(w http.ResponseWriter, r *http.Request, user *mo
 		writeJSON(w, http.StatusOK, map[string]any{"searches": specs})
 	case http.MethodPost:
 		var spec models.SearchSpec
-		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &spec); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		spec.UserID = user.ID
@@ -653,10 +653,10 @@ func (s *Server) handleGenerateSearches(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var req struct {
-		Topic string `json:"topic"`
+		Topic string `json:"topic" validate:"required,min=2,max=200"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	aiCfg := config.AIConfig{
@@ -708,8 +708,8 @@ func (s *Server) handleSearchByID(w http.ResponseWriter, r *http.Request, user *
 	switch r.Method {
 	case http.MethodPut:
 		var spec models.SearchSpec
-		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &spec); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		spec.ID = id
@@ -776,8 +776,8 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 		writeJSON(w, http.StatusOK, map[string]any{"missions": missions})
 	case http.MethodPost:
 		var mission models.Mission
-		if err := json.NewDecoder(r.Body).Decode(&mission); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &mission); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		mission.UserID = user.ID
@@ -848,10 +848,10 @@ func (s *Server) handleMissionByID(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		var req struct {
-			Status string `json:"status"`
+			Status string `json:"status" validate:"required,oneof=active paused completed"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := s.db.UpdateMissionStatus(id, req.Status); err != nil {
@@ -929,8 +929,8 @@ func (s *Server) handleMissionByID(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusOK, existing)
 	case http.MethodPut:
 		var mission models.Mission
-		if err := json.NewDecoder(r.Body).Decode(&mission); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &mission); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		mission.ID = id
@@ -982,10 +982,10 @@ func (s *Server) handleConverse(w http.ResponseWriter, r *http.Request, user *mo
 		return
 	}
 	var req struct {
-		Message string `json:"message"`
+		Message string `json:"message" validate:"required,min=1,max=3000"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	reply, err := s.assistant.Converse(r.Context(), user.ID, req.Message)
@@ -1038,11 +1038,11 @@ func (s *Server) handleMatchFeedback(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	var body struct {
-		ItemID string `json:"item_id"`
-		Action string `json:"action"`
+		ItemID string `json:"item_id" validate:"required"`
+		Action string `json:"action" validate:"omitempty,oneof=approve approved dismiss dismissed clear"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := Decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	itemID := strings.TrimSpace(body.ItemID)
@@ -1085,11 +1085,11 @@ func (s *Server) handleAnalyzeListing(w http.ResponseWriter, r *http.Request, us
 	}
 
 	var body struct {
-		URL       string `json:"url"`
+		URL       string `json:"url" validate:"required,url"`
 		MissionID int64  `json:"mission_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := Decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	rawURL := strings.TrimSpace(body.URL)
@@ -1284,10 +1284,10 @@ func (s *Server) handleBillingCheckout(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	var req struct {
-		PriceID string `json:"price_id"`
+		PriceID string `json:"price_id" validate:"required"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	priceID := strings.TrimSpace(req.PriceID)
@@ -1654,10 +1654,10 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var req struct {
-			Tier string `json:"tier"`
+			Tier string `json:"tier" validate:"required,oneof=free pro power"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		tier := billing.NormalizeTier(req.Tier)
@@ -1712,10 +1712,10 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var req struct {
-			Role string `json:"role"`
+			Role string `json:"role" validate:"required,oneof=user admin operator owner"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		role := models.NormalizeUserRole(req.Role)
@@ -1771,29 +1771,29 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var req struct {
-			IsAdmin bool `json:"is_admin"`
+			IsAdmin *bool `json:"is_admin" validate:"required"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		before := map[string]any{
 			"is_admin": target.IsAdmin,
 			"role":     models.EffectiveUserRole(*target),
 		}
-		if err := s.db.SetUserAdmin(userID, req.IsAdmin); err != nil {
+		if err := s.db.SetUserAdmin(userID, *req.IsAdmin); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		nextRole := models.NormalizeUserRole(target.Role)
-		if req.IsAdmin && !models.IsTeamRole(nextRole) {
+		if *req.IsAdmin && !models.IsTeamRole(nextRole) {
 			nextRole = string(models.UserRoleAdmin)
 			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
-		if !req.IsAdmin && nextRole == string(models.UserRoleAdmin) {
+		if !*req.IsAdmin && nextRole == string(models.UserRoleAdmin) {
 			nextRole = string(models.UserRoleUser)
 			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -1808,14 +1808,14 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			TargetType:  "user",
 			TargetID:    userID,
 			BeforeJSON:  mustJSON(before),
-			AfterJSON:   mustJSON(map[string]any{"is_admin": req.IsAdmin, "role": nextRole}),
+			AfterJSON:   mustJSON(map[string]any{"is_admin": *req.IsAdmin, "role": nextRole}),
 		}); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeAdminOK(w, http.StatusOK, map[string]any{
 			"user_id":  userID,
-			"is_admin": req.IsAdmin,
+			"is_admin": *req.IsAdmin,
 			"role":     nextRole,
 		})
 		return
@@ -1853,10 +1853,10 @@ func (s *Server) handleAdminMissionMutation(w http.ResponseWriter, r *http.Reque
 	}
 
 	var req struct {
-		Status string `json:"status"`
+		Status string `json:"status" validate:"required,oneof=active paused completed"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := Decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	before := map[string]any{
@@ -1926,14 +1926,14 @@ func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var req struct {
-			Enabled bool `json:"enabled"`
+			Enabled *bool `json:"enabled" validate:"required"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		before := map[string]any{"enabled": spec.Enabled}
-		if err := s.db.SetSearchEnabled(searchID, req.Enabled); err != nil {
+		if err := s.db.SetSearchEnabled(searchID, *req.Enabled); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1954,14 +1954,14 @@ func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Reques
 			TargetType:  "search",
 			TargetID:    strconv.FormatInt(searchID, 10),
 			BeforeJSON:  mustJSON(before),
-			AfterJSON:   mustJSON(map[string]any{"enabled": req.Enabled}),
+			AfterJSON:   mustJSON(map[string]any{"enabled": *req.Enabled}),
 		}); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeAdminOK(w, http.StatusOK, map[string]any{
 			"search_id": searchID,
-			"enabled":   req.Enabled,
+			"enabled":   *req.Enabled,
 			"search":    updated,
 		})
 		return
@@ -2214,11 +2214,11 @@ func (s *Server) handleBusinessSubscriptionMutation(w http.ResponseWriter, r *ht
 	switch action {
 	case "plan":
 		var req struct {
-			PriceID           string `json:"price_id"`
-			ProrationBehavior string `json:"proration_behavior"`
+			PriceID           string `json:"price_id" validate:"required"`
+			ProrationBehavior string `json:"proration_behavior" validate:"omitempty,min=1,max=64"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		priceID := strings.TrimSpace(req.PriceID)
@@ -2290,10 +2290,10 @@ func (s *Server) handleBusinessSubscriptionMutation(w http.ResponseWriter, r *ht
 		}
 	case "pause":
 		var req struct {
-			Behavior string `json:"behavior"`
+			Behavior string `json:"behavior" validate:"omitempty,min=1,max=64"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-			writeError(w, http.StatusBadRequest, "invalid json body")
+		if err := Decode(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		behavior := strings.TrimSpace(req.Behavior)

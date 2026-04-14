@@ -138,6 +138,60 @@ func TestHandleRunAllSearchesRequiresAuthAndTriggersRunner(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsUnknownField(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-register-unknown-field.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"email":"new@example.com","password":"password123","name":"New User","unexpected":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", res.Code)
+	}
+	body := decodeBodyMap(t, res)
+	errMsg, _ := body["error"].(string)
+	if !strings.Contains(errMsg, "unknown field unexpected") {
+		t.Fatalf("expected unknown field error, got %#v", body)
+	}
+}
+
+func TestRegisterRejectsMissingRequiredField(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-register-required-field.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"password":"password123","name":"No Email"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", res.Code)
+	}
+	body := decodeBodyMap(t, res)
+	errMsg, _ := body["error"].(string)
+	if !strings.Contains(errMsg, "email is required") {
+		t.Fatalf("expected missing email validation error, got %#v", body)
+	}
+}
+
 func TestAdminEndpointsRejectNonAdmin(t *testing.T) {
 	st, srv, _, _, memberID := newAdminTestServer(t)
 	defer st.Close()
