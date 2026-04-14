@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/TechXTT/xolto/internal/billing"
@@ -75,6 +76,14 @@ func isQueryTooBroad(q string) bool {
 const (
 	defaultMatchLimit      = 5
 	maxListingsToScoreLive = 30 // cap per query for live assistant calls; background workers score all
+)
+
+type messageLocale string
+
+const (
+	localeEN messageLocale = "en"
+	localeNL messageLocale = "nl"
+	localeBG messageLocale = "bg"
 )
 
 // UsageCallback is called after each LLM request with token counts and timing.
@@ -379,9 +388,17 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 		}
 	}
 
-	content := buildHeuristicDraft(*entry, mission)
-	if a.aiEnabled() {
-		if aiDraft, err := a.draftWithAI(ctx, *entry); err == nil && aiDraft != "" {
+	marketplaceID := detectEntryMarketplaceID(*entry)
+	locale := localeForMarketplace(marketplaceID)
+	customTemplate := a.resolveMessageTemplate(userID, entry.MissionID, marketplaceID)
+
+	content := buildHeuristicDraft(*entry, mission, locale)
+	if customTemplate != "" {
+		if rendered, err := renderSellerTemplate(customTemplate, *entry); err == nil && rendered != "" {
+			content = rendered
+		}
+	} else if a.aiEnabled() {
+		if aiDraft, err := a.draftWithAI(ctx, *entry, marketplaceID, locale); err == nil && aiDraft != "" {
 			content = aiDraft
 		}
 	}
@@ -397,6 +414,153 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 		return nil, err
 	}
 	return &draft, nil
+}
+
+func (a *Assistant) resolveMessageTemplate(userID string, missionID int64, marketplaceID string) string {
+	specs, err := a.store.GetSearchConfigs(userID)
+	if err != nil {
+		return ""
+	}
+	mp := marketplace.NormalizeMarketplaceID(marketplaceID)
+	if mp == "" {
+		return ""
+	}
+
+	// Prefer exact mission + exact marketplace, then broader fallbacks.
+	for _, spec := range specs {
+		if spec.ProfileID == missionID && marketplace.NormalizeMarketplaceID(spec.MarketplaceID) == mp {
+			if tmpl := searchTemplateForMarketplace(spec, mp); tmpl != "" {
+				return tmpl
+			}
+		}
+	}
+	for _, spec := range specs {
+		if marketplace.NormalizeMarketplaceID(spec.MarketplaceID) == mp {
+			if tmpl := searchTemplateForMarketplace(spec, mp); tmpl != "" {
+				return tmpl
+			}
+		}
+	}
+	if missionID > 0 {
+		for _, spec := range specs {
+			if spec.ProfileID == missionID {
+				if tmpl := searchTemplateForMarketplace(spec, mp); tmpl != "" {
+					return tmpl
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func searchTemplateForMarketplace(spec models.SearchSpec, marketplaceID string) string {
+	keys := []string{
+		"message_template_" + marketplaceID,
+	}
+	if strings.HasPrefix(marketplaceID, "vinted_") {
+		keys = append(keys, "message_template_vinted")
+	}
+	switch localeForMarketplace(marketplaceID) {
+	case localeNL:
+		keys = append(keys, "message_template_nl")
+	case localeBG:
+		keys = append(keys, "message_template_bg")
+	}
+	for _, key := range keys {
+		if spec.Attributes == nil {
+			break
+		}
+		if value := strings.TrimSpace(spec.Attributes[key]); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(spec.MessageTemplate)
+}
+
+func detectEntryMarketplaceID(entry models.ShortlistEntry) string {
+	rawURL := strings.ToLower(strings.TrimSpace(entry.URL))
+	switch {
+	case strings.Contains(rawURL, "marktplaats.nl"):
+		return "marktplaats"
+	case strings.Contains(rawURL, "olx.bg"):
+		return "olxbg"
+	case strings.Contains(rawURL, "vinted.nl"):
+		return "vinted_nl"
+	case strings.Contains(rawURL, "vinted.dk"):
+		return "vinted_dk"
+	case strings.Contains(rawURL, "vinted."):
+		return "vinted"
+	}
+
+	itemID := strings.ToLower(strings.TrimSpace(entry.ItemID))
+	switch {
+	case strings.HasPrefix(itemID, "olxbg_"):
+		return "olxbg"
+	case strings.HasPrefix(itemID, "vinted_nl_"):
+		return "vinted_nl"
+	case strings.HasPrefix(itemID, "vinted_dk_"):
+		return "vinted_dk"
+	case strings.HasPrefix(itemID, "vinted_"):
+		return "vinted"
+	default:
+		return "marktplaats"
+	}
+}
+
+func localeForMarketplace(marketplaceID string) messageLocale {
+	switch marketplace.NormalizeMarketplaceID(marketplaceID) {
+	case "marktplaats", "vinted_nl":
+		return localeNL
+	case "olxbg":
+		return localeBG
+	default:
+		return localeEN
+	}
+}
+
+func localeLabel(locale messageLocale) string {
+	switch locale {
+	case localeNL:
+		return "Dutch"
+	case localeBG:
+		return "Bulgarian"
+	default:
+		return "English"
+	}
+}
+
+func renderSellerTemplate(tmpl string, entry models.ShortlistEntry) (string, error) {
+	t, err := template.New("seller-message").Parse(strings.TrimSpace(tmpl))
+	if err != nil {
+		return "", err
+	}
+	offerAmt := suggestedOfferAmount(entry)
+	data := map[string]string{
+		"Title":          entry.Title,
+		"OfferPrice":     fmt.Sprintf("%.2f", float64(offerAmt)/100),
+		"OfferPriceEuro": formatEuro(offerAmt),
+		"AskPrice":       fmt.Sprintf("%.2f", float64(entry.AskPrice)/100),
+		"AskPriceEuro":   formatEuro(entry.AskPrice),
+		"FairPrice":      fmt.Sprintf("%.2f", float64(entry.FairPrice)/100),
+		"FairPriceEuro":  formatEuro(entry.FairPrice),
+		"Score":          fmt.Sprintf("%.1f", entry.RecommendationScore),
+	}
+	var b strings.Builder
+	if err := t.Execute(&b, data); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+
+func suggestedOfferAmount(entry models.ShortlistEntry) int {
+	offerAmt := entry.FairPrice
+	if offerAmt <= 0 {
+		offerAmt = entry.AskPrice
+	}
+	if entry.AskPrice > 0 && entry.AskPrice < offerAmt {
+		offerAmt = entry.AskPrice
+	}
+	return offerAmt
 }
 
 func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt string) (*models.AssistantReply, error) {
@@ -874,24 +1038,38 @@ func renderConversationMatches(missionName string, recs []models.Recommendation)
 	return strings.TrimSpace(b.String())
 }
 
-func buildHeuristicDraft(entry models.ShortlistEntry, mission *models.Mission) string {
-	offerAmt := entry.FairPrice
-	if entry.AskPrice > 0 && entry.AskPrice < offerAmt {
-		offerAmt = entry.AskPrice
-	}
-	question := categorySpecificQuestion(mission, entry.Title)
+func buildHeuristicDraft(entry models.ShortlistEntry, mission *models.Mission, locale messageLocale) string {
+	offerAmt := suggestedOfferAmount(entry)
+	question := categorySpecificQuestion(mission, entry.Title, locale)
 	if len(entry.SuggestedQuestions) > 0 {
 		question = entry.SuggestedQuestions[0]
 	}
-	return strings.TrimSpace(fmt.Sprintf(
-		"Hi! I'm interested in your %s. %s If all checks out, would you consider %s?",
-		entry.Title,
-		question,
-		formatEuro(offerAmt),
-	))
+	switch locale {
+	case localeNL:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Hoi! Ik heb interesse in je %s. %s Als alles in orde is, zou je %s overwegen?",
+			entry.Title,
+			question,
+			formatEuro(offerAmt),
+		))
+	case localeBG:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Интересувам се от %s. %s Ако всичко е наред, бихте ли приели %s?",
+			entry.Title,
+			question,
+			formatEuro(offerAmt),
+		))
+	default:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Hi! I'm interested in your %s. %s If all checks out, would you consider %s?",
+			entry.Title,
+			question,
+			formatEuro(offerAmt),
+		))
+	}
 }
 
-func categorySpecificQuestion(mission *models.Mission, title string) string {
+func categorySpecificQuestion(mission *models.Mission, title string, locale messageLocale) string {
 	category := ""
 	if mission != nil {
 		category = strings.ToLower(strings.TrimSpace(mission.Category))
@@ -909,13 +1087,41 @@ func categorySpecificQuestion(mission *models.Mission, title string) string {
 	}
 	switch category {
 	case "phone":
-		return "Could you share the battery health percentage and confirm whether there are any screen or frame marks?"
+		switch locale {
+		case localeNL:
+			return "Kun je de batterijgezondheid delen en bevestigen of er krassen op scherm of frame zijn?"
+		case localeBG:
+			return "Може ли да споделите процента здраве на батерията и дали има следи по екрана или рамката?"
+		default:
+			return "Could you share the battery health percentage and confirm whether there are any screen or frame marks?"
+		}
 	case "camera":
-		return "Could you share the current shutter count and confirm whether the sensor and lens mount are clean?"
+		switch locale {
+		case localeNL:
+			return "Kun je de huidige shutter count delen en bevestigen dat sensor en lensvatting schoon zijn?"
+		case localeBG:
+			return "Може ли да споделите текущия shutter count и дали сензорът и байонетът са чисти?"
+		default:
+			return "Could you share the current shutter count and confirm whether the sensor and lens mount are clean?"
+		}
 	case "laptop":
-		return "Could you confirm battery condition, keyboard/screen condition, and if there are any dead pixels?"
+		switch locale {
+		case localeNL:
+			return "Kun je de staat van batterij, toetsenbord en scherm bevestigen, en of er dode pixels zijn?"
+		case localeBG:
+			return "Може ли да потвърдите състоянието на батерията, клавиатурата и екрана, и дали има мъртви пиксели?"
+		default:
+			return "Could you confirm battery condition, keyboard/screen condition, and if there are any dead pixels?"
+		}
 	default:
-		return "Can you confirm everything is in good working order and nothing is missing?"
+		switch locale {
+		case localeNL:
+			return "Kun je bevestigen dat alles goed werkt en dat er niets ontbreekt?"
+		case localeBG:
+			return "Може ли да потвърдите, че всичко работи и няма липсващи части?"
+		default:
+			return "Can you confirm everything is in good working order and nothing is missing?"
+		}
 	}
 }
 
@@ -1366,20 +1572,29 @@ func (a *Assistant) compareWithAI(ctx context.Context, entries []models.Shortlis
 	return a.chatText(ctx, "compare", payload)
 }
 
-func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry) (string, error) {
+func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry, marketplaceID string, locale messageLocale) (string, error) {
+	language := localeLabel(locale)
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
 		"temperature": 0.5,
 		"messages": []map[string]string{
 			{
 				"role": "system",
-				"content": "You help buyers draft seller messages on European secondhand marketplaces (Marktplaats, Vinted). " +
-					"Write a short, friendly, natural-sounding message in English. " +
+				"content": "You help buyers draft seller messages on European secondhand marketplaces (Marktplaats, Vinted, OLX BG). " +
+					"Write a short, friendly, natural-sounding message in " + language + ". " +
+					"Match the marketplace tone and language expectations for " + marketplaceID + ". " +
 					"Include: a brief mention of what appeals about the listing, one question about condition or completeness if relevant, " +
 					"and the suggested offer phrased naturally as 'would you consider X?'. " +
 					"Keep it to 2-3 sentences. Do not commit to buying. Do not be pushy.",
 			},
-			{"role": "user", "content": "Draft a seller message for this listing:\n" + mustJSON(entry)},
+			{
+				"role": "user",
+				"content": "Draft a seller message for this listing:\n" + mustJSON(map[string]any{
+					"marketplace": marketplaceID,
+					"language":    string(locale),
+					"entry":       entry,
+				}),
+			},
 		},
 	}
 	return a.chatText(ctx, "draft", payload)
