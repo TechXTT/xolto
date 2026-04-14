@@ -276,6 +276,7 @@ func (r *Reasoner) callLLM(
 	if len(selected) == 0 {
 		selected = comparables
 	}
+	parsed.FairPriceCents = normalizeFairPriceCents(parsed.FairPriceCents, listing.Price, marketAvg, selected)
 
 	return models.DealAnalysis{
 		Relevant:        parsed.Relevant,
@@ -355,7 +356,7 @@ func buildPrompt(
 
 	raw, _ := json.Marshal(input)
 	return strings.Join([]string{
-		`Analyze listing vs comparables. Set relevant=false if wrong product category. Return JSON: {"relevant":true,"fair_price_cents":N,"confidence":0.0-1.0,"reasoning":"...","search_advice":"...","comparable_indexes":[0,2]}`,
+		`Analyze listing vs comparables. IMPORTANT: all numeric prices are integer euro cents (e.g. 16361 means EUR 163.61). Set relevant=false if wrong product category. Return JSON: {"relevant":true,"fair_price_cents":N,"confidence":0.0-1.0,"reasoning":"...","search_advice":"...","comparable_indexes":[0,2]}`,
 		string(raw),
 	}, "\n")
 }
@@ -465,6 +466,85 @@ func jaccard(a, b map[string]struct{}) float64 {
 	}
 
 	return float64(intersection) / float64(union)
+}
+
+// normalizeFairPriceCents corrects common LLM unit mistakes (treating cents as
+// euros or vice versa). It keeps the original value unless an alternate unit
+// scaling lands substantially closer to the observed price baseline.
+func normalizeFairPriceCents(rawFair, listingPrice, marketAvg int, comparables []models.ComparableDeal) int {
+	if rawFair <= 0 {
+		return rawFair
+	}
+	baseline := referencePriceBaseline(listingPrice, marketAvg, comparables)
+	if baseline <= 0 {
+		return rawFair
+	}
+
+	candidates := []int{rawFair}
+	if rawFair >= 100 {
+		candidates = append(candidates, rawFair/100)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if rawFair > 0 && rawFair <= maxInt/100 {
+		candidates = append(candidates, rawFair*100)
+	}
+
+	best := rawFair
+	bestDistance := absInt(rawFair - baseline)
+	for _, candidate := range candidates[1:] {
+		if candidate <= 0 {
+			continue
+		}
+		distance := absInt(candidate - baseline)
+		if distance < bestDistance {
+			best = candidate
+			bestDistance = distance
+		}
+	}
+	if best == rawFair {
+		return rawFair
+	}
+
+	rawDistance := absInt(rawFair - baseline)
+	if rawDistance <= baseline*4 {
+		return rawFair
+	}
+	// Require a material improvement before rewriting the model output.
+	if bestDistance >= rawDistance/2 {
+		return rawFair
+	}
+	return best
+}
+
+func referencePriceBaseline(listingPrice, marketAvg int, comparables []models.ComparableDeal) int {
+	prices := make([]int, 0, len(comparables)+2)
+	if listingPrice > 0 {
+		prices = append(prices, listingPrice)
+	}
+	if marketAvg > 0 {
+		prices = append(prices, marketAvg)
+	}
+	for _, comp := range comparables {
+		if comp.Price > 0 {
+			prices = append(prices, comp.Price)
+		}
+	}
+	if len(prices) == 0 {
+		return 0
+	}
+	slices.Sort(prices)
+	mid := len(prices) / 2
+	if len(prices)%2 == 0 {
+		return (prices[mid-1] + prices[mid]) / 2
+	}
+	return prices[mid]
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func extractJSON(value string) string {

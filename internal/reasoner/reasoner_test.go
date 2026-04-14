@@ -164,3 +164,33 @@ func TestAnalyzeFallsBackWhenRateLimited(t *testing.T) {
 		t.Fatalf("expected exactly one LLM call, got %d", calls)
 	}
 }
+
+func TestNormalizeFairPriceCentsFixesEuroCentMismatch(t *testing.T) {
+	got := normalizeFairPriceCents(
+		1636100, // likely EUR interpreted then multiplied by 100
+		16361,
+		17000,
+		[]models.ComparableDeal{
+			{Price: 16000},
+			{Price: 18000},
+		},
+	)
+	if got != 16361 {
+		t.Fatalf("expected normalized fair price 16361, got %d", got)
+	}
+}
+
+func TestNormalizeFairPriceCentsKeepsReasonableValues(t *testing.T) {
+	got := normalizeFairPriceCents(
+		16800,
+		16361,
+		17000,
+		[]models.ComparableDeal{
+			{Price: 16000},
+			{Price: 18000},
+		},
+	)
+	if got != 16800 {
+		t.Fatalf("expected fair price to remain unchanged, got %d", got)
+	}
+}
