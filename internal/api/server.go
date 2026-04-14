@@ -189,8 +189,12 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) ListenAndServe() error {
 	server := &http.Server{
-		Addr:    s.cfg.Address,
-		Handler: s.Handler(),
+		Addr:              s.cfg.Address,
+		Handler:           s.Handler(),
+		ReadTimeout:       s.cfg.HTTPTimeouts.ReadTimeout,
+		WriteTimeout:      s.cfg.HTTPTimeouts.WriteTimeout,
+		IdleTimeout:       s.cfg.HTTPTimeouts.IdleTimeout,
+		ReadHeaderTimeout: s.cfg.HTTPTimeouts.ReadHeaderTimeout,
 		BaseContext: func(net.Listener) context.Context {
 			return context.Background()
 		},

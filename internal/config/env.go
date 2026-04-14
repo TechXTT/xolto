@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type ServerConfig struct {
@@ -31,6 +32,7 @@ type ServerConfig struct {
 	AlertScore          float64
 	AdminEmails         []string
 	AdminIPAllowlist    []string
+	HTTPTimeouts        HTTPTimeouts
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -58,6 +60,12 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		AlertScore:          parseFloatDefault(os.Getenv("ALERT_SCORE"), 8.0),
 		AdminEmails:         parseAdminEmails(os.Getenv("ADMIN_EMAILS")),
 		AdminIPAllowlist:    parseCSV(os.Getenv("ADMIN_IP_ALLOWLIST")),
+		HTTPTimeouts: HTTPTimeouts{
+			ReadTimeout:       parseDurationDefault(os.Getenv("SERVER_READ_TIMEOUT"), defaultServerReadTimeout),
+			WriteTimeout:      parseDurationDefault(os.Getenv("SERVER_WRITE_TIMEOUT"), defaultServerWriteTimeout),
+			IdleTimeout:       parseDurationDefault(os.Getenv("SERVER_IDLE_TIMEOUT"), defaultServerIdleTimeout),
+			ReadHeaderTimeout: parseDurationDefault(os.Getenv("SERVER_READ_HEADER_TIMEOUT"), defaultServerReadHeaderTimeout),
+		},
 	}
 	cfg.CORSAllowedOrigins = parseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"), cfg.AppBaseURL, cfg.AdminBaseURL)
 	if cfg.DatabaseURL == "" {
@@ -142,4 +150,16 @@ func parseFloatDefault(s string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+func parseDurationDefault(s string, def time.Duration) time.Duration {
+	value := strings.TrimSpace(s)
+	if value == "" {
+		return def
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return def
+	}
+	return parsed
 }

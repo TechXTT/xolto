@@ -95,8 +95,12 @@ func main() {
 	defer reconcileCancel()
 	srv.StartBillingReconcileLoop(reconcileCtx, time.Hour)
 	httpServer := &http.Server{
-		Addr:    cfg.Address,
-		Handler: srv.Handler(),
+		Addr:              cfg.Address,
+		Handler:           srv.Handler(),
+		ReadTimeout:       cfg.HTTPTimeouts.ReadTimeout,
+		WriteTimeout:      cfg.HTTPTimeouts.WriteTimeout,
+		IdleTimeout:       cfg.HTTPTimeouts.IdleTimeout,
+		ReadHeaderTimeout: cfg.HTTPTimeouts.ReadHeaderTimeout,
 	}
 
 	// Start server in background.

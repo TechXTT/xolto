@@ -11,12 +11,17 @@ import (
 )
 
 type Config struct {
-	Searches    []SearchConfig    `yaml:"searches"`
-	Marktplaats MarktplaatsConfig `yaml:"marktplaats"`
-	Discord     DiscordConfig     `yaml:"discord"`
-	Messenger   MessengerConfig   `yaml:"messenger"`
-	Scoring     ScoringConfig     `yaml:"scoring"`
-	AI          AIConfig          `yaml:"ai"`
+	Searches    []SearchConfig      `yaml:"searches"`
+	Marktplaats MarktplaatsConfig   `yaml:"marktplaats"`
+	Discord     DiscordConfig       `yaml:"discord"`
+	Messenger   MessengerConfig     `yaml:"messenger"`
+	Scoring     ScoringConfig       `yaml:"scoring"`
+	AI          AIConfig            `yaml:"ai"`
+	Server      ServerRuntimeConfig `yaml:"server"`
+}
+
+type ServerRuntimeConfig struct {
+	Timeouts HTTPTimeouts `yaml:"timeouts"`
 }
 
 type SearchConfig struct {
@@ -149,6 +154,7 @@ func setDefaults(cfg *Config) {
 	if cfg.AI.BaseURL == "" {
 		cfg.AI.BaseURL = "https://api.openai.com/v1"
 	}
+	cfg.Server.Timeouts = cfg.Server.Timeouts.withDefaults()
 	cfg.AI = NormalizeAIConfig(cfg.AI)
 	for i := range cfg.Searches {
 		if cfg.Searches[i].MarketplaceID == "" {
@@ -245,6 +251,18 @@ func validate(cfg *Config) error {
 		if cfg.AI.MaxCallsGlobalPerHour < 0 {
 			return fmt.Errorf("ai: max_calls_global_per_hour must be >= 0")
 		}
+	}
+	if cfg.Server.Timeouts.ReadTimeout <= 0 {
+		return fmt.Errorf("server: timeouts.read_timeout must be > 0")
+	}
+	if cfg.Server.Timeouts.WriteTimeout <= 0 {
+		return fmt.Errorf("server: timeouts.write_timeout must be > 0")
+	}
+	if cfg.Server.Timeouts.IdleTimeout <= 0 {
+		return fmt.Errorf("server: timeouts.idle_timeout must be > 0")
+	}
+	if cfg.Server.Timeouts.ReadHeaderTimeout <= 0 {
+		return fmt.Errorf("server: timeouts.read_header_timeout must be > 0")
 	}
 	return nil
 }
