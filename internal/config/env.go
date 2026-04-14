@@ -32,6 +32,7 @@ type ServerConfig struct {
 	AlertScore          float64
 	AdminEmails         []string
 	AdminIPAllowlist    []string
+	TrustProxy          bool
 	HTTPTimeouts        HTTPTimeouts
 }
 
@@ -60,6 +61,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		AlertScore:          parseFloatDefault(os.Getenv("ALERT_SCORE"), 8.0),
 		AdminEmails:         parseAdminEmails(os.Getenv("ADMIN_EMAILS")),
 		AdminIPAllowlist:    parseCSV(os.Getenv("ADMIN_IP_ALLOWLIST")),
+		TrustProxy:          parseBoolDefault(os.Getenv("TRUST_PROXY"), false),
 		HTTPTimeouts: HTTPTimeouts{
 			ReadTimeout:       parseDurationDefault(os.Getenv("SERVER_READ_TIMEOUT"), defaultServerReadTimeout),
 			WriteTimeout:      parseDurationDefault(os.Getenv("SERVER_WRITE_TIMEOUT"), defaultServerWriteTimeout),
@@ -162,4 +164,16 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return parsed
+}
+
+func parseBoolDefault(s string, def bool) bool {
+	value := strings.TrimSpace(strings.ToLower(s))
+	switch value {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
 }

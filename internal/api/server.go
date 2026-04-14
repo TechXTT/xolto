@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TechXTT/xolto/internal/assistant"
@@ -41,14 +42,15 @@ type SearchRunner interface {
 }
 
 type Server struct {
-	cfg       config.ServerConfig
-	db        store.Store
-	assistant *assistant.Assistant
-	broker    *SSEBroker
-	runner    SearchRunner
-	scorer    *scorer.Scorer
-	fetcher   *listingfetcher.Fetcher
-	mux       *http.ServeMux
+	cfg                    config.ServerConfig
+	db                     store.Store
+	assistant              *assistant.Assistant
+	broker                 *SSEBroker
+	runner                 SearchRunner
+	scorer                 *scorer.Scorer
+	fetcher                *listingfetcher.Fetcher
+	mux                    *http.ServeMux
+	adminAllowlistWarnOnce sync.Once
 }
 
 type googleTokenResponse struct {
@@ -133,6 +135,7 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 
 func (s *Server) Handler() http.Handler {
 	handler := http.Handler(s.mux)
+	handler = s.adminIPAllowlistMiddleware(handler)
 	handler = s.corsMiddleware(handler)
 	handler = s.requestLoggingMiddleware(handler)
 	handler = s.requestIDMiddleware(handler)
@@ -2756,6 +2759,39 @@ func (s *Server) requestLoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) adminIPAllowlistMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAdminPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if len(s.cfg.AdminIPAllowlist) == 0 {
+			s.adminAllowlistWarnOnce.Do(func() {
+				slog.Default().Warn("admin ip allowlist is empty; allowing all admin sources", "op", "admin.ip_allowlist.empty")
+			})
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.adminSourceAllowed(r) {
+			slog.Default().Warn(
+				"admin request denied by ip allowlist",
+				"op", "admin.ip_allowlist.deny",
+				"request_id", requestIDFromRequest(r),
+				"path", r.URL.Path,
+				"remote_addr", strings.TrimSpace(r.RemoteAddr),
+			)
+			writeError(w, http.StatusForbidden, "request source is not allowed for admin access")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isAdminPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return path == "/admin" || strings.HasPrefix(path, "/admin/")
+}
+
 func requestIDFromRequest(r *http.Request) string {
 	if r == nil {
 		return ""
@@ -2788,10 +2824,6 @@ func (s *Server) requireOperatorOrOwner(next func(http.ResponseWriter, *http.Req
 			writeError(w, http.StatusForbidden, "operator or owner access required")
 			return
 		}
-		if !s.adminSourceAllowed(r) {
-			writeError(w, http.StatusForbidden, "request source is not allowed for admin access")
-			return
-		}
 		next(w, r, user)
 	})
 }
@@ -2800,10 +2832,6 @@ func (s *Server) requireOwner(next func(http.ResponseWriter, *http.Request, *mod
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, user *models.User) {
 		if !models.HasOwnerAccess(*user) {
 			writeError(w, http.StatusForbidden, "owner access required")
-			return
-		}
-		if !s.adminSourceAllowed(r) {
-			writeError(w, http.StatusForbidden, "request source is not allowed for admin access")
 			return
 		}
 		next(w, r, user)
@@ -2835,7 +2863,7 @@ func (s *Server) adminSourceAllowed(r *http.Request) bool {
 	if len(s.cfg.AdminIPAllowlist) == 0 {
 		return true
 	}
-	clientIP := requestIP(r)
+	clientIP := requestIP(r, s.cfg.TrustProxy)
 	if clientIP == nil {
 		return false
 	}
@@ -2859,7 +2887,7 @@ func (s *Server) adminSourceAllowed(r *http.Request) bool {
 	return false
 }
 
-func requestIP(r *http.Request) net.IP {
+func requestIP(r *http.Request, trustProxy bool) net.IP {
 	parse := func(raw string) net.IP {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -2867,17 +2895,19 @@ func requestIP(r *http.Request) net.IP {
 		}
 		return net.ParseIP(raw)
 	}
-	forwarded := r.Header.Get("X-Forwarded-For")
-	if forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		for _, part := range parts {
-			if ip := parse(part); ip != nil {
-				return ip
+	if trustProxy {
+		forwarded := r.Header.Get("X-Forwarded-For")
+		if forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			for _, part := range parts {
+				if ip := parse(part); ip != nil {
+					return ip
+				}
 			}
 		}
-	}
-	if ip := parse(r.Header.Get("X-Real-IP")); ip != nil {
-		return ip
+		if ip := parse(r.Header.Get("X-Real-IP")); ip != nil {
+			return ip
+		}
 	}
 	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err == nil {

@@ -632,12 +632,43 @@ func TestAdminIPAllowlist(t *testing.T) {
 		t.Fatalf("expected blocked admin IP request, got %d", blockedRes.Code)
 	}
 
+	forwardedReq := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
+	forwardedReq.Header.Set("Authorization", "Bearer "+adminToken)
+	forwardedReq.Header.Set("X-Forwarded-For", "203.0.113.42")
+	forwardedRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(forwardedRes, forwardedReq)
+	if forwardedRes.Code != http.StatusForbidden {
+		t.Fatalf("expected forwarded request to be blocked when TRUST_PROXY=false, got %d", forwardedRes.Code)
+	}
+
+	srvTrustProxy := NewServer(config.ServerConfig{
+		JWTSecret:          "test-secret",
+		AppBaseURL:         "http://localhost:3000",
+		CORSAllowedOrigins: []string{"http://localhost:3000"},
+		AdminIPAllowlist:   []string{"203.0.113.0/24"},
+		TrustProxy:         true,
+	}, st, nil, nil, &stubRunner{}, nil)
+
 	allowedReq := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
 	allowedReq.Header.Set("Authorization", "Bearer "+adminToken)
 	allowedReq.Header.Set("X-Forwarded-For", "203.0.113.42")
 	allowedRes := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(allowedRes, allowedReq)
+	srvTrustProxy.Handler().ServeHTTP(allowedRes, allowedReq)
 	if allowedRes.Code != http.StatusOK {
-		t.Fatalf("expected allowed admin IP request, got %d", allowedRes.Code)
+		t.Fatalf("expected forwarded request to be allowed when TRUST_PROXY=true, got %d", allowedRes.Code)
+	}
+
+	srvOpen := NewServer(config.ServerConfig{
+		JWTSecret:          "test-secret",
+		AppBaseURL:         "http://localhost:3000",
+		CORSAllowedOrigins: []string{"http://localhost:3000"},
+		AdminIPAllowlist:   nil,
+	}, st, nil, nil, &stubRunner{}, nil)
+	openReq := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
+	openReq.Header.Set("Authorization", "Bearer "+adminToken)
+	openRes := httptest.NewRecorder()
+	srvOpen.Handler().ServeHTTP(openRes, openReq)
+	if openRes.Code != http.StatusOK {
+		t.Fatalf("expected request to be allowed when ADMIN_IP_ALLOWLIST is empty, got %d", openRes.Code)
 	}
 }
