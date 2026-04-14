@@ -418,7 +418,7 @@ func (s *PostgresStore) UpsertMission(mission models.Mission) (int64, error) {
 			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
 			cross_border_enabled, marketplace_scope, category,
 			active
-		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, $22::jsonb, $23)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, $22, $23::jsonb, $24, $25)
 		RETURNING id
 	`,
 		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
@@ -985,7 +985,7 @@ func (s *PostgresStore) CreateSearchConfig(spec models.SearchSpec) (int64, error
 			condition_json, offer_percentage, auto_message, message_template, attributes_json,
 			enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
 			last_result_count, consecutive_empty_runs, consecutive_failures
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 		RETURNING id
 	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, marketplace.NormalizeMarketplaceID(spec.MarketplaceID),
 		strings.ToUpper(strings.TrimSpace(spec.CountryCode)), strings.TrimSpace(spec.City), strings.TrimSpace(spec.PostalCode), spec.RadiusKm,
