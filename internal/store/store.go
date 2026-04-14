@@ -253,6 +253,19 @@ func migrate(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at);
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at);
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at);
+
+		CREATE TABLE IF NOT EXISTS admin_audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_type TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			before_json TEXT NOT NULL DEFAULT '',
+			after_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at);
+		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at);
 	`)
 	if err != nil {
 		return err
@@ -365,6 +378,20 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS admin_audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_type TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			before_json TEXT NOT NULL DEFAULT '',
+			after_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at)`)
 
 	return nil
 }
@@ -1044,6 +1071,25 @@ func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, erro
 	return specs, rows.Err()
 }
 
+func (s *SQLiteStore) GetSearchConfigByID(id int64) (*models.SearchSpec, error) {
+	row := s.db.QueryRow(`
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
+		       condition_json, offer_percentage, auto_message, message_template, attributes_json,
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
+		FROM search_configs
+		WHERE id = ?
+	`, id)
+	spec, err := scanSearchSpec(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
 func (s *SQLiteStore) CountSearchConfigs(userID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM search_configs WHERE user_id = ? AND enabled = 1`, userID).Scan(&count)
@@ -1267,6 +1313,24 @@ func (s *SQLiteStore) UpdateSearchRuntime(spec models.SearchSpec) error {
 	return err
 }
 
+func (s *SQLiteStore) SetSearchEnabled(id int64, enabled bool) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, boolToInt(enabled), id)
+	return err
+}
+
+func (s *SQLiteStore) SetSearchNextRunAt(id int64, nextRunAt time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET next_run_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, sqliteTimeOrNil(nextRunAt), id)
+	return err
+}
+
 func (s *SQLiteStore) DeleteSearchConfig(id int64, userID string) error {
 	_, err := s.db.Exec(`DELETE FROM search_configs WHERE id = ? AND user_id = ?`, id, userID)
 	return err
@@ -1363,8 +1427,19 @@ func (s *SQLiteStore) RecordSearchRun(entry models.SearchRunLog) error {
 	return err
 }
 
+func (s *SQLiteStore) RecordAdminAuditLog(entry models.AdminAuditLogEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO admin_audit_log (
+			actor_user_id, action, target_type, target_id, before_json, after_json
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType),
+		strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
+	return err
+}
+
 func (s *SQLiteStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error) {
 	stats := models.SearchOpsStats{
+		ByStatus:      map[string]int{},
 		ByPlan:        map[string]int{},
 		ByCountry:     map[string]int{},
 		ByMarketplace: map[string]int{},
@@ -1372,22 +1447,32 @@ func (s *SQLiteStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error)
 	var queueAvg sql.NullFloat64
 	var freshness sql.NullFloat64
 	if err := s.db.QueryRow(`
-		SELECT COUNT(*), COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN IFNULL(error_code, '') <> '' AND error_code <> 'out_of_scope' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
 		       COALESCE(SUM(CASE WHEN throttled = 1 THEN 1 ELSE 0 END), 0), COALESCE(SUM(searches_avoided), 0),
 		       AVG(queue_wait_ms),
 		       AVG(CASE WHEN sc.last_signal_at IS NULL THEN NULL ELSE (julianday('now') - julianday(sc.last_signal_at)) * 24 * 60 END)
 		FROM search_run_log
 		LEFT JOIN search_configs sc ON sc.id = search_run_log.search_config_id
 		WHERE started_at >= datetime('now', '-' || ? || ' days')
-	`, days).Scan(&stats.TotalRuns, &stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
+	`, days).Scan(&stats.TotalRuns, &stats.SuccessfulRuns, &stats.FailedRuns,
+		&stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
 		&stats.TotalThrottled, &stats.SearchesAvoidedByScoping, &queueAvg, &freshness); err != nil {
 		return stats, err
+	}
+	if stats.TotalRuns > 0 {
+		stats.FailureRatePct = float64(stats.FailedRuns) * 100 / float64(stats.TotalRuns)
 	}
 	if queueAvg.Valid {
 		stats.AverageQueueWaitMs = int(queueAvg.Float64)
 	}
 	if freshness.Valid {
 		stats.AverageMissionFreshnessMins = int(freshness.Float64)
+	}
+	if err := s.fillSQLiteSearchOpsBreakdown(days, "status", &stats.ByStatus); err != nil {
+		return stats, err
 	}
 	if err := s.fillSQLiteSearchOpsBreakdown(days, "plan", &stats.ByPlan); err != nil {
 		return stats, err
@@ -1399,6 +1484,95 @@ func (s *SQLiteStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error)
 		return stats, err
 	}
 	return stats, nil
+}
+
+func (s *SQLiteStore) ListSearchRuns(filter models.AdminSearchRunFilter) ([]models.AdminSearchRun, error) {
+	days := filter.Days
+	if days <= 0 {
+		days = 7
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+
+	rows, err := s.db.Query(`
+		SELECT l.id, l.search_config_id, COALESCE(sc.name, ''), l.user_id, COALESCE(u.email, ''),
+		       l.mission_id, COALESCE(sp.name, ''), l.plan, l.marketplace_id, l.country_code,
+		       l.started_at, l.finished_at, l.queue_wait_ms, l.priority, l.status, l.results_found,
+		       l.new_listings, l.deal_hits, l.throttled, l.error_code, l.searches_avoided
+		FROM search_run_log l
+		LEFT JOIN search_configs sc ON sc.id = l.search_config_id
+		LEFT JOIN shopping_profiles sp ON sp.id = l.mission_id
+		LEFT JOIN users u ON u.id = l.user_id
+		WHERE l.started_at >= datetime('now', '-' || ? || ' days')
+		  AND (? = '' OR l.status = ?)
+		  AND (? = '' OR l.marketplace_id = ?)
+		  AND (? = '' OR l.country_code = ?)
+		  AND (? = '' OR l.user_id = ?)
+		ORDER BY l.started_at DESC
+		LIMIT ?
+	`, days,
+		strings.TrimSpace(filter.Status), strings.TrimSpace(filter.Status),
+		marketplace.NormalizeMarketplaceID(filter.MarketplaceID), marketplace.NormalizeMarketplaceID(filter.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(filter.CountryCode)), strings.ToUpper(strings.TrimSpace(filter.CountryCode)),
+		strings.TrimSpace(filter.UserID), strings.TrimSpace(filter.UserID),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.AdminSearchRun, 0, limit)
+	for rows.Next() {
+		var run models.AdminSearchRun
+		var startedAt, finishedAt string
+		var throttledInt int
+		if err := rows.Scan(
+			&run.ID, &run.SearchConfigID, &run.SearchName, &run.UserID, &run.UserEmail,
+			&run.MissionID, &run.MissionName, &run.Plan, &run.MarketplaceID, &run.CountryCode,
+			&startedAt, &finishedAt, &run.QueueWaitMs, &run.Priority, &run.Status, &run.ResultsFound,
+			&run.NewListings, &run.DealHits, &throttledInt, &run.ErrorCode, &run.SearchesAvoided,
+		); err != nil {
+			return nil, err
+		}
+		run.Throttled = throttledInt != 0
+		run.MarketplaceID = marketplace.NormalizeMarketplaceID(run.MarketplaceID)
+		run.CountryCode = strings.ToUpper(strings.TrimSpace(run.CountryCode))
+		run.StartedAt, _ = parseSQLiteTime(startedAt)
+		run.FinishedAt, _ = parseSQLiteTime(finishedAt)
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`
+		SELECT id, actor_user_id, action, target_type, target_id, before_json, after_json, created_at
+		FROM admin_audit_log
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.AdminAuditLogEntry, 0, limit)
+	for rows.Next() {
+		var entry models.AdminAuditLogEntry
+		var createdAt string
+		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &createdAt); err != nil {
+			return nil, err
+		}
+		entry.CreatedAt, _ = parseSQLiteTime(createdAt)
+		out = append(out, entry)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) fillSQLiteSearchOpsBreakdown(days int, column string, out *map[string]int) error {

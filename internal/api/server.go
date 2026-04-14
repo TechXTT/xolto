@@ -107,7 +107,11 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	// Admin routes
 	mux.HandleFunc("/admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("/admin/users", s.requireAdmin(s.handleAdminUsers))
+	mux.HandleFunc("/admin/users/", s.requireAdmin(s.handleAdminUserMutation))
+	mux.HandleFunc("/admin/missions/", s.requireAdmin(s.handleAdminMissionMutation))
+	mux.HandleFunc("/admin/searches/", s.requireAdmin(s.handleAdminSearchMutation))
 	mux.HandleFunc("/admin/usage", s.requireAdmin(s.handleAdminUsageTimeline))
+	mux.HandleFunc("/admin/search-runs", s.requireAdmin(s.handleAdminSearchRuns))
 	return s
 }
 
@@ -118,11 +122,10 @@ func (s *Server) Handler() http.Handler {
 // corsMiddleware adds CORS headers for requests from the configured app origin.
 // It handles preflight OPTIONS requests and allows credentials.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
-	allowedOrigin := strings.TrimRight(s.cfg.AppBaseURL, "/")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && (allowedOrigin == "*" || origin == allowedOrigin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
+		if allowedOrigin, ok := s.allowedCORSOrigin(origin); ok {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -1397,7 +1400,11 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request, user *
 	}
 	// Estimate cost: gpt-4o-mini input $0.15/M, output $0.60/M tokens.
 	stats.EstimatedCostUSD = float64(stats.TotalPrompt)*0.15/1_000_000 + float64(stats.TotalCompletion)*0.60/1_000_000
-	writeJSON(w, http.StatusOK, map[string]any{"stats": stats, "search_stats": searchStats, "days": days})
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"stats":        stats,
+		"search_stats": searchStats,
+		"days":         days,
+	})
 }
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *models.User) {
@@ -1438,7 +1445,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *
 			AITokens:     u.AITokens,
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": safe})
+	writeAdminOK(w, http.StatusOK, map[string]any{"users": safe})
 }
 
 func (s *Server) handleAdminUsageTimeline(w http.ResponseWriter, r *http.Request, user *models.User) {
@@ -1456,7 +1463,372 @@ func (s *Server) handleAdminUsageTimeline(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "days": days})
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"days":    days,
+	})
+}
+
+func (s *Server) handleAdminSearchRuns(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	days := 7
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+	filter := models.AdminSearchRunFilter{
+		Days:          days,
+		Status:        strings.TrimSpace(r.URL.Query().Get("status")),
+		MarketplaceID: strings.TrimSpace(r.URL.Query().Get("marketplace")),
+		CountryCode:   strings.TrimSpace(r.URL.Query().Get("country")),
+		UserID:        strings.TrimSpace(r.URL.Query().Get("user")),
+		Limit:         limit,
+	}
+	entries, err := s.db.ListSearchRuns(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"days":    days,
+		"limit":   limit,
+		"filters": map[string]any{
+			"status":      filter.Status,
+			"marketplace": filter.MarketplaceID,
+			"country":     strings.ToUpper(filter.CountryCode),
+			"user":        filter.UserID,
+		},
+	})
+}
+
+func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request, actor *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/users/"), "/")
+	if rawPath == "" {
+		writeError(w, http.StatusBadRequest, "invalid admin user path")
+		return
+	}
+
+	switch {
+	case strings.HasSuffix(rawPath, "/tier"):
+		userID := strings.Trim(strings.TrimSuffix(rawPath, "/tier"), "/")
+		if userID == "" {
+			writeError(w, http.StatusBadRequest, "invalid user id")
+			return
+		}
+		target, err := s.db.GetUserByID(userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if target == nil {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		var req struct {
+			Tier string `json:"tier"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		tier := billing.NormalizeTier(req.Tier)
+		switch tier {
+		case "free", "pro", "power":
+		default:
+			writeError(w, http.StatusBadRequest, "unsupported tier")
+			return
+		}
+		before := map[string]any{
+			"tier": billing.NormalizeTier(target.Tier),
+		}
+		if err := s.db.UpdateUserTier(userID, tier); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+			ActorUserID: actor.ID,
+			Action:      "user_tier_updated",
+			TargetType:  "user",
+			TargetID:    userID,
+			BeforeJSON:  mustJSON(before),
+			AfterJSON:   mustJSON(map[string]any{"tier": tier}),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeAdminOK(w, http.StatusOK, map[string]any{
+			"user_id": userID,
+			"tier":    tier,
+		})
+		return
+	case strings.HasSuffix(rawPath, "/admin"):
+		userID := strings.Trim(strings.TrimSuffix(rawPath, "/admin"), "/")
+		if userID == "" {
+			writeError(w, http.StatusBadRequest, "invalid user id")
+			return
+		}
+		target, err := s.db.GetUserByID(userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if target == nil {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		var req struct {
+			IsAdmin bool `json:"is_admin"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		before := map[string]any{
+			"is_admin": target.IsAdmin,
+		}
+		if err := s.db.SetUserAdmin(userID, req.IsAdmin); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+			ActorUserID: actor.ID,
+			Action:      "user_admin_updated",
+			TargetType:  "user",
+			TargetID:    userID,
+			BeforeJSON:  mustJSON(before),
+			AfterJSON:   mustJSON(map[string]any{"is_admin": req.IsAdmin}),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeAdminOK(w, http.StatusOK, map[string]any{
+			"user_id":  userID,
+			"is_admin": req.IsAdmin,
+		})
+		return
+	default:
+		writeError(w, http.StatusNotFound, "unknown admin user action")
+		return
+	}
+}
+
+func (s *Server) handleAdminMissionMutation(w http.ResponseWriter, r *http.Request, actor *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/missions/"), "/")
+	if rawPath == "" || !strings.HasSuffix(rawPath, "/status") {
+		writeError(w, http.StatusNotFound, "unknown admin mission action")
+		return
+	}
+	idPart := strings.Trim(strings.TrimSuffix(rawPath, "/status"), "/")
+	missionID, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid mission id")
+		return
+	}
+
+	mission, err := s.db.GetMission(missionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if mission == nil {
+		writeError(w, http.StatusNotFound, "mission not found")
+		return
+	}
+
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	before := map[string]any{
+		"status": mission.Status,
+		"active": mission.Active,
+	}
+	if err := s.db.UpdateMissionStatus(missionID, req.Status); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated, err := s.db.GetMission(missionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if updated == nil {
+		writeError(w, http.StatusNotFound, "mission not found")
+		return
+	}
+	if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+		ActorUserID: actor.ID,
+		Action:      "mission_status_updated",
+		TargetType:  "mission",
+		TargetID:    strconv.FormatInt(missionID, 10),
+		BeforeJSON:  mustJSON(before),
+		AfterJSON: mustJSON(map[string]any{
+			"status": updated.Status,
+			"active": updated.Active,
+		}),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"mission": updated,
+	})
+}
+
+func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Request, actor *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/searches/"), "/")
+	if rawPath == "" {
+		writeError(w, http.StatusBadRequest, "invalid admin search path")
+		return
+	}
+
+	switch {
+	case strings.HasSuffix(rawPath, "/enabled"):
+		idPart := strings.Trim(strings.TrimSuffix(rawPath, "/enabled"), "/")
+		searchID, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid search id")
+			return
+		}
+		spec, err := s.db.GetSearchConfigByID(searchID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if spec == nil {
+			writeError(w, http.StatusNotFound, "search not found")
+			return
+		}
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		before := map[string]any{"enabled": spec.Enabled}
+		if err := s.db.SetSearchEnabled(searchID, req.Enabled); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		updated, err := s.db.GetSearchConfigByID(searchID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if updated == nil {
+			writeError(w, http.StatusNotFound, "search not found")
+			return
+		}
+		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+			ActorUserID: actor.ID,
+			Action:      "search_enabled_updated",
+			TargetType:  "search",
+			TargetID:    strconv.FormatInt(searchID, 10),
+			BeforeJSON:  mustJSON(before),
+			AfterJSON:   mustJSON(map[string]any{"enabled": req.Enabled}),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeAdminOK(w, http.StatusOK, map[string]any{
+			"search_id": searchID,
+			"enabled":   req.Enabled,
+			"search":    updated,
+		})
+		return
+	case strings.HasSuffix(rawPath, "/run"):
+		idPart := strings.Trim(strings.TrimSuffix(rawPath, "/run"), "/")
+		searchID, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid search id")
+			return
+		}
+		spec, err := s.db.GetSearchConfigByID(searchID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if spec == nil {
+			writeError(w, http.StatusNotFound, "search not found")
+			return
+		}
+		if !spec.Enabled {
+			writeError(w, http.StatusBadRequest, "search is disabled")
+			return
+		}
+		before := map[string]any{"next_run_at": spec.NextRunAt}
+		now := time.Now().UTC()
+		if err := s.db.SetSearchNextRunAt(searchID, now); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if s.runner != nil {
+			if err := s.runner.RunUserNow(r.Context(), spec.UserID); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		updated, err := s.db.GetSearchConfigByID(searchID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if updated == nil {
+			writeError(w, http.StatusNotFound, "search not found")
+			return
+		}
+		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+			ActorUserID: actor.ID,
+			Action:      "search_run_triggered",
+			TargetType:  "search",
+			TargetID:    strconv.FormatInt(searchID, 10),
+			BeforeJSON:  mustJSON(before),
+			AfterJSON: mustJSON(map[string]any{
+				"next_run_at": updated.NextRunAt,
+			}),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeAdminOK(w, http.StatusOK, map[string]any{
+			"search_id": searchID,
+			"user_id":   spec.UserID,
+			"message":   "search run triggered",
+			"search":    updated,
+		})
+		return
+	default:
+		writeError(w, http.StatusNotFound, "unknown admin search action")
+		return
+	}
 }
 
 func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
@@ -1476,8 +1848,84 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *mod
 			writeError(w, http.StatusForbidden, "admin access required")
 			return
 		}
+		if !s.adminSourceAllowed(r) {
+			writeError(w, http.StatusForbidden, "request source is not allowed for admin access")
+			return
+		}
 		next(w, r, user)
 	})
+}
+
+func (s *Server) allowedCORSOrigin(origin string) (string, bool) {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	if origin == "" {
+		return "", false
+	}
+	for _, allowed := range s.cfg.CORSAllowedOrigins {
+		candidate := strings.TrimRight(strings.TrimSpace(allowed), "/")
+		if candidate == "" {
+			continue
+		}
+		if candidate == "*" || candidate == origin {
+			return origin, true
+		}
+	}
+	return "", false
+}
+
+func (s *Server) adminSourceAllowed(r *http.Request) bool {
+	if len(s.cfg.AdminIPAllowlist) == 0 {
+		return true
+	}
+	clientIP := requestIP(r)
+	if clientIP == nil {
+		return false
+	}
+	for _, allowed := range s.cfg.AdminIPAllowlist {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.Contains(allowed, "/") {
+			_, cidr, err := net.ParseCIDR(allowed)
+			if err == nil && cidr.Contains(clientIP) {
+				return true
+			}
+			continue
+		}
+		ip := net.ParseIP(allowed)
+		if ip != nil && ip.Equal(clientIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestIP(r *http.Request) net.IP {
+	parse := func(raw string) net.IP {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil
+		}
+		return net.ParseIP(raw)
+	}
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		for _, part := range parts {
+			if ip := parse(part); ip != nil {
+				return ip
+			}
+		}
+	}
+	if ip := parse(r.Header.Get("X-Real-IP")); ip != nil {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return parse(host)
+	}
+	return parse(r.RemoteAddr)
 }
 
 func (s *Server) currentUser(r *http.Request) (*models.User, error) {
@@ -1641,6 +2089,18 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeAdminOK(w http.ResponseWriter, status int, payload map[string]any) {
+	resp := map[string]any{
+		"ok":    true,
+		"error": "",
+		"data":  payload,
+	}
+	for key, value := range payload {
+		resp[key] = value
+	}
+	writeJSON(w, status, resp)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

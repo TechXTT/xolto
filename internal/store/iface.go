@@ -1,6 +1,10 @@
 package store
 
-import "github.com/TechXTT/xolto/internal/models"
+import (
+	"time"
+
+	"github.com/TechXTT/xolto/internal/models"
+)
 
 type Reader interface {
 	GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error)
@@ -21,6 +25,7 @@ type Reader interface {
 	GetUserByAuthIdentity(provider, subject string) (*models.User, error)
 	ListUserAuthMethods(userID string) ([]string, error)
 	GetSearchConfigs(userID string) ([]models.SearchSpec, error)
+	GetSearchConfigByID(id int64) (*models.SearchSpec, error)
 	GetAllEnabledSearchConfigs() ([]models.SearchSpec, error)
 	CountSearchConfigs(userID string) (int, error)
 	CountActiveMissions(userID string) (int, error)
@@ -32,6 +37,8 @@ type Reader interface {
 	GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error)
 	GetUserAIUsageStats(userID string, days int) (models.AIUsageStats, error)
 	GetSearchOpsStats(days int) (models.SearchOpsStats, error)
+	ListSearchRuns(filter models.AdminSearchRunFilter) ([]models.AdminSearchRun, error)
+	ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry, error)
 }
 
 type Writer interface {
@@ -54,6 +61,8 @@ type Writer interface {
 	CreateSearchConfig(spec models.SearchSpec) (int64, error)
 	UpdateSearchConfig(spec models.SearchSpec) error
 	UpdateSearchRuntime(spec models.SearchSpec) error
+	SetSearchEnabled(id int64, enabled bool) error
+	SetSearchNextRunAt(id int64, nextRunAt time.Time) error
 	DeleteSearchConfig(id int64, userID string) error
 	UpdateUserTier(userID, tier string) error
 	UpdateStripeCustomer(userID, customerID string) error
@@ -63,6 +72,7 @@ type Writer interface {
 	// Admin
 	RecordAIUsage(entry models.AIUsageEntry) error
 	SetUserAdmin(userID string, isAdmin bool) error
+	RecordAdminAuditLog(entry models.AdminAuditLogEntry) error
 }
 
 type Store interface {

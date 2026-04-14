@@ -246,6 +246,19 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at DESC);
+
+		CREATE TABLE IF NOT EXISTS admin_audit_log (
+			id BIGSERIAL PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_type TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			before_json TEXT NOT NULL DEFAULT '',
+			after_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -358,6 +371,20 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at DESC)`)
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS admin_audit_log (
+			id BIGSERIAL PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_type TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			before_json TEXT NOT NULL DEFAULT '',
+			after_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at DESC)`)
 
 	return nil
 }
@@ -937,6 +964,25 @@ func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, er
 	return specs, rows.Err()
 }
 
+func (s *PostgresStore) GetSearchConfigByID(id int64) (*models.SearchSpec, error) {
+	row := s.db.QueryRow(`
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
+		       condition_json::text, offer_percentage, auto_message, message_template, attributes_json::text,
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
+		FROM search_configs
+		WHERE id = $1
+	`, id)
+	spec, err := scanPGSearchSpec(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
 func (s *PostgresStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
 		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
@@ -1032,6 +1078,24 @@ func (s *PostgresStore) UpdateSearchRuntime(spec models.SearchSpec) error {
 	return err
 }
 
+func (s *PostgresStore) SetSearchEnabled(id int64, enabled bool) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET enabled = $1, updated_at = NOW()
+		WHERE id = $2
+	`, enabled, id)
+	return err
+}
+
+func (s *PostgresStore) SetSearchNextRunAt(id int64, nextRunAt time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET next_run_at = $1, updated_at = NOW()
+		WHERE id = $2
+	`, nullTime(nextRunAt), id)
+	return err
+}
+
 func (s *PostgresStore) DeleteSearchConfig(id int64, userID string) error {
 	_, err := s.db.Exec(`DELETE FROM search_configs WHERE id = $1 AND user_id = $2`, id, userID)
 	return err
@@ -1051,8 +1115,19 @@ func (s *PostgresStore) RecordSearchRun(entry models.SearchRunLog) error {
 	return err
 }
 
+func (s *PostgresStore) RecordAdminAuditLog(entry models.AdminAuditLogEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO admin_audit_log (
+			actor_user_id, action, target_type, target_id, before_json, after_json
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType),
+		strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
+	return err
+}
+
 func (s *PostgresStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error) {
 	stats := models.SearchOpsStats{
+		ByStatus:      map[string]int{},
 		ByPlan:        map[string]int{},
 		ByCountry:     map[string]int{},
 		ByMarketplace: map[string]int{},
@@ -1060,23 +1135,33 @@ func (s *PostgresStore) GetSearchOpsStats(days int) (models.SearchOpsStats, erro
 	var queueAvg sql.NullFloat64
 	var freshness sql.NullFloat64
 	err := s.db.QueryRow(`
-		SELECT COUNT(*), COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN COALESCE(error_code, '') <> '' AND error_code <> 'out_of_scope' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
 		       COALESCE(SUM(CASE WHEN throttled THEN 1 ELSE 0 END), 0), COALESCE(SUM(searches_avoided), 0),
 		       AVG(queue_wait_ms::double precision),
 		       AVG(EXTRACT(EPOCH FROM (NOW() - sc.last_signal_at)) / 60.0)
 		FROM search_run_log l
 		LEFT JOIN search_configs sc ON sc.id = l.search_config_id
 		WHERE l.started_at >= NOW() - MAKE_INTERVAL(days => $1)
-	`, days).Scan(&stats.TotalRuns, &stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
+	`, days).Scan(&stats.TotalRuns, &stats.SuccessfulRuns, &stats.FailedRuns,
+		&stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
 		&stats.TotalThrottled, &stats.SearchesAvoidedByScoping, &queueAvg, &freshness)
 	if err != nil {
 		return stats, err
+	}
+	if stats.TotalRuns > 0 {
+		stats.FailureRatePct = float64(stats.FailedRuns) * 100 / float64(stats.TotalRuns)
 	}
 	if queueAvg.Valid {
 		stats.AverageQueueWaitMs = int(queueAvg.Float64)
 	}
 	if freshness.Valid {
 		stats.AverageMissionFreshnessMins = int(freshness.Float64)
+	}
+	if err := s.fillPGSearchOpsBreakdown(days, "status", &stats.ByStatus); err != nil {
+		return stats, err
 	}
 	if err := s.fillPGSearchOpsBreakdown(days, "plan", &stats.ByPlan); err != nil {
 		return stats, err
@@ -1088,6 +1173,88 @@ func (s *PostgresStore) GetSearchOpsStats(days int) (models.SearchOpsStats, erro
 		return stats, err
 	}
 	return stats, nil
+}
+
+func (s *PostgresStore) ListSearchRuns(filter models.AdminSearchRunFilter) ([]models.AdminSearchRun, error) {
+	days := filter.Days
+	if days <= 0 {
+		days = 7
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+
+	rows, err := s.db.Query(`
+		SELECT l.id, l.search_config_id, COALESCE(sc.name, ''), l.user_id, COALESCE(u.email, ''),
+		       l.mission_id, COALESCE(sp.name, ''), l.plan, l.marketplace_id, l.country_code,
+		       l.started_at, l.finished_at, l.queue_wait_ms, l.priority, l.status, l.results_found,
+		       l.new_listings, l.deal_hits, l.throttled, l.error_code, l.searches_avoided
+		FROM search_run_log l
+		LEFT JOIN search_configs sc ON sc.id = l.search_config_id
+		LEFT JOIN shopping_profiles sp ON sp.id = l.mission_id
+		LEFT JOIN users u ON u.id = l.user_id
+		WHERE l.started_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND ($2 = '' OR l.status = $2)
+		  AND ($3 = '' OR l.marketplace_id = $3)
+		  AND ($4 = '' OR l.country_code = $4)
+		  AND ($5 = '' OR l.user_id = $5)
+		ORDER BY l.started_at DESC
+		LIMIT $6
+	`, days,
+		strings.TrimSpace(filter.Status),
+		marketplace.NormalizeMarketplaceID(filter.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(filter.CountryCode)),
+		strings.TrimSpace(filter.UserID),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.AdminSearchRun, 0, limit)
+	for rows.Next() {
+		var run models.AdminSearchRun
+		if err := rows.Scan(
+			&run.ID, &run.SearchConfigID, &run.SearchName, &run.UserID, &run.UserEmail,
+			&run.MissionID, &run.MissionName, &run.Plan, &run.MarketplaceID, &run.CountryCode,
+			&run.StartedAt, &run.FinishedAt, &run.QueueWaitMs, &run.Priority, &run.Status, &run.ResultsFound,
+			&run.NewListings, &run.DealHits, &run.Throttled, &run.ErrorCode, &run.SearchesAvoided,
+		); err != nil {
+			return nil, err
+		}
+		run.MarketplaceID = marketplace.NormalizeMarketplaceID(run.MarketplaceID)
+		run.CountryCode = strings.ToUpper(strings.TrimSpace(run.CountryCode))
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`
+		SELECT id, actor_user_id, action, target_type, target_id, before_json, after_json, created_at
+		FROM admin_audit_log
+		ORDER BY created_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.AdminAuditLogEntry, 0, limit)
+	for rows.Next() {
+		var entry models.AdminAuditLogEntry
+		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, entry)
+	}
+	return out, rows.Err()
 }
 
 func (s *PostgresStore) fillPGSearchOpsBreakdown(days int, column string, out *map[string]int) error {

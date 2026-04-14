@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/TechXTT/xolto/internal/models"
 )
@@ -158,5 +159,178 @@ func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
 
 	if err := st.TouchListing("u1", "m1"); err != nil {
 		t.Fatalf("TouchListing() error = %v", err)
+	}
+}
+
+func TestAdminSearchOpsAggregationAndFilters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-admin-ops.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	userID, err := st.CreateUser("ops@example.com", "hash", "Ops User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	missionID, err := st.UpsertMission(models.Mission{
+		UserID:        userID,
+		Name:          "Sony Mission",
+		TargetQuery:   "sony a6000",
+		Status:        "active",
+		Urgency:       "flexible",
+		Category:      "camera",
+		CategoryID:    487,
+		SearchQueries: []string{"sony a6000"},
+		Active:        true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission() error = %v", err)
+	}
+	searchID, err := st.CreateSearchConfig(models.SearchSpec{
+		UserID:        userID,
+		ProfileID:     missionID,
+		Name:          "sony a6000",
+		Query:         "sony a6000",
+		MarketplaceID: "marktplaats",
+		CountryCode:   "NL",
+		CategoryID:    487,
+		Enabled:       true,
+		CheckInterval: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("CreateSearchConfig() error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := st.RecordSearchRun(models.SearchRunLog{
+		SearchConfigID: searchID,
+		UserID:         userID,
+		MissionID:      missionID,
+		Plan:           "pro",
+		MarketplaceID:  "marktplaats",
+		CountryCode:    "NL",
+		StartedAt:      now.Add(-3 * time.Minute),
+		FinishedAt:     now.Add(-2 * time.Minute),
+		Status:         "success",
+		ResultsFound:   4,
+		NewListings:    2,
+		DealHits:       1,
+	}); err != nil {
+		t.Fatalf("RecordSearchRun(success) error = %v", err)
+	}
+	if err := st.RecordSearchRun(models.SearchRunLog{
+		SearchConfigID:  searchID,
+		UserID:          userID,
+		MissionID:       missionID,
+		Plan:            "pro",
+		MarketplaceID:   "marktplaats",
+		CountryCode:     "NL",
+		StartedAt:       now.Add(-90 * time.Second),
+		FinishedAt:      now.Add(-60 * time.Second),
+		Status:          "search_failed",
+		ErrorCode:       "search_failed",
+		SearchesAvoided: 1,
+	}); err != nil {
+		t.Fatalf("RecordSearchRun(search_failed) error = %v", err)
+	}
+
+	stats, err := st.GetSearchOpsStats(30)
+	if err != nil {
+		t.Fatalf("GetSearchOpsStats() error = %v", err)
+	}
+	if stats.TotalRuns != 2 {
+		t.Fatalf("expected 2 total runs, got %d", stats.TotalRuns)
+	}
+	if stats.SuccessfulRuns != 1 || stats.FailedRuns != 1 {
+		t.Fatalf("expected 1 successful and 1 failed run, got success=%d failed=%d", stats.SuccessfulRuns, stats.FailedRuns)
+	}
+	if stats.ByStatus["success"] != 1 || stats.ByStatus["search_failed"] != 1 {
+		t.Fatalf("unexpected by-status breakdown: %#v", stats.ByStatus)
+	}
+
+	successRuns, err := st.ListSearchRuns(models.AdminSearchRunFilter{
+		Days:   30,
+		Status: "success",
+		UserID: userID,
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListSearchRuns() error = %v", err)
+	}
+	if len(successRuns) != 1 {
+		t.Fatalf("expected one filtered success run, got %d", len(successRuns))
+	}
+	if successRuns[0].Status != "success" {
+		t.Fatalf("expected status=success, got %q", successRuns[0].Status)
+	}
+}
+
+func TestAdminAuditLogAndSearchControlPersistence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-admin-audit.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	userID, err := st.CreateUser("audit@example.com", "hash", "Audit User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	searchID, err := st.CreateSearchConfig(models.SearchSpec{
+		UserID:        userID,
+		Name:          "sony a6000",
+		Query:         "sony a6000",
+		MarketplaceID: "marktplaats",
+		CountryCode:   "NL",
+		CategoryID:    487,
+		Enabled:       true,
+		CheckInterval: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("CreateSearchConfig() error = %v", err)
+	}
+
+	if err := st.SetSearchEnabled(searchID, false); err != nil {
+		t.Fatalf("SetSearchEnabled(false) error = %v", err)
+	}
+	if err := st.SetSearchNextRunAt(searchID, time.Now().UTC()); err != nil {
+		t.Fatalf("SetSearchNextRunAt() error = %v", err)
+	}
+	search, err := st.GetSearchConfigByID(searchID)
+	if err != nil {
+		t.Fatalf("GetSearchConfigByID() error = %v", err)
+	}
+	if search == nil {
+		t.Fatalf("search config not found")
+	}
+	if search.Enabled {
+		t.Fatalf("expected search to be disabled")
+	}
+	if search.NextRunAt.IsZero() {
+		t.Fatalf("expected next_run_at to be set")
+	}
+
+	if err := st.RecordAdminAuditLog(models.AdminAuditLogEntry{
+		ActorUserID: "admin-user",
+		Action:      "search_run_triggered",
+		TargetType:  "search",
+		TargetID:    "123",
+		BeforeJSON:  `{"enabled":true}`,
+		AfterJSON:   `{"enabled":false}`,
+	}); err != nil {
+		t.Fatalf("RecordAdminAuditLog() error = %v", err)
+	}
+	logs, err := st.ListAdminAuditLog(10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one audit log entry, got %d", len(logs))
+	}
+	if logs[0].Action != "search_run_triggered" {
+		t.Fatalf("expected action search_run_triggered, got %q", logs[0].Action)
 	}
 }
