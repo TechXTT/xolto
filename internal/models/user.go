@@ -8,6 +8,7 @@ import (
 type UserRole string
 
 const (
+	UserRoleUser     UserRole = "user"
 	UserRoleOwner    UserRole = "owner"
 	UserRoleOperator UserRole = "operator"
 	UserRoleAdmin    UserRole = "admin"
@@ -144,6 +145,8 @@ type AdminAuditLogEntry struct {
 
 func NormalizeUserRole(role string) string {
 	switch UserRole(strings.ToLower(strings.TrimSpace(role))) {
+	case UserRoleUser:
+		return string(UserRoleUser)
 	case UserRoleOwner:
 		return string(UserRoleOwner)
 	case UserRoleOperator:
@@ -163,7 +166,16 @@ func EffectiveUserRole(user User) string {
 	if user.IsAdmin {
 		return string(UserRoleAdmin)
 	}
-	return ""
+	return string(UserRoleUser)
+}
+
+func IsTeamRole(role string) bool {
+	switch NormalizeUserRole(role) {
+	case string(UserRoleOwner), string(UserRoleOperator), string(UserRoleAdmin):
+		return true
+	default:
+		return false
+	}
 }
 
 func HasOperatorAccess(user User) bool {

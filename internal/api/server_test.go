@@ -153,6 +153,7 @@ func TestAdminEndpointsRejectNonAdmin(t *testing.T) {
 		{method: http.MethodGet, path: "/admin/usage"},
 		{method: http.MethodGet, path: "/admin/search-runs"},
 		{method: http.MethodPost, path: "/admin/users/some-user/tier", body: `{"tier":"pro"}`},
+		{method: http.MethodPost, path: "/admin/users/some-user/role", body: `{"role":"user"}`},
 		{method: http.MethodPost, path: "/admin/users/some-user/admin", body: `{"is_admin":true}`},
 		{method: http.MethodPost, path: "/admin/missions/1/status", body: `{"status":"paused"}`},
 		{method: http.MethodPost, path: "/admin/searches/1/enabled", body: `{"enabled":true}`},
@@ -368,6 +369,84 @@ func TestBusinessEndpointsRoleAccess(t *testing.T) {
 	ownerReconcile := request(http.MethodPost, "/admin/business/reconcile", ownerToken, `{}`)
 	if ownerReconcile.Code != http.StatusServiceUnavailable {
 		t.Fatalf("owner expected 503 reconcile without stripe secret, got %d", ownerReconcile.Code)
+	}
+}
+
+func TestAdminUserRoleMutationSupportsProductUserRole(t *testing.T) {
+	st, srv, _, adminID, memberID := newAdminTestServer(t)
+	defer st.Close()
+
+	if err := st.UpdateUserRole(adminID, string(models.UserRoleOwner)); err != nil {
+		t.Fatalf("UpdateUserRole(owner) error = %v", err)
+	}
+	if err := st.SetUserAdmin(adminID, true); err != nil {
+		t.Fatalf("SetUserAdmin(owner) error = %v", err)
+	}
+
+	ownerToken := issueAccessToken(t, adminID, "admin@example.com")
+
+	request := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		return res
+	}
+
+	setUserRole := request("/admin/users/"+memberID+"/role", `{"role":"user"}`)
+	if setUserRole.Code != http.StatusOK {
+		t.Fatalf("set role user expected 200, got %d", setUserRole.Code)
+	}
+
+	member, err := st.GetUserByID(memberID)
+	if err != nil {
+		t.Fatalf("GetUserByID() error = %v", err)
+	}
+	if member == nil {
+		t.Fatalf("member not found")
+	}
+	if models.NormalizeUserRole(member.Role) != string(models.UserRoleUser) {
+		t.Fatalf("expected member role user, got %q", member.Role)
+	}
+	if member.IsAdmin {
+		t.Fatalf("expected member admin flag false for role user")
+	}
+
+	grantAdmin := request("/admin/users/"+memberID+"/admin", `{"is_admin":true}`)
+	if grantAdmin.Code != http.StatusOK {
+		t.Fatalf("grant admin expected 200, got %d", grantAdmin.Code)
+	}
+	member, err = st.GetUserByID(memberID)
+	if err != nil {
+		t.Fatalf("GetUserByID() after grant error = %v", err)
+	}
+	if member == nil {
+		t.Fatalf("member not found after grant")
+	}
+	if models.NormalizeUserRole(member.Role) != string(models.UserRoleAdmin) {
+		t.Fatalf("expected member role admin after grant, got %q", member.Role)
+	}
+	if !member.IsAdmin {
+		t.Fatalf("expected member admin flag true after grant")
+	}
+
+	revokeAdmin := request("/admin/users/"+memberID+"/admin", `{"is_admin":false}`)
+	if revokeAdmin.Code != http.StatusOK {
+		t.Fatalf("revoke admin expected 200, got %d", revokeAdmin.Code)
+	}
+	member, err = st.GetUserByID(memberID)
+	if err != nil {
+		t.Fatalf("GetUserByID() after revoke error = %v", err)
+	}
+	if member == nil {
+		t.Fatalf("member not found after revoke")
+	}
+	if models.NormalizeUserRole(member.Role) != string(models.UserRoleUser) {
+		t.Fatalf("expected member role user after revoke, got %q", member.Role)
+	}
+	if member.IsAdmin {
+		t.Fatalf("expected member admin flag false after revoke")
 	}
 }
 

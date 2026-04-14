@@ -6,6 +6,11 @@ SET role = 'admin'
 WHERE is_admin = TRUE
   AND COALESCE(role, '') = '';
 
+UPDATE users
+SET role = 'user'
+WHERE is_admin = FALSE
+  AND COALESCE(role, '') = '';
+
 ALTER TABLE admin_audit_log
     ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT '';
 

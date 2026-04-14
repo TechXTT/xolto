@@ -438,6 +438,7 @@ func migrate(db *sql.DB) error {
 	// Admin & AI usage tracking.
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`UPDATE users SET role = 'admin' WHERE is_admin = 1 AND COALESCE(role, '') = ''`)
+	_, _ = db.Exec(`UPDATE users SET role = 'user' WHERE is_admin = 0 AND COALESCE(role, '') = ''`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS ai_usage_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

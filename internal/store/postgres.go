@@ -430,6 +430,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	// Admin & AI usage tracking.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE`)
 	_, _ = db.ExecContext(ctx, `UPDATE users SET role = 'admin' WHERE is_admin = TRUE AND COALESCE(role, '') = ''`)
+	_, _ = db.ExecContext(ctx, `UPDATE users SET role = 'user' WHERE is_admin = FALSE AND COALESCE(role, '') = ''`)
 	_, _ = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS ai_usage_log (
 			id BIGSERIAL PRIMARY KEY,

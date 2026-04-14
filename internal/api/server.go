@@ -1707,14 +1707,16 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusBadRequest, "unsupported role")
 			return
 		}
+		nextIsAdmin := models.IsTeamRole(role)
 		before := map[string]any{
-			"role": models.EffectiveUserRole(*target),
+			"role":     models.EffectiveUserRole(*target),
+			"is_admin": target.IsAdmin,
 		}
 		if err := s.db.UpdateUserRole(userID, role); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if err := s.db.SetUserAdmin(userID, role != ""); err != nil {
+		if err := s.db.SetUserAdmin(userID, nextIsAdmin); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1726,14 +1728,15 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			TargetType:  "user",
 			TargetID:    userID,
 			BeforeJSON:  mustJSON(before),
-			AfterJSON:   mustJSON(map[string]any{"role": role}),
+			AfterJSON:   mustJSON(map[string]any{"role": role, "is_admin": nextIsAdmin}),
 		}); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeAdminOK(w, http.StatusOK, map[string]any{
-			"user_id": userID,
-			"role":    role,
+			"user_id":  userID,
+			"role":     role,
+			"is_admin": nextIsAdmin,
 		})
 		return
 	case strings.HasSuffix(rawPath, "/admin"):
@@ -1767,7 +1770,7 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		nextRole := models.NormalizeUserRole(target.Role)
-		if req.IsAdmin && nextRole == "" {
+		if req.IsAdmin && !models.IsTeamRole(nextRole) {
 			nextRole = string(models.UserRoleAdmin)
 			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -1775,7 +1778,7 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		if !req.IsAdmin && nextRole == string(models.UserRoleAdmin) {
-			nextRole = ""
+			nextRole = string(models.UserRoleUser)
 			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -2938,10 +2941,12 @@ func (s *Server) makeUsageCallback(userID string, missionID int64) func(string, 
 // syncAdminFlag promotes or demotes a user based on the ADMIN_EMAILS env var.
 // Called on login/register so the flag stays in sync without manual SQL.
 func (s *Server) syncAdminFlag(user *models.User) {
-	if models.NormalizeUserRole(user.Role) != "" {
-		if !user.IsAdmin {
-			_ = s.db.SetUserAdmin(user.ID, true)
-			user.IsAdmin = true
+	role := models.NormalizeUserRole(user.Role)
+	if role != "" {
+		shouldBeAdmin := models.IsTeamRole(role)
+		if user.IsAdmin != shouldBeAdmin {
+			_ = s.db.SetUserAdmin(user.ID, shouldBeAdmin)
+			user.IsAdmin = shouldBeAdmin
 		}
 		return
 	}
