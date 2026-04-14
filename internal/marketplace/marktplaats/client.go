@@ -73,9 +73,19 @@ func (c *httpClient) fetchPage(ctx context.Context, spec models.SearchSpec, offs
 			params.Set("l2CategoryId", strconv.Itoa(l2))
 		}
 	}
-	if c.zipCode != "" {
-		params.Set("postcode", c.zipCode)
-		params.Set("distanceMeters", strconv.Itoa(c.distance))
+	postcode := strings.TrimSpace(spec.PostalCode)
+	distanceMeters := c.distance
+	if postcode == "" {
+		postcode = strings.TrimSpace(c.zipCode)
+	}
+	if spec.RadiusKm > 0 {
+		distanceMeters = spec.RadiusKm * 1000
+	}
+	if postcode != "" {
+		params.Set("postcode", postcode)
+		if distanceMeters > 0 {
+			params.Set("distanceMeters", strconv.Itoa(distanceMeters))
+		}
 	}
 
 	reqURL := baseURL + "?" + params.Encode()

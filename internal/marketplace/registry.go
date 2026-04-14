@@ -16,9 +16,9 @@ func (r *Registry) Register(m Marketplace) {
 	if r == nil || m == nil {
 		return
 	}
-	r.marketplaces[m.ID()] = m
+	r.marketplaces[NormalizeMarketplaceID(m.ID())] = m
 	if messenger, ok := m.(Messenger); ok {
-		r.messengers[m.ID()] = messenger
+		r.messengers[NormalizeMarketplaceID(m.ID())] = messenger
 	}
 }
 
@@ -26,7 +26,7 @@ func (r *Registry) Get(id string) (Marketplace, bool) {
 	if r == nil {
 		return nil, false
 	}
-	m, ok := r.marketplaces[id]
+	m, ok := r.marketplaces[NormalizeMarketplaceID(id)]
 	return m, ok
 }
 
@@ -34,7 +34,7 @@ func (r *Registry) Messenger(id string) (Messenger, bool) {
 	if r == nil {
 		return nil, false
 	}
-	m, ok := r.messengers[id]
+	m, ok := r.messengers[NormalizeMarketplaceID(id)]
 	return m, ok
 }
 

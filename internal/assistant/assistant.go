@@ -114,6 +114,9 @@ func (a *Assistant) UpsertBrief(ctx context.Context, userID, prompt string) (*mo
 	if err != nil {
 		return nil, err
 	}
+	if user, uerr := a.store.GetUserByID(userID); uerr == nil {
+		a.applyUserMissionDefaults(user, mission)
+	}
 
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
@@ -401,6 +404,9 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 	if err != nil {
 		return nil, err
 	}
+	if user, uerr := a.store.GetUserByID(userID); uerr == nil {
+		a.applyUserMissionDefaults(user, mission)
+	}
 	if mission.BudgetStretch == 0 && mission.BudgetMax > 0 {
 		mission.BudgetStretch = mission.BudgetMax
 	}
@@ -463,6 +469,9 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 	}
 
 	applyAnswerToProfile(mission, session.PendingQuestion, answer, a.cfg.Marktplaats)
+	if user, uerr := a.store.GetUserByID(session.UserID); uerr == nil {
+		a.applyUserMissionDefaults(user, mission)
+	}
 	if question, key := nextProfileQuestion(*mission); question != "" {
 		session.PendingQuestion = key
 		session.DraftMission = mission
@@ -522,19 +531,29 @@ func (a *Assistant) searchConfigsForMission(mission models.Mission) []models.Sea
 	}
 
 	searches := make([]models.SearchSpec, 0, len(queries))
+	scope := mission.MarketplaceScope
+	if len(scope) == 0 {
+		scope = marketplace.ValidateScope(mission.CountryCode, mission.CrossBorderEnabled, nil)
+	}
 	for _, query := range queries {
-		searches = append(searches, models.SearchSpec{
-			Name:            mission.Name,
-			Query:           query,
-			MarketplaceID:   "marktplaats",
-			ProfileID:       mission.ID,
-			CategoryID:      mission.CategoryID,
-			MaxPrice:        mission.BudgetStretch * 100,
-			MinPrice:        0,
-			Condition:       conditions,
-			OfferPercentage: 72,
-			AutoMessage:     false,
-		})
+		for _, marketplaceID := range scope {
+			searches = append(searches, models.SearchSpec{
+				Name:            mission.Name,
+				Query:           query,
+				MarketplaceID:   marketplaceID,
+				ProfileID:       mission.ID,
+				CountryCode:     mission.CountryCode,
+				City:            mission.City,
+				PostalCode:      mission.PostalCode,
+				RadiusKm:        mission.TravelRadius,
+				CategoryID:      mission.CategoryID,
+				MaxPrice:        mission.BudgetStretch * 100,
+				MinPrice:        0,
+				Condition:       conditions,
+				OfferPercentage: 72,
+				AutoMessage:     false,
+			})
+		}
 	}
 	return searches
 }
@@ -547,11 +566,12 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 	if err != nil || user == nil {
 		return 0, err
 	}
+	a.applyUserMissionDefaults(user, &mission)
 
 	existing, _ := a.store.GetSearchConfigs(userID)
 	existingKeys := make(map[string]bool, len(existing))
 	for _, s := range existing {
-		existingKeys[strings.ToLower(s.Query)+"|"+s.MarketplaceID] = true
+		existingKeys[strings.ToLower(s.Query)+"|"+marketplace.NormalizeMarketplaceID(s.MarketplaceID)] = true
 	}
 
 	rawQueries := mission.SearchQueries
@@ -591,14 +611,22 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 	}
 
 	interval := intervalForTier(user.Tier)
-	marketplaces := marketplacesForTier(user.Tier)
+	marketplaces := mission.MarketplaceScope
+	if len(marketplaces) == 0 {
+		marketplaces = marketplace.ValidateScope(mission.CountryCode, mission.CrossBorderEnabled, nil)
+	}
 
 	count := 0
 	for _, query := range queries {
 		for _, mp := range marketplaces {
+			mp = marketplace.NormalizeMarketplaceID(mp)
 			key := strings.ToLower(query) + "|" + mp
 			if existingKeys[key] {
 				continue
+			}
+			maxPrice := mission.BudgetStretch
+			if maxPrice == 0 {
+				maxPrice = mission.BudgetMax
 			}
 			spec := models.SearchSpec{
 				UserID:          userID,
@@ -606,10 +634,15 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 				Name:            mission.Name,
 				Query:           query,
 				MarketplaceID:   mp,
+				CountryCode:     mission.CountryCode,
+				City:            mission.City,
+				PostalCode:      mission.PostalCode,
+				RadiusKm:        mission.TravelRadius,
 				CategoryID:      mission.CategoryID,
-				MaxPrice:        mission.BudgetMax * 100,
+				MaxPrice:        maxPrice * 100,
 				Condition:       mission.PreferredCondition,
 				CheckInterval:   interval,
+				NextRunAt:       time.Now().UTC(),
 				OfferPercentage: 72,
 				Enabled:         true,
 			}
@@ -622,20 +655,48 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 }
 
 func intervalForTier(tier string) time.Duration {
-	switch billing.NormalizeTier(tier) {
-	case "power":
-		return time.Minute
-	case "pro":
-		return 5 * time.Minute
-	default:
-		return 30 * time.Minute
-	}
+	return time.Duration(billing.LimitsFor(tier).MinCheckIntervalMins) * time.Minute
 }
 
-func marketplacesForTier(tier string) []string {
-	// All tiers scrape every supported marketplace; tier still controls
-	// concurrency / interval (see intervalForTier).
-	return []string{"marktplaats", "vinted", "olxbg"}
+func (a *Assistant) applyUserMissionDefaults(user *models.User, mission *models.Mission) {
+	if user == nil || mission == nil {
+		return
+	}
+	if mission.CountryCode == "" {
+		mission.CountryCode = user.CountryCode
+	}
+	if mission.Region == "" {
+		mission.Region = user.Region
+	}
+	if mission.City == "" {
+		mission.City = user.City
+	}
+	if mission.PostalCode == "" {
+		mission.PostalCode = user.PostalCode
+	}
+	if mission.ZipCode == "" {
+		if mission.PostalCode != "" {
+			mission.ZipCode = mission.PostalCode
+		} else {
+			mission.ZipCode = a.cfg.Marktplaats.ZipCode
+		}
+	}
+	if mission.TravelRadius == 0 {
+		switch {
+		case user.PreferredRadiusKm > 0:
+			mission.TravelRadius = user.PreferredRadiusKm
+		case mission.Distance > 0:
+			mission.TravelRadius = mission.Distance / 1000
+		case a.cfg.Marktplaats.Distance > 0:
+			mission.TravelRadius = a.cfg.Marktplaats.Distance / 1000
+		}
+	}
+	if mission.Distance == 0 && mission.TravelRadius > 0 {
+		mission.Distance = mission.TravelRadius * 1000
+	}
+	if len(mission.MarketplaceScope) == 0 {
+		mission.MarketplaceScope = marketplace.ValidateScope(mission.CountryCode, mission.CrossBorderEnabled, nil)
+	}
 }
 
 func (a *Assistant) findRecommendationByItemID(ctx context.Context, userID, itemID string, missionID int64) (*models.Recommendation, *models.Mission, error) {

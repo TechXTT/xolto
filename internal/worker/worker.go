@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/notify"
@@ -37,7 +39,6 @@ var queryStopWords = map[string]bool{
 }
 
 type UserWorker struct {
-	specs         []models.SearchSpec
 	db            store.Store
 	registry      *marketplace.Registry
 	scorer        *scorer.Scorer
@@ -115,79 +116,142 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-func (w *UserWorker) RunCycle(ctx context.Context) error {
-	for _, spec := range w.specs {
-		if !spec.Enabled {
-			continue
-		}
-		if spec.ProfileID > 0 {
-			mission, err := w.db.GetMission(spec.ProfileID)
-			if err != nil {
-				slog.Warn("failed to load mission for search", "search_id", spec.ID, "mission_id", spec.ProfileID, "error", err)
-				continue
-			}
-			if mission == nil || mission.Status == "paused" || mission.Status == "completed" {
-				continue
-			}
-		}
-		mp, ok := w.registry.Get(spec.MarketplaceID)
-		if !ok {
-			slog.Warn("unknown marketplace", "marketplace", spec.MarketplaceID)
-			continue
-		}
-		listings, err := mp.Search(ctx, spec)
-		if err != nil {
-			slog.Warn("worker search failed", "marketplace", spec.MarketplaceID, "query", spec.Query, "error", err)
-			continue
-		}
-		for _, listing := range listings {
-			if !titleMatchesQuery(listing.Title, spec.Query) {
-				continue
-			}
-			listing.ProfileID = spec.ProfileID
-			if listing.Price > 0 {
-				_ = w.db.RecordPrice(spec.Query, spec.CategoryID, listing.Price)
-			}
-			isNew, _ := w.db.IsNew(spec.UserID, listing.ItemID)
-			prevScore, hadPrev, _ := w.db.GetListingScore(spec.UserID, listing.ItemID)
-			if !isNew {
-				storedPrice, storedSource, found, err := w.db.GetListingScoringState(spec.UserID, listing.ItemID)
-				if err != nil {
-					slog.Warn("failed to load listing scoring state", "item", listing.ItemID, "error", err)
-				} else if found && storedPrice == listing.Price && storedSource == "ai" {
-					if err := w.db.TouchListing(spec.UserID, listing.ItemID); err != nil {
-						slog.Warn("failed to touch cached listing", "item", listing.ItemID, "error", err)
-					}
-					continue
-				}
-			}
-			scored := w.scorer.Score(ctx, listing, spec)
-			_ = w.db.SaveListing(spec.UserID, listing, spec.Query, scored)
+func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time.Duration) error {
+	spec := task.spec
+	user := task.user
+	startedAt := time.Now().UTC()
+	logEntry := models.SearchRunLog{
+		SearchConfigID:  spec.ID,
+		UserID:          spec.UserID,
+		MissionID:       spec.ProfileID,
+		Plan:            billing.NormalizeTier(user.Tier),
+		MarketplaceID:   spec.MarketplaceID,
+		CountryCode:     spec.CountryCode,
+		StartedAt:       startedAt,
+		QueueWaitMs:     int(queueWait / time.Millisecond),
+		Priority:        task.priority,
+		SearchesAvoided: task.searchesAvoided,
+	}
 
-			crossed := !isNew && hadPrev && prevScore < w.minScore && scored.Score >= w.minScore
-			if !isNew && !crossed {
-				continue
+	finish := func(status string, errCode string, err error) error {
+		finishedAt := time.Now().UTC()
+		logEntry.FinishedAt = finishedAt
+		logEntry.Status = status
+		logEntry.ErrorCode = errCode
+		spec.PriorityClass = task.priority
+		spec.LastRunAt = finishedAt
+		if errCode != "" {
+			spec.ConsecutiveFailures++
+			spec.LastErrorAt = finishedAt
+		} else {
+			spec.ConsecutiveFailures = 0
+			spec.LastErrorAt = time.Time{}
+		}
+		spec.NextRunAt = nextRunAtAfter(spec, user, finishedAt)
+
+		if updateErr := w.db.UpdateSearchRuntime(spec); updateErr != nil {
+			slog.Warn("failed to update search runtime", "search_id", spec.ID, "error", updateErr)
+			if err == nil {
+				err = updateErr
 			}
-			if scored.Score < w.minScore || scored.OfferPrice <= 0 {
-				continue
+		}
+		if logErr := w.db.RecordSearchRun(logEntry); logErr != nil {
+			slog.Warn("failed to record search run", "search_id", spec.ID, "error", logErr)
+			if err == nil {
+				err = logErr
 			}
-			if w.notifier != nil {
-				payload, _ := json.Marshal(map[string]any{
-					"type":      "deal_found",
-					"userID":    spec.UserID,
-					"missionID": spec.ProfileID,
-					"search":    spec.Name,
-					"deal":      scored,
-				})
-				w.notifier.Publish(spec.UserID, string(payload))
-			}
-			if w.emailNotifier != nil && w.emailNotifier.Enabled() {
-				if user, err := w.db.GetUserByID(spec.UserID); err == nil && user != nil && user.Email != "" {
-					_ = w.emailNotifier.SendDealAlert(user.Email, listing, scored.Score)
-				}
-			}
-			slog.Info("worker deal found", "user", spec.UserID, "title", listing.Title, "score", fmt.Sprintf("%.1f", scored.Score))
+		}
+		return err
+	}
+
+	if task.mission != nil {
+		scope, err := missionScopeForCandidate(user, task.mission)
+		if err != nil {
+			return finish("invalid_scope", "invalid_scope", err)
+		}
+		if len(scope) > 0 && !scopeContains(scope, spec.MarketplaceID) {
+			logEntry.Throttled = true
+			return finish("out_of_scope", "out_of_scope", nil)
 		}
 	}
-	return nil
+
+	mp, ok := w.registry.Get(spec.MarketplaceID)
+	if !ok {
+		return finish("unknown_marketplace", "unknown_marketplace", fmt.Errorf("unknown marketplace %q", spec.MarketplaceID))
+	}
+
+	listings, err := mp.Search(ctx, spec)
+	if err != nil {
+		slog.Warn("worker search failed", "marketplace", spec.MarketplaceID, "query", spec.Query, "error", err)
+		return finish("search_failed", "search_failed", err)
+	}
+
+	for _, listing := range listings {
+		if !titleMatchesQuery(listing.Title, spec.Query) {
+			continue
+		}
+		logEntry.ResultsFound++
+		listing.ProfileID = spec.ProfileID
+		if listing.Price > 0 {
+			_ = w.db.RecordPrice(spec.Query, spec.CategoryID, listing.Price)
+		}
+		isNew, _ := w.db.IsNew(spec.UserID, listing.ItemID)
+		prevScore, hadPrev, _ := w.db.GetListingScore(spec.UserID, listing.ItemID)
+		if !isNew {
+			storedPrice, storedSource, found, err := w.db.GetListingScoringState(spec.UserID, listing.ItemID)
+			if err != nil {
+				slog.Warn("failed to load listing scoring state", "item", listing.ItemID, "error", err)
+			} else if found && storedPrice == listing.Price && storedSource == "ai" {
+				if err := w.db.TouchListing(spec.UserID, listing.ItemID); err != nil {
+					slog.Warn("failed to touch cached listing", "item", listing.ItemID, "error", err)
+				}
+				continue
+			}
+		}
+
+		scored := w.scorer.Score(ctx, listing, spec)
+		if err := w.db.SaveListing(spec.UserID, listing, spec.Query, scored); err != nil {
+			slog.Warn("failed to save listing", "item", listing.ItemID, "error", err)
+		}
+		if isNew {
+			logEntry.NewListings++
+		}
+
+		crossed := !isNew && hadPrev && prevScore < w.minScore && scored.Score >= w.minScore
+		if !isNew && !crossed {
+			continue
+		}
+		if scored.Score < w.minScore || scored.OfferPrice <= 0 {
+			continue
+		}
+
+		logEntry.DealHits++
+		spec.LastSignalAt = time.Now().UTC()
+		if w.notifier != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"type":      "deal_found",
+				"userID":    spec.UserID,
+				"missionID": spec.ProfileID,
+				"search":    spec.Name,
+				"deal":      scored,
+			})
+			w.notifier.Publish(spec.UserID, string(payload))
+		}
+		if w.emailNotifier != nil && w.emailNotifier.Enabled() && user.Email != "" {
+			_ = w.emailNotifier.SendDealAlert(user.Email, listing, scored.Score)
+		}
+		slog.Info("worker deal found", "user", spec.UserID, "title", listing.Title, "score", fmt.Sprintf("%.1f", scored.Score))
+	}
+
+	spec.LastResultCount = logEntry.ResultsFound
+	if logEntry.ResultsFound > 0 {
+		spec.ConsecutiveEmptyRuns = 0
+		if spec.LastSignalAt.IsZero() {
+			spec.LastSignalAt = time.Now().UTC()
+		}
+	} else {
+		spec.ConsecutiveEmptyRuns++
+	}
+
+	return finish("success", "", nil)
 }

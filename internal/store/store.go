@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/models"
 	_ "modernc.org/sqlite"
 )
@@ -89,6 +90,12 @@ func migrate(db *sql.DB) error {
 			urgency TEXT NOT NULL DEFAULT 'flexible',
 			avoid_flags TEXT NOT NULL DEFAULT '[]',
 			travel_radius INTEGER NOT NULL DEFAULT 0,
+			country_code TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			cross_border_enabled INTEGER NOT NULL DEFAULT 0,
+			marketplace_scope TEXT NOT NULL DEFAULT '[]',
 			category TEXT NOT NULL DEFAULT 'other',
 			active INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -154,6 +161,12 @@ func migrate(db *sql.DB) error {
 			name TEXT NOT NULL DEFAULT '',
 			tier TEXT NOT NULL DEFAULT 'free',
 			stripe_customer_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			preferred_radius_km INTEGER NOT NULL DEFAULT 0,
+			cross_border_enabled INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
@@ -165,6 +178,10 @@ func migrate(db *sql.DB) error {
 			name TEXT NOT NULL DEFAULT '',
 			query TEXT NOT NULL DEFAULT '',
 			marketplace_id TEXT NOT NULL DEFAULT 'marktplaats',
+			country_code TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			radius_km INTEGER NOT NULL DEFAULT 0,
 			category_id INTEGER NOT NULL DEFAULT 0,
 			max_price INTEGER NOT NULL DEFAULT 0,
 			min_price INTEGER NOT NULL DEFAULT 0,
@@ -175,12 +192,21 @@ func migrate(db *sql.DB) error {
 			attributes_json TEXT NOT NULL DEFAULT '{}',
 			enabled INTEGER NOT NULL DEFAULT 1,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 300,
+			priority_class INTEGER NOT NULL DEFAULT 0,
+			next_run_at DATETIME NULL,
+			last_run_at DATETIME NULL,
+			last_signal_at DATETIME NULL,
+			last_error_at DATETIME NULL,
+			last_result_count INTEGER NOT NULL DEFAULT 0,
+			consecutive_empty_runs INTEGER NOT NULL DEFAULT 0,
+			consecutive_failures INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_search_configs_user ON search_configs(user_id, enabled, updated_at);
 		CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_search_configs_due ON search_configs(enabled, next_run_at, user_id);
 		CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen);
 
 		CREATE TABLE IF NOT EXISTS stripe_events (
@@ -188,6 +214,46 @@ func migrate(db *sql.DB) error {
 			event_id TEXT NOT NULL UNIQUE,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
+
+		CREATE TABLE IF NOT EXISTS user_auth_identities (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			provider_subject TEXT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			email_verified INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(provider, provider_subject),
+			UNIQUE(user_id, provider)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_user_auth_identities_user ON user_auth_identities(user_id, provider);
+
+		CREATE TABLE IF NOT EXISTS search_run_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			search_config_id INTEGER NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			mission_id INTEGER NOT NULL DEFAULT 0,
+			plan TEXT NOT NULL DEFAULT '',
+			marketplace_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			queue_wait_ms INTEGER NOT NULL DEFAULT 0,
+			priority INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			results_found INTEGER NOT NULL DEFAULT 0,
+			new_listings INTEGER NOT NULL DEFAULT 0,
+			deal_hits INTEGER NOT NULL DEFAULT 0,
+			throttled INTEGER NOT NULL DEFAULT 0,
+			error_code TEXT NOT NULL DEFAULT '',
+			searches_avoided INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at);
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at);
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at);
 	`)
 	if err != nil {
 		return err
@@ -211,9 +277,34 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN urgency TEXT NOT NULL DEFAULT 'flexible'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN avoid_flags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN travel_radius INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN region TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN cross_border_enabled INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN marketplace_scope TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN category TEXT NOT NULL DEFAULT 'other'`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN region TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN preferred_radius_km INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN cross_border_enabled INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN radius_km INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN priority_class INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN next_run_at DATETIME NULL`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN last_run_at DATETIME NULL`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN last_signal_at DATETIME NULL`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN last_error_at DATETIME NULL`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN last_result_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN consecutive_empty_runs INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_configs_due ON search_configs(enabled, next_run_at, user_id)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen)`)
 
 	// Admin & AI usage tracking.
@@ -235,6 +326,46 @@ func migrate(db *sql.DB) error {
 	`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_auth_identities (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			provider_subject TEXT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			email_verified INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(provider, provider_subject),
+			UNIQUE(user_id, provider)
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_auth_identities_user ON user_auth_identities(user_id, provider)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS search_run_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			search_config_id INTEGER NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			mission_id INTEGER NOT NULL DEFAULT 0,
+			plan TEXT NOT NULL DEFAULT '',
+			marketplace_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			queue_wait_ms INTEGER NOT NULL DEFAULT 0,
+			priority INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			results_found INTEGER NOT NULL DEFAULT 0,
+			new_listings INTEGER NOT NULL DEFAULT 0,
+			deal_hits INTEGER NOT NULL DEFAULT 0,
+			throttled INTEGER NOT NULL DEFAULT 0,
+			error_code TEXT NOT NULL DEFAULT '',
+			searches_avoided INTEGER NOT NULL DEFAULT 0
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at)`)
 
 	return nil
 }
@@ -297,6 +428,10 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	marketplaceScopeJSON, err := json.Marshal(normalizeMarketplaceScope(mission.MarketplaceScope))
+	if err != nil {
+		return 0, err
+	}
 
 	if strings.TrimSpace(mission.Status) == "" {
 		mission.Status = "active"
@@ -316,14 +451,17 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 			SET name = ?, target_query = ?, category_id = ?, budget_max = ?, budget_stretch = ?,
 				preferred_condition = ?, required_features = ?, nice_to_have = ?, risk_tolerance = ?,
 				zip_code = ?, distance = ?, search_queries = ?,
-				status = ?, urgency = ?, avoid_flags = ?, travel_radius = ?, category = ?,
+				status = ?, urgency = ?, avoid_flags = ?, travel_radius = ?, country_code = ?, region = ?, city = ?,
+				postal_code = ?, cross_border_enabled = ?, marketplace_scope = ?, category = ?,
 				active = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`,
 			mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
 			string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), mission.RiskTolerance,
 			mission.ZipCode, mission.Distance, string(queriesJSON),
-			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
+			strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City),
+			strings.TrimSpace(mission.PostalCode), boolToInt(mission.CrossBorderEnabled), string(marketplaceScopeJSON), mission.Category,
 			boolToInt(mission.Active), mission.ID,
 		)
 		if err != nil {
@@ -337,14 +475,17 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 			user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
 			zip_code, distance, search_queries,
-			status, urgency, avoid_flags, travel_radius, category,
+			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
+			cross_border_enabled, marketplace_scope, category,
 			active
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
 		string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), mission.RiskTolerance,
 		mission.ZipCode, mission.Distance, string(queriesJSON),
-		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
+		strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City), strings.TrimSpace(mission.PostalCode),
+		boolToInt(mission.CrossBorderEnabled), string(marketplaceScopeJSON), mission.Category,
 		boolToInt(mission.Active),
 	)
 	if err != nil {
@@ -358,7 +499,8 @@ func (s *SQLiteStore) GetActiveMission(userID string) (*models.Mission, error) {
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
 			zip_code, distance, search_queries,
-			status, urgency, avoid_flags, travel_radius, category,
+			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
+			cross_border_enabled, marketplace_scope, category,
 			active, created_at, updated_at
 		FROM shopping_profiles
 		WHERE user_id = ? AND active = 1 AND status = 'active'
@@ -380,7 +522,8 @@ func (s *SQLiteStore) GetMission(id int64) (*models.Mission, error) {
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
 			zip_code, distance, search_queries,
-			status, urgency, avoid_flags, travel_radius, category,
+			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
+			cross_border_enabled, marketplace_scope, category,
 			active, created_at, updated_at
 		FROM shopping_profiles
 		WHERE id = ?
@@ -400,7 +543,8 @@ func (s *SQLiteStore) ListMissions(userID string) ([]models.Mission, error) {
 		SELECT m.id, m.user_id, m.name, m.target_query, m.category_id, m.budget_max, m.budget_stretch,
 			m.preferred_condition, m.required_features, m.nice_to_have, m.risk_tolerance,
 			m.zip_code, m.distance, m.search_queries,
-			m.status, m.urgency, m.avoid_flags, m.travel_radius, m.category,
+			m.status, m.urgency, m.avoid_flags, m.travel_radius, m.country_code, m.region, m.city, m.postal_code,
+			m.cross_border_enabled, m.marketplace_scope, m.category,
 			m.active, m.created_at, m.updated_at,
 			COUNT(l.item_id) AS match_count,
 			COALESCE(MAX(l.last_seen), '') AS last_match_at
@@ -661,9 +805,20 @@ func (s *SQLiteStore) CreateUser(email, hash, name string) (string, error) {
 	return id, nil
 }
 
+func (s *SQLiteStore) UpdateUserProfile(user models.User) error {
+	_, err := s.db.Exec(`
+		UPDATE users
+		SET name = ?, country_code = ?, region = ?, city = ?, postal_code = ?, preferred_radius_km = ?, cross_border_enabled = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, strings.TrimSpace(user.Name), strings.ToUpper(strings.TrimSpace(user.CountryCode)), strings.TrimSpace(user.Region),
+		strings.TrimSpace(user.City), strings.TrimSpace(user.PostalCode), user.PreferredRadiusKm, boolToInt(user.CrossBorderEnabled), user.ID)
+	return err
+}
+
 func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE email = ?
 	`, strings.ToLower(strings.TrimSpace(email)))
 	return scanUser(row)
@@ -671,10 +826,67 @@ func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *SQLiteStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE id = ?
 	`, id)
 	return scanUser(row)
+}
+
+func (s *SQLiteStore) GetUserByAuthIdentity(provider, subject string) (*models.User, error) {
+	row := s.db.QueryRow(`
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
+		       u.postal_code, u.preferred_radius_km, u.cross_border_enabled, u.created_at, u.updated_at
+		FROM users u
+		JOIN user_auth_identities i ON i.user_id = u.id
+		WHERE i.provider = ? AND i.provider_subject = ?
+	`, strings.ToLower(strings.TrimSpace(provider)), strings.TrimSpace(subject))
+	return scanUser(row)
+}
+
+func (s *SQLiteStore) UpsertUserAuthIdentity(identity models.AuthIdentity) error {
+	_, err := s.db.Exec(`
+		INSERT INTO user_auth_identities (user_id, provider, provider_subject, email, email_verified)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(provider, provider_subject) DO UPDATE SET
+			user_id = excluded.user_id,
+			email = excluded.email,
+			email_verified = excluded.email_verified,
+			updated_at = CURRENT_TIMESTAMP
+	`, identity.UserID, strings.ToLower(strings.TrimSpace(identity.Provider)), strings.TrimSpace(identity.ProviderSubject),
+		strings.ToLower(strings.TrimSpace(identity.Email)), boolToInt(identity.EmailVerified))
+	return err
+}
+
+func (s *SQLiteStore) ListUserAuthMethods(userID string) ([]string, error) {
+	user, err := s.GetUserByID(userID)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	methods := []string{}
+	if strings.HasPrefix(strings.TrimSpace(user.PasswordHash), "$2") {
+		methods = append(methods, "email_password")
+	}
+	rows, err := s.db.Query(`SELECT provider FROM user_auth_identities WHERE user_id = ? ORDER BY provider`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for _, method := range methods {
+		seen[method] = true
+	}
+	for rows.Next() {
+		var provider string
+		if err := rows.Scan(&provider); err != nil {
+			return nil, err
+		}
+		if !seen[provider] {
+			seen[provider] = true
+			methods = append(methods, provider)
+		}
+	}
+	return methods, rows.Err()
 }
 
 func (s *SQLiteStore) UpdateUserTier(userID, tier string) error {
@@ -809,9 +1021,10 @@ func (s *SQLiteStore) GetUserAIUsageStats(userID string, days int) (models.AIUsa
 
 func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 		       condition_json, offer_percentage, auto_message, message_template, attributes_json,
-		       enabled, check_interval_seconds
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
 		FROM search_configs
 		WHERE user_id = ?
 		ORDER BY updated_at DESC, id DESC
@@ -823,22 +1036,10 @@ func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, erro
 
 	var specs []models.SearchSpec
 	for rows.Next() {
-		var spec models.SearchSpec
-		var conditionJSON, attributesJSON string
-		var autoMessage, enabled int
-		var checkIntervalSeconds int64
-		if err := rows.Scan(
-			&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
-			&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &autoMessage,
-			&spec.MessageTemplate, &attributesJSON, &enabled, &checkIntervalSeconds,
-		); err != nil {
+		spec, err := scanSearchSpec(rows)
+		if err != nil {
 			return nil, err
 		}
-		spec.AutoMessage = autoMessage == 1
-		spec.Enabled = enabled == 1
-		spec.CheckInterval = time.Duration(checkIntervalSeconds) * time.Second
-		_ = json.Unmarshal([]byte(conditionJSON), &spec.Condition)
-		_ = json.Unmarshal([]byte(attributesJSON), &spec.Attributes)
 		specs = append(specs, spec)
 	}
 	return specs, rows.Err()
@@ -846,15 +1047,22 @@ func (s *SQLiteStore) GetSearchConfigs(userID string) ([]models.SearchSpec, erro
 
 func (s *SQLiteStore) CountSearchConfigs(userID string) (int, error) {
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM search_configs WHERE user_id = ?`, userID).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM search_configs WHERE user_id = ? AND enabled = 1`, userID).Scan(&count)
+	return count, err
+}
+
+func (s *SQLiteStore) CountActiveMissions(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shopping_profiles WHERE user_id = ? AND status = 'active'`, userID).Scan(&count)
 	return count, err
 }
 
 func (s *SQLiteStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 		       condition_json, offer_percentage, auto_message, message_template, attributes_json,
-		       enabled, check_interval_seconds
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
 		FROM search_configs
 		WHERE enabled = 1
 		ORDER BY user_id, updated_at DESC, id DESC
@@ -1009,13 +1217,18 @@ func (s *SQLiteStore) CreateSearchConfig(spec models.SearchSpec) (int64, error) 
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	result, err := s.db.Exec(`
 		INSERT INTO search_configs (
-			user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+			user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 			condition_json, offer_percentage, auto_message, message_template, attributes_json,
-			enabled, check_interval_seconds
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+			enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+			last_result_count, consecutive_empty_runs, consecutive_failures
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, marketplace.NormalizeMarketplaceID(spec.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(spec.CountryCode)), strings.TrimSpace(spec.City), strings.TrimSpace(spec.PostalCode), spec.RadiusKm,
+		spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, boolToInt(spec.AutoMessage), spec.MessageTemplate, string(attributesJSON),
-		boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second))
+		boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second), spec.PriorityClass,
+		sqliteTimeOrNil(spec.NextRunAt), sqliteTimeOrNil(spec.LastRunAt), sqliteTimeOrNil(spec.LastSignalAt), sqliteTimeOrNil(spec.LastErrorAt),
+		spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures)
 	if err != nil {
 		return 0, err
 	}
@@ -1027,13 +1240,31 @@ func (s *SQLiteStore) UpdateSearchConfig(spec models.SearchSpec) error {
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	_, err := s.db.Exec(`
 		UPDATE search_configs
-		SET profile_id = ?, name = ?, query = ?, marketplace_id = ?, category_id = ?, max_price = ?, min_price = ?,
+		SET profile_id = ?, name = ?, query = ?, marketplace_id = ?, country_code = ?, city = ?, postal_code = ?, radius_km = ?,
+		    category_id = ?, max_price = ?, min_price = ?,
 		    condition_json = ?, offer_percentage = ?, auto_message = ?, message_template = ?,
-		    attributes_json = ?, enabled = ?, check_interval_seconds = ?, updated_at = CURRENT_TIMESTAMP
+		    attributes_json = ?, enabled = ?, check_interval_seconds = ?, priority_class = ?, next_run_at = ?, last_run_at = ?,
+		    last_signal_at = ?, last_error_at = ?, last_result_count = ?, consecutive_empty_runs = ?, consecutive_failures = ?,
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND user_id = ?
-	`, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+	`, spec.ProfileID, spec.Name, spec.Query, marketplace.NormalizeMarketplaceID(spec.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(spec.CountryCode)), strings.TrimSpace(spec.City), strings.TrimSpace(spec.PostalCode), spec.RadiusKm,
+		spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, boolToInt(spec.AutoMessage), spec.MessageTemplate,
-		string(attributesJSON), boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second), spec.ID, spec.UserID)
+		string(attributesJSON), boolToInt(spec.Enabled), int64(spec.CheckInterval/time.Second), spec.PriorityClass,
+		sqliteTimeOrNil(spec.NextRunAt), sqliteTimeOrNil(spec.LastRunAt), sqliteTimeOrNil(spec.LastSignalAt), sqliteTimeOrNil(spec.LastErrorAt),
+		spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures, spec.ID, spec.UserID)
+	return err
+}
+
+func (s *SQLiteStore) UpdateSearchRuntime(spec models.SearchSpec) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET priority_class = ?, next_run_at = ?, last_run_at = ?, last_signal_at = ?, last_error_at = ?,
+		    last_result_count = ?, consecutive_empty_runs = ?, consecutive_failures = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, spec.PriorityClass, sqliteTimeOrNil(spec.NextRunAt), sqliteTimeOrNil(spec.LastRunAt), sqliteTimeOrNil(spec.LastSignalAt),
+		sqliteTimeOrNil(spec.LastErrorAt), spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures, spec.ID)
 	return err
 }
 
@@ -1117,6 +1348,83 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 func (s *SQLiteStore) TouchListing(userID, itemID string) error {
 	_, err := s.db.Exec(`UPDATE listings SET last_seen = CURRENT_TIMESTAMP WHERE item_id = ?`, scopedItemID(userID, itemID))
 	return err
+}
+
+func (s *SQLiteStore) RecordSearchRun(entry models.SearchRunLog) error {
+	_, err := s.db.Exec(`
+		INSERT INTO search_run_log (
+			search_config_id, user_id, mission_id, plan, marketplace_id, country_code,
+			started_at, finished_at, queue_wait_ms, priority, status, results_found, new_listings, deal_hits,
+			throttled, error_code, searches_avoided
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, entry.SearchConfigID, entry.UserID, entry.MissionID, entry.Plan, marketplace.NormalizeMarketplaceID(entry.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(entry.CountryCode)), sqliteTimeOrZero(entry.StartedAt), sqliteTimeOrZero(entry.FinishedAt),
+		entry.QueueWaitMs, entry.Priority, entry.Status, entry.ResultsFound, entry.NewListings, entry.DealHits,
+		boolToInt(entry.Throttled), entry.ErrorCode, entry.SearchesAvoided)
+	return err
+}
+
+func (s *SQLiteStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error) {
+	stats := models.SearchOpsStats{
+		ByPlan:        map[string]int{},
+		ByCountry:     map[string]int{},
+		ByMarketplace: map[string]int{},
+	}
+	var queueAvg sql.NullFloat64
+	var freshness sql.NullFloat64
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
+		       COALESCE(SUM(CASE WHEN throttled = 1 THEN 1 ELSE 0 END), 0), COALESCE(SUM(searches_avoided), 0),
+		       AVG(queue_wait_ms),
+		       AVG(CASE WHEN sc.last_signal_at IS NULL THEN NULL ELSE (julianday('now') - julianday(sc.last_signal_at)) * 24 * 60 END)
+		FROM search_run_log
+		LEFT JOIN search_configs sc ON sc.id = search_run_log.search_config_id
+		WHERE started_at >= datetime('now', '-' || ? || ' days')
+	`, days).Scan(&stats.TotalRuns, &stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
+		&stats.TotalThrottled, &stats.SearchesAvoidedByScoping, &queueAvg, &freshness); err != nil {
+		return stats, err
+	}
+	if queueAvg.Valid {
+		stats.AverageQueueWaitMs = int(queueAvg.Float64)
+	}
+	if freshness.Valid {
+		stats.AverageMissionFreshnessMins = int(freshness.Float64)
+	}
+	if err := s.fillSQLiteSearchOpsBreakdown(days, "plan", &stats.ByPlan); err != nil {
+		return stats, err
+	}
+	if err := s.fillSQLiteSearchOpsBreakdown(days, "country_code", &stats.ByCountry); err != nil {
+		return stats, err
+	}
+	if err := s.fillSQLiteSearchOpsBreakdown(days, "marketplace_id", &stats.ByMarketplace); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (s *SQLiteStore) fillSQLiteSearchOpsBreakdown(days int, column string, out *map[string]int) error {
+	rows, err := s.db.Query(`
+		SELECT `+column+`, COUNT(*)
+		FROM search_run_log
+		WHERE started_at >= datetime('now', '-' || ? || ' days')
+		GROUP BY `+column+`
+	`, days)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var count int
+		if err := rows.Scan(&key, &count); err != nil {
+			return err
+		}
+		if strings.TrimSpace(key) == "" {
+			key = "unknown"
+		}
+		(*out)[key] = count
+	}
+	return rows.Err()
 }
 
 // RecordPrice saves a price data point for market average calculation.
@@ -1247,8 +1555,8 @@ func scanSQLiteMissionWithStats(scanner interface{ Scan(dest ...any) error }) (m
 
 func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, withStats bool) (models.Mission, error) {
 	var mission models.Mission
-	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON string
-	var active int
+	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON, marketplaceScopeJSON string
+	var active, crossBorder int
 	var createdAt, updatedAt string
 
 	if withStats {
@@ -1257,7 +1565,8 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
 			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
 			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
-			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
+			&crossBorder, &marketplaceScopeJSON, &mission.Category,
 			&active, &createdAt, &updatedAt, &mission.MatchCount, &lastMatchAt,
 		)
 		if err != nil {
@@ -1271,7 +1580,8 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
 			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
 			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
-			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
+			&crossBorder, &marketplaceScopeJSON, &mission.Category,
 			&active, &createdAt, &updatedAt,
 		)
 		if err != nil {
@@ -1285,8 +1595,12 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 	_ = json.Unmarshal([]byte(niceJSON), &mission.NiceToHave)
 	_ = json.Unmarshal([]byte(queriesJSON), &mission.SearchQueries)
 	_ = json.Unmarshal([]byte(avoidFlagsJSON), &mission.AvoidFlags)
+	_ = json.Unmarshal([]byte(marketplaceScopeJSON), &mission.MarketplaceScope)
 	mission.CreatedAt, _ = parseSQLiteTime(createdAt)
 	mission.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+	mission.CountryCode = strings.ToUpper(strings.TrimSpace(mission.CountryCode))
+	mission.CrossBorderEnabled = crossBorder == 1
+	mission.MarketplaceScope = normalizeMarketplaceScope(mission.MarketplaceScope)
 	if mission.TravelRadius == 0 && mission.Distance > 0 {
 		mission.TravelRadius = mission.Distance / 1000
 	}
@@ -1324,14 +1638,18 @@ func parseSQLiteTime(value string) (time.Time, error) {
 
 func scanUser(row *sql.Row) (*models.User, error) {
 	var user models.User
+	var crossBorder int
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer, &createdAt, &updatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer,
+		&user.CountryCode, &user.Region, &user.City, &user.PostalCode, &user.PreferredRadiusKm, &crossBorder, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	user.CountryCode = strings.ToUpper(strings.TrimSpace(user.CountryCode))
+	user.CrossBorderEnabled = crossBorder == 1
 	user.CreatedAt, _ = parseSQLiteTime(createdAt)
 	user.UpdatedAt, _ = parseSQLiteTime(updatedAt)
 	return &user, nil
@@ -1343,21 +1661,68 @@ func scanSearchSpec(scanner interface {
 	var spec models.SearchSpec
 	var conditionJSON, attributesJSON string
 	var autoMessage, enabled int
+	var nextRunAt, lastRunAt, lastSignalAt, lastErrorAt sql.NullString
 	var checkIntervalSeconds int64
 	err := scanner.Scan(
-		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
+		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CountryCode, &spec.City, &spec.PostalCode, &spec.RadiusKm, &spec.CategoryID,
 		&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &autoMessage,
-		&spec.MessageTemplate, &attributesJSON, &enabled, &checkIntervalSeconds,
+		&spec.MessageTemplate, &attributesJSON, &enabled, &checkIntervalSeconds, &spec.PriorityClass,
+		&nextRunAt, &lastRunAt, &lastSignalAt, &lastErrorAt, &spec.LastResultCount, &spec.ConsecutiveEmptyRuns, &spec.ConsecutiveFailures,
 	)
 	if err != nil {
 		return spec, err
 	}
 	spec.AutoMessage = autoMessage == 1
 	spec.Enabled = enabled == 1
+	spec.MarketplaceID = marketplace.NormalizeMarketplaceID(spec.MarketplaceID)
+	spec.CountryCode = strings.ToUpper(strings.TrimSpace(spec.CountryCode))
 	spec.CheckInterval = time.Duration(checkIntervalSeconds) * time.Second
 	_ = json.Unmarshal([]byte(conditionJSON), &spec.Condition)
 	_ = json.Unmarshal([]byte(attributesJSON), &spec.Attributes)
+	spec.NextRunAt = parseNullSQLiteTime(nextRunAt)
+	spec.LastRunAt = parseNullSQLiteTime(lastRunAt)
+	spec.LastSignalAt = parseNullSQLiteTime(lastSignalAt)
+	spec.LastErrorAt = parseNullSQLiteTime(lastErrorAt)
 	return spec, nil
+}
+
+func normalizeMarketplaceScope(scope []string) []string {
+	if len(scope) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(scope))
+	seen := map[string]bool{}
+	for _, value := range scope {
+		value = marketplace.NormalizeMarketplaceID(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func sqliteTimeOrNil(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func sqliteTimeOrZero(value time.Time) string {
+	if value.IsZero() {
+		return time.Now().UTC().Format(time.RFC3339)
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func parseNullSQLiteTime(value sql.NullString) time.Time {
+	if !value.Valid || strings.TrimSpace(value.String) == "" {
+		return time.Time{}
+	}
+	parsed, _ := parseSQLiteTime(value.String)
+	return parsed
 }
 
 func randomID() (string, error) {

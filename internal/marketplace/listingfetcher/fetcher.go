@@ -238,8 +238,12 @@ func detectMarketplace(rawURL string) string {
 	switch {
 	case strings.Contains(lower, "marktplaats."):
 		return "marktplaats"
+	case strings.Contains(lower, "vinted.dk"):
+		return "vinted_dk"
+	case strings.Contains(lower, "vinted.nl"):
+		return "vinted_nl"
 	case strings.Contains(lower, "vinted."):
-		return "vinted"
+		return "vinted_nl"
 	case strings.Contains(lower, "olx.bg"):
 		return "olxbg"
 	default:

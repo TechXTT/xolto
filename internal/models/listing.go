@@ -120,6 +120,12 @@ type Mission struct {
 	Urgency            string
 	AvoidFlags         []string
 	TravelRadius       int
+	CountryCode        string
+	Region             string
+	City               string
+	PostalCode         string
+	CrossBorderEnabled bool
+	MarketplaceScope   []string
 	Category           string
 	MatchCount         int
 	LastMatchAt        time.Time
@@ -188,4 +194,25 @@ type ActionDraft struct {
 	Content    string
 	Status     string
 	CreatedAt  time.Time
+}
+
+type SearchRunLog struct {
+	ID              int64
+	SearchConfigID  int64
+	UserID          string
+	MissionID       int64
+	Plan            string
+	MarketplaceID   string
+	CountryCode     string
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	QueueWaitMs     int
+	Priority        int
+	Status          string
+	ResultsFound    int
+	NewListings     int
+	DealHits        int
+	Throttled       bool
+	ErrorCode       string
+	SearchesAvoided int
 }

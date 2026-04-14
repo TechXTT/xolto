@@ -17,14 +17,13 @@ import (
 )
 
 const (
-	vintedHomeURL = "https://www.vinted.nl/"
-	vintedBaseURL = "https://www.vinted.nl/api/v2/catalog/items"
-	sessionTTL    = 10 * time.Minute
+	sessionTTL = 10 * time.Minute
 )
 
 type client struct {
 	http       *http.Client
 	jar        *cookiejar.Jar
+	cfg        Config
 	mu         sync.Mutex
 	sessionAt  time.Time
 	hasSession bool
@@ -34,9 +33,10 @@ type searchResponse struct {
 	Items []apiItem `json:"items"`
 }
 
-func newClient() *client {
+func newClient(cfg Config) *client {
 	jar, _ := cookiejar.New(nil)
 	return &client{
+		cfg: cfg,
 		jar: jar,
 		http: &http.Client{
 			Timeout: 20 * time.Second,
@@ -58,11 +58,11 @@ func (c *client) ensureSession(ctx context.Context) error {
 	// /auth/token_refresh, but that endpoint requires an existing refresh token
 	// and returns 401 for anonymous sessions, which clobbered the working token
 	// we'd just received from the homepage.
-	homeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, vintedHomeURL, nil)
+	homeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.HomeURL, nil)
 	if err != nil {
 		return err
 	}
-	setBrowserHeaders(homeReq)
+	c.setBrowserHeaders(homeReq)
 
 	homeResp, err := c.http.Do(homeReq)
 	if err != nil {
@@ -114,11 +114,11 @@ func (c *client) doSearch(ctx context.Context, spec models.SearchSpec) ([]models
 		params.Set("price_to", max)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vintedBaseURL+"?"+params.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.BaseURL+"?"+params.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
-	setBrowserHeaders(req)
+	c.setBrowserHeaders(req)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
@@ -138,7 +138,7 @@ func (c *client) doSearch(ctx context.Context, spec models.SearchSpec) ([]models
 
 	listings := make([]models.Listing, 0, len(payload.Items))
 	for _, item := range payload.Items {
-		listing := mapListing(item)
+		listing := mapListing(item, c.cfg.ID)
 		if !matchesPrice(listing.Price, spec.MinPrice, spec.MaxPrice) {
 			continue
 		}
@@ -150,10 +150,10 @@ func (c *client) doSearch(ctx context.Context, spec models.SearchSpec) ([]models
 	return listings, nil
 }
 
-func setBrowserHeaders(req *http.Request) {
+func (c *client) setBrowserHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "nl-NL,nl;q=0.9,en;q=0.8")
-	req.Header.Set("Referer", "https://www.vinted.nl/")
+	req.Header.Set("Accept-Language", c.cfg.AcceptLanguage)
+	req.Header.Set("Referer", c.cfg.Referer)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")

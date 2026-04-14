@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/models"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -82,6 +83,12 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			urgency TEXT NOT NULL DEFAULT 'flexible',
 			avoid_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
 			travel_radius INTEGER NOT NULL DEFAULT 0,
+			country_code TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+			marketplace_scope JSONB NOT NULL DEFAULT '[]'::jsonb,
 			category TEXT NOT NULL DEFAULT 'other',
 			active BOOLEAN NOT NULL DEFAULT TRUE,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -147,6 +154,12 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			name TEXT NOT NULL DEFAULT '',
 			tier TEXT NOT NULL DEFAULT 'free',
 			stripe_customer_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			preferred_radius_km INTEGER NOT NULL DEFAULT 0,
+			cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
@@ -158,6 +171,10 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			name TEXT NOT NULL DEFAULT '',
 			query TEXT NOT NULL DEFAULT '',
 			marketplace_id TEXT NOT NULL DEFAULT 'marktplaats',
+			country_code TEXT NOT NULL DEFAULT '',
+			city TEXT NOT NULL DEFAULT '',
+			postal_code TEXT NOT NULL DEFAULT '',
+			radius_km INTEGER NOT NULL DEFAULT 0,
 			category_id INTEGER NOT NULL DEFAULT 0,
 			max_price INTEGER NOT NULL DEFAULT 0,
 			min_price INTEGER NOT NULL DEFAULT 0,
@@ -168,12 +185,21 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			attributes_json JSONB NOT NULL DEFAULT '{}'::jsonb,
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			check_interval_seconds BIGINT NOT NULL DEFAULT 300,
+			priority_class INTEGER NOT NULL DEFAULT 0,
+			next_run_at TIMESTAMPTZ NULL,
+			last_run_at TIMESTAMPTZ NULL,
+			last_signal_at TIMESTAMPTZ NULL,
+			last_error_at TIMESTAMPTZ NULL,
+			last_result_count INTEGER NOT NULL DEFAULT 0,
+			consecutive_empty_runs INTEGER NOT NULL DEFAULT 0,
+			consecutive_failures INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_search_configs_user ON search_configs(user_id, enabled, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_search_configs_due ON search_configs(enabled, next_run_at, user_id);
 		CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen DESC);
 
 		CREATE TABLE IF NOT EXISTS stripe_events (
@@ -181,6 +207,46 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			event_id TEXT NOT NULL UNIQUE,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+
+		CREATE TABLE IF NOT EXISTS user_auth_identities (
+			id BIGSERIAL PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			provider_subject TEXT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(provider, provider_subject),
+			UNIQUE(user_id, provider)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_user_auth_identities_user ON user_auth_identities(user_id, provider);
+
+		CREATE TABLE IF NOT EXISTS search_run_log (
+			id BIGSERIAL PRIMARY KEY,
+			search_config_id BIGINT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			mission_id BIGINT NOT NULL DEFAULT 0,
+			plan TEXT NOT NULL DEFAULT '',
+			marketplace_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			queue_wait_ms INTEGER NOT NULL DEFAULT 0,
+			priority INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			results_found INTEGER NOT NULL DEFAULT 0,
+			new_listings INTEGER NOT NULL DEFAULT 0,
+			deal_hits INTEGER NOT NULL DEFAULT 0,
+			throttled BOOLEAN NOT NULL DEFAULT FALSE,
+			error_code TEXT NOT NULL DEFAULT '',
+			searches_avoided INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -204,9 +270,34 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS urgency TEXT NOT NULL DEFAULT 'flexible'`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS avoid_flags JSONB NOT NULL DEFAULT '[]'::jsonb`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS travel_radius INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS marketplace_scope JSONB NOT NULL DEFAULT '[]'::jsonb`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'other'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_radius_km INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS postal_code TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS radius_km INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS priority_class INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ NULL`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS last_run_at TIMESTAMPTZ NULL`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS last_signal_at TIMESTAMPTZ NULL`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMPTZ NULL`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS last_result_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS consecutive_empty_runs INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_configs_due ON search_configs(enabled, next_run_at, user_id)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen DESC)`)
 
 	// Admin & AI usage tracking.
@@ -228,6 +319,46 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at DESC)`)
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS user_auth_identities (
+			id BIGSERIAL PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			provider_subject TEXT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(provider, provider_subject),
+			UNIQUE(user_id, provider)
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_user_auth_identities_user ON user_auth_identities(user_id, provider)`)
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS search_run_log (
+			id BIGSERIAL PRIMARY KEY,
+			search_config_id BIGINT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			mission_id BIGINT NOT NULL DEFAULT 0,
+			plan TEXT NOT NULL DEFAULT '',
+			marketplace_id TEXT NOT NULL DEFAULT '',
+			country_code TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			queue_wait_ms INTEGER NOT NULL DEFAULT 0,
+			priority INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			results_found INTEGER NOT NULL DEFAULT 0,
+			new_listings INTEGER NOT NULL DEFAULT 0,
+			deal_hits INTEGER NOT NULL DEFAULT 0,
+			throttled BOOLEAN NOT NULL DEFAULT FALSE,
+			error_code TEXT NOT NULL DEFAULT '',
+			searches_avoided INTEGER NOT NULL DEFAULT 0
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_started ON search_run_log(started_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_marketplace ON search_run_log(marketplace_id, started_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_search_run_log_country ON search_run_log(country_code, started_at DESC)`)
 
 	return nil
 }
@@ -242,6 +373,7 @@ func (s *PostgresStore) UpsertMission(mission models.Mission) (int64, error) {
 	niceJSON, _ := json.Marshal(mission.NiceToHave)
 	queriesJSON, _ := json.Marshal(mission.SearchQueries)
 	avoidFlagsJSON, _ := json.Marshal(mission.AvoidFlags)
+	marketplaceScopeJSON, _ := json.Marshal(normalizeMarketplaceScope(mission.MarketplaceScope))
 
 	if strings.TrimSpace(mission.Status) == "" {
 		mission.Status = "active"
@@ -262,15 +394,18 @@ func (s *PostgresStore) UpsertMission(mission models.Mission) (int64, error) {
 			SET name = $1, target_query = $2, category_id = $3, budget_max = $4, budget_stretch = $5,
 			    preferred_condition = $6::jsonb, required_features = $7::jsonb, nice_to_have = $8::jsonb,
 			    risk_tolerance = $9, zip_code = $10, distance = $11, search_queries = $12::jsonb,
-			    status = $13, urgency = $14, avoid_flags = $15::jsonb, travel_radius = $16, category = $17,
-			    active = $18, updated_at = NOW()
-			WHERE id = $19
+			    status = $13, urgency = $14, avoid_flags = $15::jsonb, travel_radius = $16, country_code = $17,
+			    region = $18, city = $19, postal_code = $20, cross_border_enabled = $21, marketplace_scope = $22::jsonb,
+			    category = $23, active = $24, updated_at = NOW()
+			WHERE id = $25
 		`,
 			mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
 			string(preferredJSON), string(requiredJSON), string(niceJSON), mission.RiskTolerance,
 			mission.ZipCode, mission.Distance, string(queriesJSON),
-			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
-			mission.Active, mission.ID,
+			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
+			strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City),
+			strings.TrimSpace(mission.PostalCode), mission.CrossBorderEnabled, string(marketplaceScopeJSON),
+			mission.Category, mission.Active, mission.ID,
 		)
 		return mission.ID, err
 	}
@@ -281,15 +416,18 @@ func (s *PostgresStore) UpsertMission(mission models.Mission) (int64, error) {
 			user_id, name, target_query, category_id, budget_max, budget_stretch,
 			preferred_condition, required_features, nice_to_have, risk_tolerance,
 			zip_code, distance, search_queries,
-			status, urgency, avoid_flags, travel_radius, category,
+			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
+			cross_border_enabled, marketplace_scope, category,
 			active
-		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, $17, $18, $19)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, $22::jsonb, $23)
 		RETURNING id
 	`,
 		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
 		string(preferredJSON), string(requiredJSON), string(niceJSON), mission.RiskTolerance,
 		mission.ZipCode, mission.Distance, string(queriesJSON),
-		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius, mission.Category,
+		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
+		strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City),
+		strings.TrimSpace(mission.PostalCode), mission.CrossBorderEnabled, string(marketplaceScopeJSON), mission.Category,
 		mission.Active,
 	).Scan(&id)
 	return id, err
@@ -300,7 +438,8 @@ func (s *PostgresStore) GetActiveMission(userID string) (*models.Mission, error)
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 		       preferred_condition::text, required_features::text, nice_to_have::text, risk_tolerance,
 		       zip_code, distance, search_queries::text,
-		       status, urgency, avoid_flags::text, travel_radius, category,
+		       status, urgency, avoid_flags::text, travel_radius, country_code, region, city, postal_code,
+		       cross_border_enabled, marketplace_scope::text, category,
 		       active, created_at, updated_at
 		FROM shopping_profiles
 		WHERE user_id = $1 AND active = TRUE AND status = 'active'
@@ -322,7 +461,8 @@ func (s *PostgresStore) GetMission(id int64) (*models.Mission, error) {
 		SELECT id, user_id, name, target_query, category_id, budget_max, budget_stretch,
 		       preferred_condition::text, required_features::text, nice_to_have::text, risk_tolerance,
 		       zip_code, distance, search_queries::text,
-		       status, urgency, avoid_flags::text, travel_radius, category,
+		       status, urgency, avoid_flags::text, travel_radius, country_code, region, city, postal_code,
+		       cross_border_enabled, marketplace_scope::text, category,
 		       active, created_at, updated_at
 		FROM shopping_profiles
 		WHERE id = $1
@@ -342,7 +482,8 @@ func (s *PostgresStore) ListMissions(userID string) ([]models.Mission, error) {
 		SELECT m.id, m.user_id, m.name, m.target_query, m.category_id, m.budget_max, m.budget_stretch,
 		       m.preferred_condition::text, m.required_features::text, m.nice_to_have::text, m.risk_tolerance,
 		       m.zip_code, m.distance, m.search_queries::text,
-		       m.status, m.urgency, m.avoid_flags::text, m.travel_radius, m.category,
+		       m.status, m.urgency, m.avoid_flags::text, m.travel_radius, m.country_code, m.region, m.city, m.postal_code,
+		       m.cross_border_enabled, m.marketplace_scope::text, m.category,
 		       m.active, m.created_at, m.updated_at,
 		       COUNT(l.item_id) AS match_count,
 		       COALESCE(MAX(l.last_seen), TO_TIMESTAMP(0)) AS last_match_at
@@ -571,9 +712,21 @@ func (s *PostgresStore) CreateUser(email, hash, name string) (string, error) {
 	return id, nil
 }
 
+func (s *PostgresStore) UpdateUserProfile(user models.User) error {
+	_, err := s.db.Exec(`
+		UPDATE users
+		SET name = $1, country_code = $2, region = $3, city = $4, postal_code = $5, preferred_radius_km = $6,
+		    cross_border_enabled = $7, updated_at = NOW()
+		WHERE id = $8
+	`, strings.TrimSpace(user.Name), strings.ToUpper(strings.TrimSpace(user.CountryCode)), strings.TrimSpace(user.Region),
+		strings.TrimSpace(user.City), strings.TrimSpace(user.PostalCode), user.PreferredRadiusKm, user.CrossBorderEnabled, user.ID)
+	return err
+}
+
 func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE email = $1
 	`, strings.ToLower(strings.TrimSpace(email)))
 	return scanPGUser(row)
@@ -581,10 +734,67 @@ func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *PostgresStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, created_at, updated_at
+		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE id = $1
 	`, id)
 	return scanPGUser(row)
+}
+
+func (s *PostgresStore) GetUserByAuthIdentity(provider, subject string) (*models.User, error) {
+	row := s.db.QueryRow(`
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
+		       u.postal_code, u.preferred_radius_km, u.cross_border_enabled, u.created_at, u.updated_at
+		FROM users u
+		JOIN user_auth_identities i ON i.user_id = u.id
+		WHERE i.provider = $1 AND i.provider_subject = $2
+	`, strings.ToLower(strings.TrimSpace(provider)), strings.TrimSpace(subject))
+	return scanPGUser(row)
+}
+
+func (s *PostgresStore) UpsertUserAuthIdentity(identity models.AuthIdentity) error {
+	_, err := s.db.Exec(`
+		INSERT INTO user_auth_identities (user_id, provider, provider_subject, email, email_verified)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT(provider, provider_subject) DO UPDATE SET
+			user_id = EXCLUDED.user_id,
+			email = EXCLUDED.email,
+			email_verified = EXCLUDED.email_verified,
+			updated_at = NOW()
+	`, identity.UserID, strings.ToLower(strings.TrimSpace(identity.Provider)), strings.TrimSpace(identity.ProviderSubject),
+		strings.ToLower(strings.TrimSpace(identity.Email)), identity.EmailVerified)
+	return err
+}
+
+func (s *PostgresStore) ListUserAuthMethods(userID string) ([]string, error) {
+	user, err := s.GetUserByID(userID)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	methods := []string{}
+	if strings.HasPrefix(strings.TrimSpace(user.PasswordHash), "$2") {
+		methods = append(methods, "email_password")
+	}
+	rows, err := s.db.Query(`SELECT provider FROM user_auth_identities WHERE user_id = $1 ORDER BY provider`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for _, value := range methods {
+		seen[value] = true
+	}
+	for rows.Next() {
+		var provider string
+		if err := rows.Scan(&provider); err != nil {
+			return nil, err
+		}
+		if !seen[provider] {
+			seen[provider] = true
+			methods = append(methods, provider)
+		}
+	}
+	return methods, rows.Err()
 }
 
 func (s *PostgresStore) UpdateUserTier(userID, tier string) error {
@@ -704,9 +914,10 @@ func (s *PostgresStore) GetUserAIUsageStats(userID string, days int) (models.AIU
 
 func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 		       condition_json::text, offer_percentage, auto_message, message_template, attributes_json::text,
-		       enabled, check_interval_seconds
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
 		FROM search_configs
 		WHERE user_id = $1
 		ORDER BY updated_at DESC, id DESC
@@ -729,9 +940,10 @@ func (s *PostgresStore) GetSearchConfigs(userID string) ([]models.SearchSpec, er
 
 func (s *PostgresStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+		SELECT id, user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 		       condition_json::text, offer_percentage, auto_message, message_template, attributes_json::text,
-		       enabled, check_interval_seconds
+		       enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+		       last_result_count, consecutive_empty_runs, consecutive_failures
 		FROM search_configs
 		WHERE enabled = TRUE
 		ORDER BY user_id, updated_at DESC, id DESC
@@ -754,7 +966,13 @@ func (s *PostgresStore) GetAllEnabledSearchConfigs() ([]models.SearchSpec, error
 
 func (s *PostgresStore) CountSearchConfigs(userID string) (int, error) {
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM search_configs WHERE user_id = $1`, userID).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM search_configs WHERE user_id = $1 AND enabled = TRUE`, userID).Scan(&count)
+	return count, err
+}
+
+func (s *PostgresStore) CountActiveMissions(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shopping_profiles WHERE user_id = $1 AND status = 'active'`, userID).Scan(&count)
 	return count, err
 }
 
@@ -764,14 +982,19 @@ func (s *PostgresStore) CreateSearchConfig(spec models.SearchSpec) (int64, error
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO search_configs (
-			user_id, profile_id, name, query, marketplace_id, category_id, max_price, min_price,
+			user_id, profile_id, name, query, marketplace_id, country_code, city, postal_code, radius_km, category_id, max_price, min_price,
 			condition_json, offer_percentage, auto_message, message_template, attributes_json,
-			enabled, check_interval_seconds
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15)
+			enabled, check_interval_seconds, priority_class, next_run_at, last_run_at, last_signal_at, last_error_at,
+			last_result_count, consecutive_empty_runs, consecutive_failures
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25)
 		RETURNING id
-	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+	`, spec.UserID, spec.ProfileID, spec.Name, spec.Query, marketplace.NormalizeMarketplaceID(spec.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(spec.CountryCode)), strings.TrimSpace(spec.City), strings.TrimSpace(spec.PostalCode), spec.RadiusKm,
+		spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, spec.AutoMessage, spec.MessageTemplate, string(attributesJSON),
-		spec.Enabled, int64(spec.CheckInterval/time.Second),
+		spec.Enabled, int64(spec.CheckInterval/time.Second), spec.PriorityClass,
+		nullTime(spec.NextRunAt), nullTime(spec.LastRunAt), nullTime(spec.LastSignalAt), nullTime(spec.LastErrorAt),
+		spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures,
 	).Scan(&id)
 	return id, err
 }
@@ -781,20 +1004,116 @@ func (s *PostgresStore) UpdateSearchConfig(spec models.SearchSpec) error {
 	attributesJSON, _ := json.Marshal(spec.Attributes)
 	_, err := s.db.Exec(`
 		UPDATE search_configs
-		SET profile_id = $1, name = $2, query = $3, marketplace_id = $4, category_id = $5, max_price = $6, min_price = $7,
-		    condition_json = $8::jsonb, offer_percentage = $9, auto_message = $10, message_template = $11,
-		    attributes_json = $12::jsonb, enabled = $13, check_interval_seconds = $14, updated_at = NOW()
-		WHERE id = $15 AND user_id = $16
-	`, spec.ProfileID, spec.Name, spec.Query, spec.MarketplaceID, spec.CategoryID, spec.MaxPrice, spec.MinPrice,
+		SET profile_id = $1, name = $2, query = $3, marketplace_id = $4, country_code = $5, city = $6, postal_code = $7,
+		    radius_km = $8, category_id = $9, max_price = $10, min_price = $11,
+		    condition_json = $12::jsonb, offer_percentage = $13, auto_message = $14, message_template = $15,
+		    attributes_json = $16::jsonb, enabled = $17, check_interval_seconds = $18, priority_class = $19, next_run_at = $20,
+		    last_run_at = $21, last_signal_at = $22, last_error_at = $23, last_result_count = $24, consecutive_empty_runs = $25,
+		    consecutive_failures = $26, updated_at = NOW()
+		WHERE id = $27 AND user_id = $28
+	`, spec.ProfileID, spec.Name, spec.Query, marketplace.NormalizeMarketplaceID(spec.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(spec.CountryCode)), strings.TrimSpace(spec.City), strings.TrimSpace(spec.PostalCode), spec.RadiusKm,
+		spec.CategoryID, spec.MaxPrice, spec.MinPrice,
 		string(conditionJSON), spec.OfferPercentage, spec.AutoMessage, spec.MessageTemplate,
-		string(attributesJSON), spec.Enabled, int64(spec.CheckInterval/time.Second), spec.ID, spec.UserID,
+		string(attributesJSON), spec.Enabled, int64(spec.CheckInterval/time.Second), spec.PriorityClass,
+		nullTime(spec.NextRunAt), nullTime(spec.LastRunAt), nullTime(spec.LastSignalAt), nullTime(spec.LastErrorAt),
+		spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures, spec.ID, spec.UserID,
 	)
+	return err
+}
+
+func (s *PostgresStore) UpdateSearchRuntime(spec models.SearchSpec) error {
+	_, err := s.db.Exec(`
+		UPDATE search_configs
+		SET priority_class = $1, next_run_at = $2, last_run_at = $3, last_signal_at = $4, last_error_at = $5,
+		    last_result_count = $6, consecutive_empty_runs = $7, consecutive_failures = $8, updated_at = NOW()
+		WHERE id = $9
+	`, spec.PriorityClass, nullTime(spec.NextRunAt), nullTime(spec.LastRunAt), nullTime(spec.LastSignalAt),
+		nullTime(spec.LastErrorAt), spec.LastResultCount, spec.ConsecutiveEmptyRuns, spec.ConsecutiveFailures, spec.ID)
 	return err
 }
 
 func (s *PostgresStore) DeleteSearchConfig(id int64, userID string) error {
 	_, err := s.db.Exec(`DELETE FROM search_configs WHERE id = $1 AND user_id = $2`, id, userID)
 	return err
+}
+
+func (s *PostgresStore) RecordSearchRun(entry models.SearchRunLog) error {
+	_, err := s.db.Exec(`
+		INSERT INTO search_run_log (
+			search_config_id, user_id, mission_id, plan, marketplace_id, country_code,
+			started_at, finished_at, queue_wait_ms, priority, status, results_found, new_listings, deal_hits,
+			throttled, error_code, searches_avoided
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+	`, entry.SearchConfigID, entry.UserID, entry.MissionID, entry.Plan, marketplace.NormalizeMarketplaceID(entry.MarketplaceID),
+		strings.ToUpper(strings.TrimSpace(entry.CountryCode)), entry.StartedAt, entry.FinishedAt, entry.QueueWaitMs,
+		entry.Priority, entry.Status, entry.ResultsFound, entry.NewListings, entry.DealHits, entry.Throttled,
+		entry.ErrorCode, entry.SearchesAvoided)
+	return err
+}
+
+func (s *PostgresStore) GetSearchOpsStats(days int) (models.SearchOpsStats, error) {
+	stats := models.SearchOpsStats{
+		ByPlan:        map[string]int{},
+		ByCountry:     map[string]int{},
+		ByMarketplace: map[string]int{},
+	}
+	var queueAvg sql.NullFloat64
+	var freshness sql.NullFloat64
+	err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(results_found), 0), COALESCE(SUM(new_listings), 0), COALESCE(SUM(deal_hits), 0),
+		       COALESCE(SUM(CASE WHEN throttled THEN 1 ELSE 0 END), 0), COALESCE(SUM(searches_avoided), 0),
+		       AVG(queue_wait_ms::double precision),
+		       AVG(EXTRACT(EPOCH FROM (NOW() - sc.last_signal_at)) / 60.0)
+		FROM search_run_log l
+		LEFT JOIN search_configs sc ON sc.id = l.search_config_id
+		WHERE l.started_at >= NOW() - MAKE_INTERVAL(days => $1)
+	`, days).Scan(&stats.TotalRuns, &stats.TotalResultsFound, &stats.TotalNewListings, &stats.TotalDealHits,
+		&stats.TotalThrottled, &stats.SearchesAvoidedByScoping, &queueAvg, &freshness)
+	if err != nil {
+		return stats, err
+	}
+	if queueAvg.Valid {
+		stats.AverageQueueWaitMs = int(queueAvg.Float64)
+	}
+	if freshness.Valid {
+		stats.AverageMissionFreshnessMins = int(freshness.Float64)
+	}
+	if err := s.fillPGSearchOpsBreakdown(days, "plan", &stats.ByPlan); err != nil {
+		return stats, err
+	}
+	if err := s.fillPGSearchOpsBreakdown(days, "country_code", &stats.ByCountry); err != nil {
+		return stats, err
+	}
+	if err := s.fillPGSearchOpsBreakdown(days, "marketplace_id", &stats.ByMarketplace); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (s *PostgresStore) fillPGSearchOpsBreakdown(days int, column string, out *map[string]int) error {
+	query := `
+		SELECT ` + column + `, COUNT(*)
+		FROM search_run_log
+		WHERE started_at >= NOW() - MAKE_INTERVAL(days => $1)
+		GROUP BY ` + column
+	rows, err := s.db.Query(query, days)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var count int
+		if err := rows.Scan(&key, &count); err != nil {
+			return err
+		}
+		if strings.TrimSpace(key) == "" {
+			key = "unknown"
+		}
+		(*out)[key] = count
+	}
+	return rows.Err()
 }
 
 func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error) {
@@ -1097,13 +1416,14 @@ func scanPGMissionWithStats(scanner interface{ Scan(dest ...any) error }) (model
 
 func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withStats bool) (models.Mission, error) {
 	var mission models.Mission
-	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON string
+	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON, marketplaceScopeJSON string
 	if withStats {
 		err := scanner.Scan(
 			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
 			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
 			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
-			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
+			&mission.CrossBorderEnabled, &marketplaceScopeJSON, &mission.Category,
 			&mission.Active, &mission.CreatedAt, &mission.UpdatedAt, &mission.MatchCount, &mission.LastMatchAt,
 		)
 		if err != nil {
@@ -1114,7 +1434,8 @@ func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withSta
 			&mission.ID, &mission.UserID, &mission.Name, &mission.TargetQuery, &mission.CategoryID,
 			&mission.BudgetMax, &mission.BudgetStretch, &preferredJSON, &requiredJSON, &niceJSON,
 			&mission.RiskTolerance, &mission.ZipCode, &mission.Distance, &queriesJSON,
-			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.Category,
+			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
+			&mission.CrossBorderEnabled, &marketplaceScopeJSON, &mission.Category,
 			&mission.Active, &mission.CreatedAt, &mission.UpdatedAt,
 		)
 		if err != nil {
@@ -1126,6 +1447,9 @@ func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withSta
 	_ = json.Unmarshal([]byte(niceJSON), &mission.NiceToHave)
 	_ = json.Unmarshal([]byte(queriesJSON), &mission.SearchQueries)
 	_ = json.Unmarshal([]byte(avoidFlagsJSON), &mission.AvoidFlags)
+	_ = json.Unmarshal([]byte(marketplaceScopeJSON), &mission.MarketplaceScope)
+	mission.CountryCode = strings.ToUpper(strings.TrimSpace(mission.CountryCode))
+	mission.MarketplaceScope = normalizeMarketplaceScope(mission.MarketplaceScope)
 	if mission.TravelRadius == 0 && mission.Distance > 0 {
 		mission.TravelRadius = mission.Distance / 1000
 	}
@@ -1147,13 +1471,15 @@ func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withSta
 
 func scanPGUser(row *sql.Row) (*models.User, error) {
 	var user models.User
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer,
+		&user.CountryCode, &user.Region, &user.City, &user.PostalCode, &user.PreferredRadiusKm, &user.CrossBorderEnabled, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	user.CountryCode = strings.ToUpper(strings.TrimSpace(user.CountryCode))
 	return &user, nil
 }
 
@@ -1161,18 +1487,41 @@ func scanPGSearchSpec(scanner interface{ Scan(dest ...any) error }) (models.Sear
 	var spec models.SearchSpec
 	var conditionJSON, attributesJSON string
 	var checkIntervalSeconds int64
+	var nextRunAt, lastRunAt, lastSignalAt, lastErrorAt sql.NullTime
 	err := scanner.Scan(
-		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CategoryID,
+		&spec.ID, &spec.UserID, &spec.ProfileID, &spec.Name, &spec.Query, &spec.MarketplaceID, &spec.CountryCode, &spec.City, &spec.PostalCode, &spec.RadiusKm, &spec.CategoryID,
 		&spec.MaxPrice, &spec.MinPrice, &conditionJSON, &spec.OfferPercentage, &spec.AutoMessage,
-		&spec.MessageTemplate, &attributesJSON, &spec.Enabled, &checkIntervalSeconds,
+		&spec.MessageTemplate, &attributesJSON, &spec.Enabled, &checkIntervalSeconds, &spec.PriorityClass,
+		&nextRunAt, &lastRunAt, &lastSignalAt, &lastErrorAt, &spec.LastResultCount, &spec.ConsecutiveEmptyRuns, &spec.ConsecutiveFailures,
 	)
 	if err != nil {
 		return spec, err
 	}
+	spec.MarketplaceID = marketplace.NormalizeMarketplaceID(spec.MarketplaceID)
+	spec.CountryCode = strings.ToUpper(strings.TrimSpace(spec.CountryCode))
 	spec.CheckInterval = time.Duration(checkIntervalSeconds) * time.Second
 	_ = json.Unmarshal([]byte(conditionJSON), &spec.Condition)
 	_ = json.Unmarshal([]byte(attributesJSON), &spec.Attributes)
+	if nextRunAt.Valid {
+		spec.NextRunAt = nextRunAt.Time
+	}
+	if lastRunAt.Valid {
+		spec.LastRunAt = lastRunAt.Time
+	}
+	if lastSignalAt.Valid {
+		spec.LastSignalAt = lastSignalAt.Time
+	}
+	if lastErrorAt.Valid {
+		spec.LastErrorAt = lastErrorAt.Time
+	}
 	return spec, nil
+}
+
+func nullTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }
 
 func scanShortlistEntry(scanner interface{ Scan(dest ...any) error }) (models.ShortlistEntry, error) {

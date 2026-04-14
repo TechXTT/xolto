@@ -10,6 +10,9 @@ type ServerConfig struct {
 	Address             string
 	DatabaseURL         string
 	JWTSecret           string
+	GoogleClientID      string
+	GoogleClientSecret  string
+	GoogleRedirectURL   string
 	StripeSecret        string
 	StripeWebhookSecret string
 	StripeProPriceID    string
@@ -32,6 +35,9 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		Address:             getenvDefault("SERVER_ADDR", ":8000"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
 		JWTSecret:           os.Getenv("JWT_SECRET"),
+		GoogleClientID:      os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:  os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:   os.Getenv("GOOGLE_REDIRECT_URL"),
 		StripeSecret:        os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		StripeProPriceID:    os.Getenv("STRIPE_PRO_PRICE_ID"),

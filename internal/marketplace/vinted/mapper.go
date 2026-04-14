@@ -34,12 +34,12 @@ type apiUser struct {
 	ID    int64  `json:"id"`
 }
 
-func mapListing(item apiItem) models.Listing {
+func mapListing(item apiItem, marketplaceID string) models.Listing {
 	priceCents := parsePrice(item.Price.Amount)
 	return models.Listing{
 		ItemID:        fmt.Sprintf("v%d", item.ID),
-		CanonicalID:   fmt.Sprintf("vinted:%d", item.ID),
-		MarketplaceID: "vinted",
+		CanonicalID:   fmt.Sprintf("%s:%d", marketplaceID, item.ID),
+		MarketplaceID: marketplaceID,
 		Title:         item.Title,
 		Price:         priceCents,
 		PriceType:     "fixed",

@@ -18,9 +18,12 @@ type Reader interface {
 	WasOffered(userID, itemID string) (bool, error)
 	GetUserByEmail(email string) (*models.User, error)
 	GetUserByID(id string) (*models.User, error)
+	GetUserByAuthIdentity(provider, subject string) (*models.User, error)
+	ListUserAuthMethods(userID string) ([]string, error)
 	GetSearchConfigs(userID string) ([]models.SearchSpec, error)
 	GetAllEnabledSearchConfigs() ([]models.SearchSpec, error)
 	CountSearchConfigs(userID string) (int, error)
+	CountActiveMissions(userID string) (int, error)
 	ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error)
 	ListActionDrafts(userID string) ([]models.ActionDraft, error)
 	// Admin
@@ -28,6 +31,7 @@ type Reader interface {
 	GetAIUsageStats(days int) (models.AIUsageStats, error)
 	GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error)
 	GetUserAIUsageStats(userID string, days int) (models.AIUsageStats, error)
+	GetSearchOpsStats(days int) (models.SearchOpsStats, error)
 }
 
 type Writer interface {
@@ -45,13 +49,17 @@ type Writer interface {
 	RecordPrice(query string, categoryID int, price int) error
 	MarkOffered(userID, itemID string) error
 	CreateUser(email, hash, name string) (string, error)
+	UpdateUserProfile(user models.User) error
+	UpsertUserAuthIdentity(identity models.AuthIdentity) error
 	CreateSearchConfig(spec models.SearchSpec) (int64, error)
 	UpdateSearchConfig(spec models.SearchSpec) error
+	UpdateSearchRuntime(spec models.SearchSpec) error
 	DeleteSearchConfig(id int64, userID string) error
 	UpdateUserTier(userID, tier string) error
 	UpdateStripeCustomer(userID, customerID string) error
 	UpdateUserTierByStripeCustomer(customerID, tier string) error
 	RecordStripeEvent(eventID string) error
+	RecordSearchRun(entry models.SearchRunLog) error
 	// Admin
 	RecordAIUsage(entry models.AIUsageEntry) error
 	SetUserAdmin(userID string, isAdmin bool) error
