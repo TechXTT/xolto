@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -26,6 +28,8 @@ import (
 	portalsession "github.com/stripe/stripe-go/v81/billingportal/session"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
+	stripeinvoice "github.com/stripe/stripe-go/v81/invoice"
+	"github.com/stripe/stripe-go/v81/subscription"
 	"github.com/stripe/stripe-go/v81/webhook"
 )
 
@@ -105,18 +109,62 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	mux.HandleFunc("/billing/portal", s.requireAuth(s.handleBillingPortal))
 	mux.HandleFunc("/billing/webhook", s.handleBillingWebhook)
 	// Admin routes
-	mux.HandleFunc("/admin/stats", s.requireAdmin(s.handleAdminStats))
-	mux.HandleFunc("/admin/users", s.requireAdmin(s.handleAdminUsers))
-	mux.HandleFunc("/admin/users/", s.requireAdmin(s.handleAdminUserMutation))
-	mux.HandleFunc("/admin/missions/", s.requireAdmin(s.handleAdminMissionMutation))
-	mux.HandleFunc("/admin/searches/", s.requireAdmin(s.handleAdminSearchMutation))
-	mux.HandleFunc("/admin/usage", s.requireAdmin(s.handleAdminUsageTimeline))
-	mux.HandleFunc("/admin/search-runs", s.requireAdmin(s.handleAdminSearchRuns))
+	mux.HandleFunc("/admin/stats", s.requireOperatorOrOwner(s.handleAdminStats))
+	mux.HandleFunc("/admin/users", s.requireOperatorOrOwner(s.handleAdminUsers))
+	mux.HandleFunc("/admin/users/", s.requireOperatorOrOwner(s.handleAdminUserMutation))
+	mux.HandleFunc("/admin/missions/", s.requireOperatorOrOwner(s.handleAdminMissionMutation))
+	mux.HandleFunc("/admin/searches/", s.requireOperatorOrOwner(s.handleAdminSearchMutation))
+	mux.HandleFunc("/admin/usage", s.requireOperatorOrOwner(s.handleAdminUsageTimeline))
+	mux.HandleFunc("/admin/search-runs", s.requireOperatorOrOwner(s.handleAdminSearchRuns))
+
+	// Business routes
+	mux.HandleFunc("/admin/business/overview", s.requireOperatorOrOwner(s.handleBusinessOverview))
+	mux.HandleFunc("/admin/business/subscriptions", s.requireOperatorOrOwner(s.handleBusinessSubscriptions))
+	mux.HandleFunc("/admin/business/revenue", s.requireOperatorOrOwner(s.handleBusinessRevenue))
+	mux.HandleFunc("/admin/business/funnel", s.requireOperatorOrOwner(s.handleBusinessFunnel))
+	mux.HandleFunc("/admin/business/cohorts", s.requireOperatorOrOwner(s.handleBusinessCohorts))
+	mux.HandleFunc("/admin/business/alerts", s.requireOperatorOrOwner(s.handleBusinessAlerts))
+	mux.HandleFunc("/admin/business/subscriptions/", s.requireOwner(s.handleBusinessSubscriptionMutation))
+	mux.HandleFunc("/admin/business/reconcile", s.requireOwner(s.handleBusinessReconcile))
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
 	return s.corsMiddleware(s.mux)
+}
+
+func (s *Server) StartBillingReconcileLoop(ctx context.Context, interval time.Duration) {
+	if strings.TrimSpace(s.cfg.StripeSecret) == "" {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runID, err := s.db.StartBillingReconcileRun(models.BillingReconcileRun{
+					TriggeredBy: "system",
+					Status:      "running",
+					StartedAt:   time.Now().UTC(),
+				})
+				if err != nil {
+					continue
+				}
+				summary, reconcileErr := s.runStripeReconcile(ctx)
+				if reconcileErr != nil {
+					_ = s.db.FinishBillingReconcileRun(runID, "failed", mustJSON(summary), mustJSON(map[string]any{"error": reconcileErr.Error()}))
+					continue
+				}
+				_ = s.db.FinishBillingReconcileRun(runID, "success", mustJSON(summary), "")
+			}
+		}
+	}()
 }
 
 // corsMiddleware adds CORS headers for requests from the configured app origin.
@@ -406,6 +454,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "user not found")
 		return
 	}
+	s.syncAdminFlag(user)
 	accessToken, refreshToken, err := s.issueSessionTokens(*user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -602,7 +651,7 @@ func (s *Server) handleGenerateSearches(w http.ResponseWriter, r *http.Request, 
 		Temperature: 0.2,
 	}
 	gen := generator.New(aiCfg)
-	gen.SetUsageCallback(s.makeUsageCallback(user.ID))
+	gen.SetUsageCallback(s.makeUsageCallback(user.ID, 0))
 	searches, err := gen.GenerateSearches(r.Context(), req.Topic)
 	if err != nil && len(searches) == 0 {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -1331,6 +1380,20 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid stripe webhook payload")
 		return
 	}
+	webhookEntry := models.StripeWebhookEventLog{
+		EventID:      event.ID,
+		EventType:    string(event.Type),
+		ObjectID:     "",
+		RequestID:    requestIDFromRequest(r),
+		Status:       "received",
+		ReceivedAt:   time.Now().UTC(),
+		AttemptCount: 1,
+		PayloadJSON:  string(body),
+	}
+	if err := s.db.UpsertStripeWebhookEvent(webhookEntry); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if event.ID != "" {
 		if err := s.db.RecordStripeEvent(event.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -1338,6 +1401,7 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var processingErr error
 	switch event.Type {
 	case "checkout.session.completed":
 		var checkoutSession stripe.CheckoutSession
@@ -1367,11 +1431,42 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 				_ = s.db.UpdateUserTierByStripeCustomer(customerID, tier)
 			}
 		}
+		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+			processingErr = err
+		} else if err := s.persistStripeSubscriptionEvent(event.ID, string(event.Type), &sub); err != nil {
+			processingErr = err
+		}
 	case "customer.subscription.deleted":
 		var sub stripe.Subscription
 		if err := json.Unmarshal(event.Data.Raw, &sub); err == nil && sub.Customer != nil && sub.Customer.ID != "" {
 			_ = s.db.UpdateUserTierByStripeCustomer(sub.Customer.ID, "free")
 		}
+		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+			processingErr = err
+		} else if err := s.persistStripeSubscriptionEvent(event.ID, string(event.Type), &sub); err != nil {
+			processingErr = err
+		}
+	case "invoice.payment_succeeded", "invoice.payment_failed", "invoice.finalized", "invoice.paid", "invoice.updated":
+		var inv stripe.Invoice
+		if err := json.Unmarshal(event.Data.Raw, &inv); err != nil {
+			processingErr = err
+		} else if err := s.persistStripeInvoiceEvent(event.ID, string(event.Type), &inv); err != nil {
+			processingErr = err
+		}
+	}
+
+	webhookEntry.Status = "processed"
+	webhookEntry.ProcessedAt = time.Now().UTC()
+	webhookEntry.AttemptCount = 2
+	if processingErr != nil {
+		webhookEntry.Status = "failed"
+		webhookEntry.ErrorMessage = processingErr.Error()
+	}
+	_ = s.db.UpsertStripeWebhookEvent(webhookEntry)
+
+	if processingErr != nil {
+		writeError(w, http.StatusInternalServerError, processingErr.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -1423,6 +1518,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *
 		Email        string `json:"email"`
 		Name         string `json:"name"`
 		Tier         string `json:"tier"`
+		Role         string `json:"role"`
 		IsAdmin      bool   `json:"is_admin"`
 		CreatedAt    string `json:"created_at"`
 		MissionCount int    `json:"mission_count"`
@@ -1437,7 +1533,8 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, user *
 			Email:        u.Email,
 			Name:         u.Name,
 			Tier:         billing.NormalizeTier(u.Tier),
-			IsAdmin:      u.IsAdmin,
+			Role:         models.EffectiveUserRole(u.User),
+			IsAdmin:      models.HasOperatorAccess(u.User),
 			CreatedAt:    u.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			MissionCount: u.MissionCount,
 			SearchCount:  u.SearchCount,
@@ -1563,6 +1660,8 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 		}
 		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
 			ActorUserID: actor.ID,
+			ActorRole:   models.EffectiveUserRole(*actor),
+			RequestID:   requestIDFromRequest(r),
 			Action:      "user_tier_updated",
 			TargetType:  "user",
 			TargetID:    userID,
@@ -1575,6 +1674,66 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 		writeAdminOK(w, http.StatusOK, map[string]any{
 			"user_id": userID,
 			"tier":    tier,
+		})
+		return
+	case strings.HasSuffix(rawPath, "/role"):
+		if !models.HasOwnerAccess(*actor) {
+			writeError(w, http.StatusForbidden, "owner access required")
+			return
+		}
+		userID := strings.Trim(strings.TrimSuffix(rawPath, "/role"), "/")
+		if userID == "" {
+			writeError(w, http.StatusBadRequest, "invalid user id")
+			return
+		}
+		target, err := s.db.GetUserByID(userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if target == nil {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		var req struct {
+			Role string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		role := models.NormalizeUserRole(req.Role)
+		if role == "" {
+			writeError(w, http.StatusBadRequest, "unsupported role")
+			return
+		}
+		before := map[string]any{
+			"role": models.EffectiveUserRole(*target),
+		}
+		if err := s.db.UpdateUserRole(userID, role); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.db.SetUserAdmin(userID, role != ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+			ActorUserID: actor.ID,
+			ActorRole:   models.EffectiveUserRole(*actor),
+			RequestID:   requestIDFromRequest(r),
+			Action:      "user_role_updated",
+			TargetType:  "user",
+			TargetID:    userID,
+			BeforeJSON:  mustJSON(before),
+			AfterJSON:   mustJSON(map[string]any{"role": role}),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeAdminOK(w, http.StatusOK, map[string]any{
+			"user_id": userID,
+			"role":    role,
 		})
 		return
 	case strings.HasSuffix(rawPath, "/admin"):
@@ -1601,18 +1760,36 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 		}
 		before := map[string]any{
 			"is_admin": target.IsAdmin,
+			"role":     models.EffectiveUserRole(*target),
 		}
 		if err := s.db.SetUserAdmin(userID, req.IsAdmin); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		nextRole := models.NormalizeUserRole(target.Role)
+		if req.IsAdmin && nextRole == "" {
+			nextRole = string(models.UserRoleAdmin)
+			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if !req.IsAdmin && nextRole == string(models.UserRoleAdmin) {
+			nextRole = ""
+			if err := s.db.UpdateUserRole(userID, nextRole); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
 			ActorUserID: actor.ID,
+			ActorRole:   models.EffectiveUserRole(*actor),
+			RequestID:   requestIDFromRequest(r),
 			Action:      "user_admin_updated",
 			TargetType:  "user",
 			TargetID:    userID,
 			BeforeJSON:  mustJSON(before),
-			AfterJSON:   mustJSON(map[string]any{"is_admin": req.IsAdmin}),
+			AfterJSON:   mustJSON(map[string]any{"is_admin": req.IsAdmin, "role": nextRole}),
 		}); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1620,6 +1797,7 @@ func (s *Server) handleAdminUserMutation(w http.ResponseWriter, r *http.Request,
 		writeAdminOK(w, http.StatusOK, map[string]any{
 			"user_id":  userID,
 			"is_admin": req.IsAdmin,
+			"role":     nextRole,
 		})
 		return
 	default:
@@ -1681,6 +1859,8 @@ func (s *Server) handleAdminMissionMutation(w http.ResponseWriter, r *http.Reque
 	}
 	if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
 		ActorUserID: actor.ID,
+		ActorRole:   models.EffectiveUserRole(*actor),
+		RequestID:   requestIDFromRequest(r),
 		Action:      "mission_status_updated",
 		TargetType:  "mission",
 		TargetID:    strconv.FormatInt(missionID, 10),
@@ -1749,6 +1929,8 @@ func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Reques
 		}
 		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
 			ActorUserID: actor.ID,
+			ActorRole:   models.EffectiveUserRole(*actor),
+			RequestID:   requestIDFromRequest(r),
 			Action:      "search_enabled_updated",
 			TargetType:  "search",
 			TargetID:    strconv.FormatInt(searchID, 10),
@@ -1807,6 +1989,8 @@ func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Reques
 		}
 		if err := s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
 			ActorUserID: actor.ID,
+			ActorRole:   models.EffectiveUserRole(*actor),
+			RequestID:   requestIDFromRequest(r),
 			Action:      "search_run_triggered",
 			TargetType:  "search",
 			TargetID:    strconv.FormatInt(searchID, 10),
@@ -1831,6 +2015,687 @@ func (s *Server) handleAdminSearchMutation(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (s *Server) handleBusinessOverview(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	days := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+	overview, err := s.db.GetBusinessOverview(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"overview": overview,
+		"days":     days,
+	})
+}
+
+func (s *Server) handleBusinessSubscriptions(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+	filter := models.BusinessSubscriptionFilter{
+		Limit:       limit,
+		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
+		PlanPriceID: strings.TrimSpace(r.URL.Query().Get("plan")),
+		UserID:      strings.TrimSpace(r.URL.Query().Get("user")),
+		CountryCode: strings.TrimSpace(r.URL.Query().Get("country")),
+	}
+	subscriptions, err := s.db.ListBusinessSubscriptions(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"subscriptions": subscriptions,
+		"limit":         limit,
+		"filters": map[string]any{
+			"status": filter.Status,
+			"plan":   filter.PlanPriceID,
+			"user":   filter.UserID,
+			"country": strings.ToUpper(
+				strings.TrimSpace(filter.CountryCode),
+			),
+		},
+	})
+}
+
+func (s *Server) handleBusinessRevenue(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	days := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+	points, err := s.db.GetBusinessRevenue(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"points": points,
+		"days":   days,
+	})
+}
+
+func (s *Server) handleBusinessFunnel(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	days := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+	funnel, err := s.db.GetBusinessFunnel(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"funnel": funnel,
+		"days":   days,
+	})
+}
+
+func (s *Server) handleBusinessCohorts(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	months := 6
+	if raw := strings.TrimSpace(r.URL.Query().Get("months")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 24 {
+			months = parsed
+		}
+	}
+	cohorts, err := s.db.GetBusinessCohorts(months)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"cohorts": cohorts,
+		"months":  months,
+	})
+}
+
+func (s *Server) handleBusinessAlerts(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	days := 7
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 90 {
+			days = parsed
+		}
+	}
+	alerts, err := s.db.GetBusinessAlerts(days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"alerts": alerts,
+		"days":   days,
+	})
+}
+
+func (s *Server) handleBusinessSubscriptionMutation(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if strings.TrimSpace(s.cfg.StripeSecret) == "" {
+		writeError(w, http.StatusServiceUnavailable, "stripe is not configured")
+		return
+	}
+	rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/business/subscriptions/"), "/")
+	parts := strings.Split(rawPath, "/")
+	if len(parts) != 2 {
+		writeError(w, http.StatusNotFound, "unknown business subscription action")
+		return
+	}
+	subscriptionID := strings.TrimSpace(parts[0])
+	action := strings.TrimSpace(parts[1])
+	if subscriptionID == "" || action == "" {
+		writeError(w, http.StatusBadRequest, "invalid subscription action path")
+		return
+	}
+
+	before, err := s.db.GetStripeSubscriptionSnapshot(subscriptionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	idempotencyKey := s.ownerIdempotencyKey(r, action, subscriptionID)
+
+	var updatedSub *stripe.Subscription
+	switch action {
+	case "plan":
+		var req struct {
+			PriceID           string `json:"price_id"`
+			ProrationBehavior string `json:"proration_behavior"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		priceID := strings.TrimSpace(req.PriceID)
+		if priceID == "" {
+			writeError(w, http.StatusBadRequest, "price_id is required")
+			return
+		}
+		if _, ok := s.subscriptionTier(priceID); !ok {
+			writeError(w, http.StatusBadRequest, "unknown price_id")
+			return
+		}
+		current, err := subscription.Get(subscriptionID, &stripe.SubscriptionParams{})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		if current == nil || current.Items == nil || len(current.Items.Data) == 0 {
+			writeError(w, http.StatusBadRequest, "subscription has no mutable items")
+			return
+		}
+		item := current.Items.Data[0]
+		qty := int64(1)
+		if item.Quantity > 0 {
+			qty = item.Quantity
+		}
+		prorationBehavior := strings.TrimSpace(req.ProrationBehavior)
+		if prorationBehavior == "" {
+			prorationBehavior = "create_prorations"
+		}
+		params := &stripe.SubscriptionParams{
+			Items: []*stripe.SubscriptionItemsParams{
+				{
+					ID:       stripe.String(item.ID),
+					Price:    stripe.String(priceID),
+					Quantity: stripe.Int64(qty),
+				},
+			},
+			ProrationBehavior: stripe.String(prorationBehavior),
+		}
+		params.SetIdempotencyKey(idempotencyKey)
+		params.AddExpand("latest_invoice")
+		updatedSub, err = subscription.Update(subscriptionID, params)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	case "cancel":
+		params := &stripe.SubscriptionParams{
+			CancelAtPeriodEnd: stripe.Bool(true),
+		}
+		params.SetIdempotencyKey(idempotencyKey)
+		params.AddExpand("latest_invoice")
+		updatedSub, err = subscription.Update(subscriptionID, params)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	case "resume":
+		params := &stripe.SubscriptionParams{
+			CancelAtPeriodEnd: stripe.Bool(false),
+		}
+		params.AddExtra("pause_collection", "")
+		params.SetIdempotencyKey(idempotencyKey)
+		params.AddExpand("latest_invoice")
+		updatedSub, err = subscription.Update(subscriptionID, params)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	case "pause":
+		var req struct {
+			Behavior string `json:"behavior"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		behavior := strings.TrimSpace(req.Behavior)
+		if behavior == "" {
+			behavior = string(stripe.SubscriptionPauseCollectionBehaviorMarkUncollectible)
+		}
+		params := &stripe.SubscriptionParams{
+			PauseCollection: &stripe.SubscriptionPauseCollectionParams{
+				Behavior: stripe.String(behavior),
+			},
+		}
+		params.SetIdempotencyKey(idempotencyKey)
+		params.AddExpand("latest_invoice")
+		updatedSub, err = subscription.Update(subscriptionID, params)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	case "sync":
+		updatedSub, err = s.syncStripeSubscription(subscriptionID, idempotencyKey)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	default:
+		writeError(w, http.StatusNotFound, "unknown business subscription action")
+		return
+	}
+
+	if updatedSub != nil {
+		if err := s.persistStripeSubscriptionEvent("owner_mutation", "owner.subscription."+action, updatedSub); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if updatedSub.LatestInvoice != nil && updatedSub.LatestInvoice.ID != "" {
+			_ = s.persistStripeInvoiceEvent("owner_mutation", "owner.subscription."+action, updatedSub.LatestInvoice)
+		}
+	}
+	after, err := s.db.GetStripeSubscriptionSnapshot(subscriptionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	_ = s.db.RecordStripeMutation(models.StripeMutationLog{
+		IdempotencyKey: idempotencyKey,
+		ActorUserID:    user.ID,
+		ActorRole:      models.EffectiveUserRole(*user),
+		Action:         "owner_subscription_" + action,
+		TargetID:       subscriptionID,
+		RequestJSON:    mustJSON(map[string]any{"path": rawPath}),
+		ResponseJSON:   mustJSON(map[string]any{"subscription_id": subscriptionID}),
+		Status:         "ok",
+	})
+
+	_ = s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+		ActorUserID: user.ID,
+		ActorRole:   models.EffectiveUserRole(*user),
+		RequestID:   requestIDFromRequest(r),
+		Action:      "owner_subscription_" + action,
+		TargetType:  "subscription",
+		TargetID:    subscriptionID,
+		BeforeJSON:  mustJSON(before),
+		AfterJSON:   mustJSON(after),
+	})
+
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"subscription":    after,
+		"idempotency_key": idempotencyKey,
+	})
+}
+
+func (s *Server) handleBusinessReconcile(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if strings.TrimSpace(s.cfg.StripeSecret) == "" {
+		writeError(w, http.StatusServiceUnavailable, "stripe is not configured")
+		return
+	}
+
+	runID, err := s.db.StartBillingReconcileRun(models.BillingReconcileRun{
+		TriggeredBy: user.ID,
+		Status:      "running",
+		StartedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	summary, reconcileErr := s.runStripeReconcile(r.Context())
+	if reconcileErr != nil {
+		_ = s.db.FinishBillingReconcileRun(runID, "failed", mustJSON(summary), mustJSON(map[string]any{"error": reconcileErr.Error()}))
+		writeError(w, http.StatusBadGateway, reconcileErr.Error())
+		return
+	}
+	_ = s.db.FinishBillingReconcileRun(runID, "success", mustJSON(summary), "")
+	_ = s.db.RecordAdminAuditLog(models.AdminAuditLogEntry{
+		ActorUserID: user.ID,
+		ActorRole:   models.EffectiveUserRole(*user),
+		RequestID:   requestIDFromRequest(r),
+		Action:      "owner_reconcile_triggered",
+		TargetType:  "billing",
+		TargetID:    strconv.FormatInt(runID, 10),
+		BeforeJSON:  "{}",
+		AfterJSON:   mustJSON(summary),
+	})
+
+	writeAdminOK(w, http.StatusOK, map[string]any{
+		"run_id":  runID,
+		"summary": summary,
+	})
+}
+
+func (s *Server) runStripeReconcile(ctx context.Context) (map[string]any, error) {
+	stripe.Key = s.cfg.StripeSecret
+	users, err := s.db.ListUsersWithStripeCustomerIDs()
+	if err != nil {
+		return nil, err
+	}
+	summary := map[string]any{
+		"customers":      0,
+		"subscriptions":  0,
+		"invoices":       0,
+		"failed_entries": 0,
+	}
+	customerCount := 0
+	subCount := 0
+	invoiceCount := 0
+	failed := 0
+
+	for _, user := range users {
+		select {
+		case <-ctx.Done():
+			return summary, ctx.Err()
+		default:
+		}
+		customerID := strings.TrimSpace(user.StripeCustomer)
+		if customerID == "" {
+			continue
+		}
+		customerCount++
+
+		subParams := &stripe.SubscriptionListParams{
+			Customer: stripe.String(customerID),
+			Status:   stripe.String("all"),
+		}
+		subParams.Limit = stripe.Int64(100)
+		subParams.AddExpand("data.latest_invoice")
+		subIter := subscription.List(subParams)
+		for subIter.Next() {
+			sub := subIter.Subscription()
+			if sub == nil {
+				continue
+			}
+			if err := s.persistStripeSubscriptionEvent("reconcile", "reconcile.subscription", sub); err != nil {
+				failed++
+				continue
+			}
+			subCount++
+			if sub.LatestInvoice != nil && sub.LatestInvoice.ID != "" {
+				if err := s.persistStripeInvoiceEvent("reconcile", "reconcile.invoice", sub.LatestInvoice); err == nil {
+					invoiceCount++
+				} else {
+					failed++
+				}
+			}
+		}
+		if err := subIter.Err(); err != nil {
+			return nil, err
+		}
+
+		invParams := &stripe.InvoiceListParams{
+			Customer: stripe.String(customerID),
+		}
+		invParams.Limit = stripe.Int64(100)
+		invIter := stripeinvoice.List(invParams)
+		for invIter.Next() {
+			inv := invIter.Invoice()
+			if inv == nil {
+				continue
+			}
+			if err := s.persistStripeInvoiceEvent("reconcile", "reconcile.invoice", inv); err != nil {
+				failed++
+				continue
+			}
+			invoiceCount++
+		}
+		if err := invIter.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	summary["customers"] = customerCount
+	summary["subscriptions"] = subCount
+	summary["invoices"] = invoiceCount
+	summary["failed_entries"] = failed
+	summary["timestamp"] = time.Now().UTC().Format(time.RFC3339)
+	return summary, nil
+}
+
+func (s *Server) syncStripeSubscription(subscriptionID, idempotencyKey string) (*stripe.Subscription, error) {
+	stripe.Key = s.cfg.StripeSecret
+	params := &stripe.SubscriptionParams{}
+	params.AddExpand("latest_invoice")
+	if strings.TrimSpace(idempotencyKey) != "" {
+		params.SetIdempotencyKey(idempotencyKey)
+	}
+	return subscription.Get(subscriptionID, params)
+}
+
+func (s *Server) persistStripeSubscriptionEvent(eventID, eventType string, sub *stripe.Subscription) error {
+	if sub == nil {
+		return errors.New("stripe subscription payload is nil")
+	}
+	customerID := ""
+	if sub.Customer != nil {
+		customerID = strings.TrimSpace(sub.Customer.ID)
+	}
+	userID, err := s.lookupUserIDByCustomer(customerID)
+	if err != nil {
+		return err
+	}
+	snapshot := stripeSubscriptionSnapshotFromStripe(sub, userID)
+	if err := s.db.UpsertStripeSubscriptionSnapshot(snapshot); err != nil {
+		return err
+	}
+	_ = s.db.AppendStripeSubscriptionHistory(models.StripeSubscriptionHistoryEntry{
+		SubscriptionID: snapshot.SubscriptionID,
+		EventID:        strings.TrimSpace(eventID),
+		EventType:      strings.TrimSpace(eventType),
+		Status:         snapshot.Status,
+		PlanPriceID:    snapshot.PlanPriceID,
+		Currency:       snapshot.Currency,
+		UnitAmount:     snapshot.UnitAmount,
+		Quantity:       snapshot.Quantity,
+		PeriodStart:    snapshot.CurrentPeriodStart,
+		PeriodEnd:      snapshot.CurrentPeriodEnd,
+		CancelAtEnd:    snapshot.CancelAtPeriodEnd,
+		RawJSON:        snapshot.RawJSON,
+	})
+
+	if tier, ok := s.subscriptionTier(snapshot.PlanPriceID); ok && customerID != "" && subscriptionDrivesPaidTier(snapshot.Status) {
+		_ = s.db.UpdateUserTierByStripeCustomer(customerID, tier)
+	}
+	if customerID != "" && subscriptionIsEnded(snapshot.Status) {
+		_ = s.db.UpdateUserTierByStripeCustomer(customerID, "free")
+	}
+	return nil
+}
+
+func (s *Server) persistStripeInvoiceEvent(eventID, eventType string, inv *stripe.Invoice) error {
+	if inv == nil {
+		return errors.New("stripe invoice payload is nil")
+	}
+	customerID := ""
+	if inv.Customer != nil {
+		customerID = strings.TrimSpace(inv.Customer.ID)
+	}
+	userID, err := s.lookupUserIDByCustomer(customerID)
+	if err != nil {
+		return err
+	}
+	summary := stripeInvoiceSummaryFromStripe(inv, userID)
+	return s.db.UpsertStripeInvoiceSummary(summary)
+}
+
+func (s *Server) lookupUserIDByCustomer(customerID string) (string, error) {
+	customerID = strings.TrimSpace(customerID)
+	if customerID == "" {
+		return "", nil
+	}
+	users, err := s.db.ListUsersWithStripeCustomerIDs()
+	if err != nil {
+		return "", err
+	}
+	for _, user := range users {
+		if strings.TrimSpace(user.StripeCustomer) == customerID {
+			return user.ID, nil
+		}
+	}
+	return "", nil
+}
+
+func stripeSubscriptionSnapshotFromStripe(sub *stripe.Subscription, userID string) models.StripeSubscriptionSnapshot {
+	priceID := ""
+	interval := ""
+	unitAmount := int64(0)
+	quantity := int64(1)
+	if sub != nil && sub.Items != nil && len(sub.Items.Data) > 0 {
+		item := sub.Items.Data[0]
+		if item != nil {
+			if item.Price != nil {
+				priceID = strings.TrimSpace(item.Price.ID)
+				if item.Price.Recurring != nil {
+					interval = string(item.Price.Recurring.Interval)
+				}
+				unitAmount = item.Price.UnitAmount
+			}
+			if item.Quantity > 0 {
+				quantity = item.Quantity
+			}
+		}
+	}
+	customerID := ""
+	if sub.Customer != nil {
+		customerID = strings.TrimSpace(sub.Customer.ID)
+	}
+	latestInvoiceID := ""
+	if sub.LatestInvoice != nil {
+		latestInvoiceID = strings.TrimSpace(sub.LatestInvoice.ID)
+	}
+	defaultPaymentMethod := ""
+	if sub.DefaultPaymentMethod != nil {
+		defaultPaymentMethod = strings.TrimSpace(sub.DefaultPaymentMethod.ID)
+	}
+	raw, _ := json.Marshal(sub)
+	return models.StripeSubscriptionSnapshot{
+		SubscriptionID:       strings.TrimSpace(sub.ID),
+		CustomerID:           customerID,
+		UserID:               strings.TrimSpace(userID),
+		Status:               string(sub.Status),
+		PlanPriceID:          priceID,
+		PlanInterval:         interval,
+		Currency:             strings.ToUpper(string(sub.Currency)),
+		UnitAmount:           unitAmount,
+		Quantity:             quantity,
+		CurrentPeriodStart:   unixToTime(sub.CurrentPeriodStart),
+		CurrentPeriodEnd:     unixToTime(sub.CurrentPeriodEnd),
+		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd,
+		CanceledAt:           unixToTime(sub.CanceledAt),
+		Paused:               sub.PauseCollection != nil || string(sub.Status) == "paused",
+		LatestInvoiceID:      latestInvoiceID,
+		DefaultPaymentMethod: defaultPaymentMethod,
+		RawJSON:              string(raw),
+	}
+}
+
+func stripeInvoiceSummaryFromStripe(inv *stripe.Invoice, userID string) models.StripeInvoiceSummary {
+	customerID := ""
+	if inv.Customer != nil {
+		customerID = strings.TrimSpace(inv.Customer.ID)
+	}
+	subscriptionID := ""
+	if inv.Subscription != nil {
+		subscriptionID = strings.TrimSpace(inv.Subscription.ID)
+	}
+	finalizedAt := int64(0)
+	if inv.StatusTransitions != nil {
+		finalizedAt = inv.StatusTransitions.FinalizedAt
+	}
+	raw, _ := json.Marshal(inv)
+	return models.StripeInvoiceSummary{
+		InvoiceID:        strings.TrimSpace(inv.ID),
+		SubscriptionID:   subscriptionID,
+		CustomerID:       customerID,
+		UserID:           strings.TrimSpace(userID),
+		Status:           string(inv.Status),
+		Currency:         strings.ToUpper(string(inv.Currency)),
+		AmountDue:        inv.AmountDue,
+		AmountPaid:       inv.AmountPaid,
+		AmountRemaining:  inv.AmountRemaining,
+		AttemptCount:     inv.AttemptCount,
+		Paid:             inv.Paid,
+		HostedInvoiceURL: strings.TrimSpace(inv.HostedInvoiceURL),
+		InvoicePDF:       strings.TrimSpace(inv.InvoicePDF),
+		PeriodStart:      unixToTime(inv.PeriodStart),
+		PeriodEnd:        unixToTime(inv.PeriodEnd),
+		DueDate:          unixToTime(inv.DueDate),
+		FinalizedAt:      unixToTime(finalizedAt),
+		RawJSON:          string(raw),
+	}
+}
+
+func subscriptionDrivesPaidTier(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "active", "trialing", "past_due", "unpaid":
+		return true
+	default:
+		return false
+	}
+}
+
+func subscriptionIsEnded(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "canceled", "incomplete_expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func unixToTime(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(value, 0).UTC()
+}
+
+func (s *Server) ownerIdempotencyKey(r *http.Request, action, targetID string) string {
+	if key := strings.TrimSpace(r.Header.Get("Idempotency-Key")); key != "" {
+		return key
+	}
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("owner:%s:%s:%d", strings.TrimSpace(action), strings.TrimSpace(targetID), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("owner:%s:%s:%x", strings.TrimSpace(action), strings.TrimSpace(targetID), buf)
+}
+
+func requestIDFromRequest(r *http.Request) string {
+	for _, header := range []string{"X-Request-ID", "X-Request-Id", "CF-Ray"} {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, err := s.currentUser(r)
@@ -1842,10 +2707,10 @@ func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *mode
 	}
 }
 
-func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
+func (s *Server) requireOperatorOrOwner(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, user *models.User) {
-		if !user.IsAdmin {
-			writeError(w, http.StatusForbidden, "admin access required")
+		if !models.HasOperatorAccess(*user) {
+			writeError(w, http.StatusForbidden, "operator or owner access required")
 			return
 		}
 		if !s.adminSourceAllowed(r) {
@@ -1854,6 +2719,24 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *mod
 		}
 		next(w, r, user)
 	})
+}
+
+func (s *Server) requireOwner(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, user *models.User) {
+		if !models.HasOwnerAccess(*user) {
+			writeError(w, http.StatusForbidden, "owner access required")
+			return
+		}
+		if !s.adminSourceAllowed(r) {
+			writeError(w, http.StatusForbidden, "request source is not allowed for admin access")
+			return
+		}
+		next(w, r, user)
+	})
+}
+
+func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *models.User)) http.HandlerFunc {
+	return s.requireOperatorOrOwner(next)
 }
 
 func (s *Server) allowedCORSOrigin(origin string) (string, bool) {
@@ -2034,11 +2917,12 @@ func parseIDFromPath(path, prefix string) (int64, error) {
 	return strconv.ParseInt(raw, 10, 64)
 }
 
-// makeUsageCallback returns a UsageCallback that records AI usage for the given user.
-func (s *Server) makeUsageCallback(userID string) func(string, string, int, int, int, bool, string) {
+// makeUsageCallback returns a UsageCallback that records AI usage for the given user/mission context.
+func (s *Server) makeUsageCallback(userID string, missionID int64) func(string, string, int, int, int, bool, string) {
 	return func(callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
 		_ = s.db.RecordAIUsage(models.AIUsageEntry{
 			UserID:           userID,
+			MissionID:        missionID,
 			CallType:         callType,
 			Model:            model,
 			PromptTokens:     prompt,
@@ -2054,10 +2938,21 @@ func (s *Server) makeUsageCallback(userID string) func(string, string, int, int,
 // syncAdminFlag promotes or demotes a user based on the ADMIN_EMAILS env var.
 // Called on login/register so the flag stays in sync without manual SQL.
 func (s *Server) syncAdminFlag(user *models.User) {
+	if models.NormalizeUserRole(user.Role) != "" {
+		if !user.IsAdmin {
+			_ = s.db.SetUserAdmin(user.ID, true)
+			user.IsAdmin = true
+		}
+		return
+	}
 	shouldBeAdmin := s.cfg.IsAdminEmail(user.Email)
 	if user.IsAdmin != shouldBeAdmin {
 		_ = s.db.SetUserAdmin(user.ID, shouldBeAdmin)
 		user.IsAdmin = shouldBeAdmin
+	}
+	if shouldBeAdmin && models.NormalizeUserRole(user.Role) == "" {
+		_ = s.db.UpdateUserRole(user.ID, string(models.UserRoleAdmin))
+		user.Role = string(models.UserRoleAdmin)
 	}
 }
 
@@ -2078,8 +2973,9 @@ func (s *Server) userPayload(user models.User) (map[string]any, error) {
 		"preferred_radius_km":  user.PreferredRadiusKm,
 		"cross_border_enabled": user.CrossBorderEnabled,
 		"auth_methods":         authMethods,
+		"role":                 models.EffectiveUserRole(user),
 	}
-	if user.IsAdmin {
+	if models.HasOperatorAccess(user) {
 		m["is_admin"] = true
 	}
 	return m, nil

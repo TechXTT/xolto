@@ -87,7 +87,7 @@ const (
 )
 
 // UsageCallback is called after each LLM request with token counts and timing.
-type UsageCallback func(callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
+type UsageCallback func(userID string, missionID int64, callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
 type Assistant struct {
 	cfg      *config.Config
@@ -112,9 +112,9 @@ func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, s
 
 func (a *Assistant) SetUsageCallback(cb UsageCallback) { a.onUsage = cb }
 
-func (a *Assistant) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+func (a *Assistant) reportUsage(userID string, missionID int64, callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if a.onUsage != nil {
-		a.onUsage(callType, a.cfg.AI.Model, prompt, completion, latencyMs, success, errMsg)
+		a.onUsage(userID, missionID, callType, a.cfg.AI.Model, prompt, completion, latencyMs, success, errMsg)
 	}
 }
 
@@ -350,7 +350,7 @@ func (a *Assistant) CompareShortlist(ctx context.Context, userID string) (string
 	}
 
 	if a.aiEnabled() {
-		if comparison, err := a.compareWithAI(ctx, entries); err == nil && comparison != "" {
+		if comparison, err := a.compareWithAI(ctx, userID, entries); err == nil && comparison != "" {
 			return comparison, nil
 		}
 	}
@@ -398,7 +398,7 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 			content = rendered
 		}
 	} else if a.aiEnabled() {
-		if aiDraft, err := a.draftWithAI(ctx, *entry, marketplaceID, locale); err == nil && aiDraft != "" {
+		if aiDraft, err := a.draftWithAI(ctx, userID, *entry, marketplaceID, locale); err == nil && aiDraft != "" {
 			content = aiDraft
 		}
 	}
@@ -1476,14 +1476,14 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		a.reportUsage("brief_parser", 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		a.reportUsage("brief_parser", 0, 0, latencyMs, false, errMsg)
+		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, errMsg)
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
@@ -1498,10 +1498,10 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		a.reportUsage("brief_parser", 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
-	a.reportUsage("brief_parser", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	a.reportUsage(userID, 0, "brief_parser", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("no ai choices")
 	}
@@ -1555,7 +1555,7 @@ func missionCategoryFromParsed(parsedCategory, targetQuery, name string) string 
 	}
 }
 
-func (a *Assistant) compareWithAI(ctx context.Context, entries []models.ShortlistEntry) (string, error) {
+func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []models.ShortlistEntry) (string, error) {
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
 		"temperature": 0.5,
@@ -1569,10 +1569,26 @@ func (a *Assistant) compareWithAI(ctx context.Context, entries []models.Shortlis
 			{"role": "user", "content": "Compare these shortlisted deals and tell me which one to go for:\n" + mustJSON(entries)},
 		},
 	}
-	return a.chatText(ctx, "compare", payload)
+	missionID := int64(0)
+	if len(entries) > 0 {
+		candidate := entries[0].MissionID
+		if candidate > 0 {
+			sameMission := true
+			for _, entry := range entries[1:] {
+				if entry.MissionID != candidate {
+					sameMission = false
+					break
+				}
+			}
+			if sameMission {
+				missionID = candidate
+			}
+		}
+	}
+	return a.chatText(ctx, userID, missionID, "compare", payload)
 }
 
-func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry, marketplaceID string, locale messageLocale) (string, error) {
+func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models.ShortlistEntry, marketplaceID string, locale messageLocale) (string, error) {
 	language := localeLabel(locale)
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
@@ -1597,10 +1613,10 @@ func (a *Assistant) draftWithAI(ctx context.Context, entry models.ShortlistEntry
 			},
 		},
 	}
-	return a.chatText(ctx, "draft", payload)
+	return a.chatText(ctx, userID, entry.MissionID, "draft", payload)
 }
 
-func (a *Assistant) chatText(ctx context.Context, callType string, payload map[string]any) (string, error) {
+func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64, callType string, payload map[string]any) (string, error) {
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.cfg.AI.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
@@ -1612,14 +1628,14 @@ func (a *Assistant) chatText(ctx context.Context, callType string, payload map[s
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		a.reportUsage(callType, 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		a.reportUsage(callType, 0, 0, latencyMs, false, errMsg)
+		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, errMsg)
 		return "", fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
@@ -1634,10 +1650,10 @@ func (a *Assistant) chatText(ctx context.Context, callType string, payload map[s
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		a.reportUsage(callType, 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
-	a.reportUsage(callType, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	a.reportUsage(userID, missionID, callType, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return "", fmt.Errorf("no ai choices")
 	}

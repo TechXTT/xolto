@@ -57,23 +57,22 @@ func main() {
 
 	// Wire AI usage tracking: each module reports token counts via a callback,
 	// and we persist them to the ai_usage_log table.
-	usageCB := func(userID string) func(string, string, int, int, int, bool, string) {
-		return func(callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
-			_ = db.RecordAIUsage(models.AIUsageEntry{
-				UserID:           userID,
-				CallType:         callType,
-				Model:            model,
-				PromptTokens:     prompt,
-				CompletionTokens: completion,
-				TotalTokens:      prompt + completion,
-				LatencyMs:        latencyMs,
-				Success:          success,
-				ErrorMsg:         errMsg,
-			})
-		}
+	usageCB := func(userID string, missionID int64, callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
+		_ = db.RecordAIUsage(models.AIUsageEntry{
+			UserID:           strings.TrimSpace(userID),
+			MissionID:        missionID,
+			CallType:         callType,
+			Model:            model,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+			LatencyMs:        latencyMs,
+			Success:          success,
+			ErrorMsg:         errMsg,
+		})
 	}
-	rsn.SetUsageCallback(usageCB(""))
-	asst.SetUsageCallback(usageCB(""))
+	rsn.SetUsageCallback(usageCB)
+	asst.SetUsageCallback(usageCB)
 	broker := api.NewSSEBroker()
 	dispatcher := notify.NewSSEDispatcher(broker)
 	registry := marketplace.NewRegistry()
@@ -92,6 +91,9 @@ func main() {
 	backfillMissionHunts(context.Background(), db, asst)
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
+	reconcileCtx, reconcileCancel := context.WithCancel(context.Background())
+	defer reconcileCancel()
+	srv.StartBillingReconcileLoop(reconcileCtx, time.Hour)
 	httpServer := &http.Server{
 		Addr:    cfg.Address,
 		Handler: srv.Handler(),
@@ -110,6 +112,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("shutting down...")
+	reconcileCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

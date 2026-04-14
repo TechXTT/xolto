@@ -334,3 +334,100 @@ func TestAdminAuditLogAndSearchControlPersistence(t *testing.T) {
 		t.Fatalf("expected action search_run_triggered, got %q", logs[0].Action)
 	}
 }
+
+func TestAIUsagePersistsMissionContextAndUserAggregation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-ai-usage-mission.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	userID, err := st.CreateUser("usage@example.com", "hash", "Usage User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	missionID, err := st.UpsertMission(models.Mission{
+		UserID:        userID,
+		Name:          "Sony Mission",
+		TargetQuery:   "sony a6000",
+		Status:        "active",
+		Urgency:       "flexible",
+		Category:      "camera",
+		CategoryID:    487,
+		SearchQueries: []string{"sony a6000"},
+		Active:        true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission() error = %v", err)
+	}
+
+	if err := st.RecordAIUsage(models.AIUsageEntry{
+		UserID:           userID,
+		MissionID:        missionID,
+		CallType:         "reasoner",
+		Model:            "gpt-5-mini",
+		PromptTokens:     120,
+		CompletionTokens: 80,
+		TotalTokens:      200,
+		LatencyMs:        420,
+		Success:          true,
+	}); err != nil {
+		t.Fatalf("RecordAIUsage(mission) error = %v", err)
+	}
+	if err := st.RecordAIUsage(models.AIUsageEntry{
+		UserID:           userID,
+		MissionID:        0,
+		CallType:         "brief_parser",
+		Model:            "gpt-5-mini",
+		PromptTokens:     60,
+		CompletionTokens: 40,
+		TotalTokens:      100,
+		LatencyMs:        210,
+		Success:          true,
+	}); err != nil {
+		t.Fatalf("RecordAIUsage(user) error = %v", err)
+	}
+
+	entries, err := st.GetAIUsageTimeline(7)
+	if err != nil {
+		t.Fatalf("GetAIUsageTimeline() error = %v", err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 usage entries, got %d", len(entries))
+	}
+	var foundMission bool
+	for _, entry := range entries {
+		if entry.UserID != userID {
+			continue
+		}
+		if entry.MissionID == missionID && entry.CallType == "reasoner" {
+			foundMission = true
+			break
+		}
+	}
+	if !foundMission {
+		t.Fatalf("expected mission-scoped usage entry for user %q mission %d", userID, missionID)
+	}
+
+	users, err := st.ListAllUsers()
+	if err != nil {
+		t.Fatalf("ListAllUsers() error = %v", err)
+	}
+	var summary *models.AdminUserSummary
+	for i := range users {
+		if users[i].ID == userID {
+			summary = &users[i]
+			break
+		}
+	}
+	if summary == nil {
+		t.Fatalf("user summary not found for %q", userID)
+	}
+	if summary.AICallCount != 2 {
+		t.Fatalf("expected ai_call_count=2, got %d", summary.AICallCount)
+	}
+	if summary.AITokens != 300 {
+		t.Fatalf("expected ai_tokens=300, got %d", summary.AITokens)
+	}
+}

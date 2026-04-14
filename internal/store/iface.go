@@ -39,6 +39,16 @@ type Reader interface {
 	GetSearchOpsStats(days int) (models.SearchOpsStats, error)
 	ListSearchRuns(filter models.AdminSearchRunFilter) ([]models.AdminSearchRun, error)
 	ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry, error)
+	// Business
+	GetBusinessOverview(days int) (models.BusinessOverview, error)
+	ListBusinessSubscriptions(filter models.BusinessSubscriptionFilter) ([]models.BusinessSubscriptionRow, error)
+	GetBusinessRevenue(days int) ([]models.BusinessRevenuePoint, error)
+	GetBusinessFunnel(days int) (models.BusinessFunnel, error)
+	GetBusinessCohorts(months int) ([]models.BusinessCohortRow, error)
+	GetBusinessAlerts(days int) ([]models.BusinessAlert, error)
+	GetStripeSubscriptionSnapshot(subscriptionID string) (*models.StripeSubscriptionSnapshot, error)
+	ListUsersWithStripeCustomerIDs() ([]models.User, error)
+	GetLatestBusinessReconcileRun() (*models.BillingReconcileRun, error)
 }
 
 type Writer interface {
@@ -65,9 +75,17 @@ type Writer interface {
 	SetSearchNextRunAt(id int64, nextRunAt time.Time) error
 	DeleteSearchConfig(id int64, userID string) error
 	UpdateUserTier(userID, tier string) error
+	UpdateUserRole(userID, role string) error
 	UpdateStripeCustomer(userID, customerID string) error
 	UpdateUserTierByStripeCustomer(customerID, tier string) error
 	RecordStripeEvent(eventID string) error
+	UpsertStripeWebhookEvent(entry models.StripeWebhookEventLog) error
+	UpsertStripeSubscriptionSnapshot(snapshot models.StripeSubscriptionSnapshot) error
+	AppendStripeSubscriptionHistory(entry models.StripeSubscriptionHistoryEntry) error
+	UpsertStripeInvoiceSummary(invoice models.StripeInvoiceSummary) error
+	RecordStripeMutation(entry models.StripeMutationLog) error
+	StartBillingReconcileRun(run models.BillingReconcileRun) (int64, error)
+	FinishBillingReconcileRun(id int64, status, summaryJSON, errorJSON string) error
 	RecordSearchRun(entry models.SearchRunLog) error
 	// Admin
 	RecordAIUsage(entry models.AIUsageEntry) error

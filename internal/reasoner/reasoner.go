@@ -19,7 +19,7 @@ import (
 )
 
 // UsageCallback is called after each LLM request with token counts and timing.
-type UsageCallback func(callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
+type UsageCallback func(userID string, missionID int64, callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
 type Reasoner struct {
 	cfg     config.AIConfig
@@ -238,24 +238,24 @@ func (r *Reasoner) callLLM(
 	resp, err := r.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		r.reportUsage("reasoner", 0, 0, latencyMs, false, err.Error())
+		r.reportUsage(search.UserID, search.ProfileID, "reasoner", 0, 0, latencyMs, false, err.Error())
 		return models.DealAnalysis{}, fmt.Errorf("call ai provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := fmt.Sprintf("ai provider returned status %d", resp.StatusCode)
-		r.reportUsage("reasoner", 0, 0, latencyMs, false, errMsg)
+		r.reportUsage(search.UserID, search.ProfileID, "reasoner", 0, 0, latencyMs, false, errMsg)
 		return models.DealAnalysis{}, fmt.Errorf("%s", errMsg)
 	}
 
 	var completion chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		r.reportUsage("reasoner", 0, 0, latencyMs, false, err.Error())
+		r.reportUsage(search.UserID, search.ProfileID, "reasoner", 0, 0, latencyMs, false, err.Error())
 		return models.DealAnalysis{}, fmt.Errorf("decode ai response: %w", err)
 	}
 
-	r.reportUsage("reasoner", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	r.reportUsage(search.UserID, search.ProfileID, "reasoner", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 
 	if len(completion.Choices) == 0 {
 		return models.DealAnalysis{}, fmt.Errorf("ai response contained no choices")
@@ -289,9 +289,9 @@ func (r *Reasoner) callLLM(
 	}, nil
 }
 
-func (r *Reasoner) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+func (r *Reasoner) reportUsage(userID string, missionID int64, callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if r.onUsage != nil {
-		r.onUsage(callType, r.cfg.Model, prompt, completion, latencyMs, success, errMsg)
+		r.onUsage(userID, missionID, callType, r.cfg.Model, prompt, completion, latencyMs, success, errMsg)
 	}
 }
 

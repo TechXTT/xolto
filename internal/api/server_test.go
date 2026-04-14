@@ -279,6 +279,9 @@ func TestAdminMutationsWriteAuditEntries(t *testing.T) {
 		if strings.TrimSpace(entry.ActorUserID) == "" {
 			t.Fatalf("expected actor_user_id to be set: %#v", entry)
 		}
+		if strings.TrimSpace(entry.ActorRole) == "" {
+			t.Fatalf("expected actor_role to be set: %#v", entry)
+		}
 	}
 	for _, action := range []string{
 		"user_tier_updated",
@@ -290,6 +293,81 @@ func TestAdminMutationsWriteAuditEntries(t *testing.T) {
 		if !seen[action] {
 			t.Fatalf("missing audit action %q", action)
 		}
+	}
+}
+
+func TestBusinessEndpointsRoleAccess(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-business-role-access.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	ownerID, err := st.CreateUser("owner@example.com", "hash", "Owner User")
+	if err != nil {
+		t.Fatalf("CreateUser(owner) error = %v", err)
+	}
+	operatorID, err := st.CreateUser("operator@example.com", "hash", "Operator User")
+	if err != nil {
+		t.Fatalf("CreateUser(operator) error = %v", err)
+	}
+	memberID, err := st.CreateUser("member@example.com", "hash", "Member User")
+	if err != nil {
+		t.Fatalf("CreateUser(member) error = %v", err)
+	}
+	if err := st.UpdateUserRole(ownerID, string(models.UserRoleOwner)); err != nil {
+		t.Fatalf("UpdateUserRole(owner) error = %v", err)
+	}
+	if err := st.SetUserAdmin(ownerID, true); err != nil {
+		t.Fatalf("SetUserAdmin(owner) error = %v", err)
+	}
+	if err := st.UpdateUserRole(operatorID, string(models.UserRoleOperator)); err != nil {
+		t.Fatalf("UpdateUserRole(operator) error = %v", err)
+	}
+	if err := st.SetUserAdmin(operatorID, true); err != nil {
+		t.Fatalf("SetUserAdmin(operator) error = %v", err)
+	}
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:          "test-secret",
+		AppBaseURL:         "http://localhost:3000",
+		CORSAllowedOrigins: []string{"http://localhost:3000"},
+	}, st, nil, nil, &stubRunner{}, nil)
+
+	ownerToken := issueAccessToken(t, ownerID, "owner@example.com")
+	operatorToken := issueAccessToken(t, operatorID, "operator@example.com")
+	memberToken := issueAccessToken(t, memberID, "member@example.com")
+
+	request := func(method, path, token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		return res
+	}
+
+	operatorOverview := request(http.MethodGet, "/admin/business/overview?days=30", operatorToken, "")
+	if operatorOverview.Code != http.StatusOK {
+		t.Fatalf("operator expected 200 on business overview, got %d", operatorOverview.Code)
+	}
+
+	memberOverview := request(http.MethodGet, "/admin/business/overview?days=30", memberToken, "")
+	if memberOverview.Code != http.StatusForbidden {
+		t.Fatalf("member expected 403 on business overview, got %d", memberOverview.Code)
+	}
+
+	operatorReconcile := request(http.MethodPost, "/admin/business/reconcile", operatorToken, `{}`)
+	if operatorReconcile.Code != http.StatusForbidden {
+		t.Fatalf("operator expected 403 on owner reconcile, got %d", operatorReconcile.Code)
+	}
+
+	ownerReconcile := request(http.MethodPost, "/admin/business/reconcile", ownerToken, `{}`)
+	if ownerReconcile.Code != http.StatusServiceUnavailable {
+		t.Fatalf("owner expected 503 reconcile without stripe secret, got %d", ownerReconcile.Code)
 	}
 }
 

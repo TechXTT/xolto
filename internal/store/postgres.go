@@ -153,6 +153,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			password_hash TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			tier TEXT NOT NULL DEFAULT 'free',
+			role TEXT NOT NULL DEFAULT '',
 			stripe_customer_id TEXT NOT NULL DEFAULT '',
 			country_code TEXT NOT NULL DEFAULT '',
 			region TEXT NOT NULL DEFAULT '',
@@ -250,6 +251,8 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS admin_audit_log (
 			id BIGSERIAL PRIMARY KEY,
 			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
 			action TEXT NOT NULL DEFAULT '',
 			target_type TEXT NOT NULL DEFAULT '',
 			target_id TEXT NOT NULL DEFAULT '',
@@ -259,6 +262,117 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at DESC);
+
+		CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL DEFAULT '',
+			object_id TEXT NOT NULL DEFAULT '',
+			api_account TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'received',
+			error_message TEXT NOT NULL DEFAULT '',
+			attempt_count INTEGER NOT NULL DEFAULT 1,
+			payload_json TEXT NOT NULL DEFAULT '',
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			processed_at TIMESTAMPTZ NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at DESC);
+
+		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
+			subscription_id TEXT PRIMARY KEY,
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			plan_interval TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount BIGINT NOT NULL DEFAULT 0,
+			quantity BIGINT NOT NULL DEFAULT 0,
+			current_period_start TIMESTAMPTZ NULL,
+			current_period_end TIMESTAMPTZ NULL,
+			cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+			canceled_at TIMESTAMPTZ NULL,
+			paused BOOLEAN NOT NULL DEFAULT FALSE,
+			latest_invoice_id TEXT NOT NULL DEFAULT '',
+			default_payment_method TEXT NOT NULL DEFAULT '',
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_customer ON stripe_subscription_snapshots(customer_id, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_status ON stripe_subscription_snapshots(status, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_user ON stripe_subscription_snapshots(user_id, updated_at DESC);
+
+		CREATE TABLE IF NOT EXISTS stripe_subscription_history (
+			id BIGSERIAL PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			event_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount BIGINT NOT NULL DEFAULT 0,
+			quantity BIGINT NOT NULL DEFAULT 0,
+			period_start TIMESTAMPTZ NULL,
+			period_end TIMESTAMPTZ NULL,
+			cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_history_sub ON stripe_subscription_history(subscription_id, created_at DESC);
+
+		CREATE TABLE IF NOT EXISTS stripe_invoice_summaries (
+			invoice_id TEXT PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			amount_due BIGINT NOT NULL DEFAULT 0,
+			amount_paid BIGINT NOT NULL DEFAULT 0,
+			amount_remaining BIGINT NOT NULL DEFAULT 0,
+			attempt_count BIGINT NOT NULL DEFAULT 0,
+			paid BOOLEAN NOT NULL DEFAULT FALSE,
+			hosted_invoice_url TEXT NOT NULL DEFAULT '',
+			invoice_pdf TEXT NOT NULL DEFAULT '',
+			period_start TIMESTAMPTZ NULL,
+			period_end TIMESTAMPTZ NULL,
+			due_date TIMESTAMPTZ NULL,
+			finalized_at TIMESTAMPTZ NULL,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_customer ON stripe_invoice_summaries(customer_id, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_status ON stripe_invoice_summaries(status, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_subscription ON stripe_invoice_summaries(subscription_id, updated_at DESC);
+
+		CREATE TABLE IF NOT EXISTS stripe_mutation_log (
+			idempotency_key TEXT PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '',
+			response_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at DESC);
+
+		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+			id BIGSERIAL PRIMARY KEY,
+			triggered_by TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			summary_json TEXT NOT NULL DEFAULT '',
+			error_json TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -295,6 +409,7 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS postal_code TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_radius_km INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE search_configs ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT ''`)
@@ -314,10 +429,12 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 
 	// Admin & AI usage tracking.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE`)
+	_, _ = db.ExecContext(ctx, `UPDATE users SET role = 'admin' WHERE is_admin = TRUE AND COALESCE(role, '') = ''`)
 	_, _ = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS ai_usage_log (
 			id BIGSERIAL PRIMARY KEY,
 			user_id TEXT NOT NULL DEFAULT '',
+			mission_id BIGINT NOT NULL DEFAULT 0,
 			call_type TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -328,8 +445,10 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			error_msg TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
-	`)
+		`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS mission_id BIGINT NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_user_mission ON ai_usage_log(user_id, mission_id, created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS user_auth_identities (
@@ -375,6 +494,8 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS admin_audit_log (
 			id BIGSERIAL PRIMARY KEY,
 			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
 			action TEXT NOT NULL DEFAULT '',
 			target_type TEXT NOT NULL DEFAULT '',
 			target_id TEXT NOT NULL DEFAULT '',
@@ -385,6 +506,131 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at DESC)`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL DEFAULT '',
+			object_id TEXT NOT NULL DEFAULT '',
+			api_account TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'received',
+			error_message TEXT NOT NULL DEFAULT '',
+			attempt_count INTEGER NOT NULL DEFAULT 1,
+			payload_json TEXT NOT NULL DEFAULT '',
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			processed_at TIMESTAMPTZ NULL
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at DESC)`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
+			subscription_id TEXT PRIMARY KEY,
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			plan_interval TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount BIGINT NOT NULL DEFAULT 0,
+			quantity BIGINT NOT NULL DEFAULT 0,
+			current_period_start TIMESTAMPTZ NULL,
+			current_period_end TIMESTAMPTZ NULL,
+			cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+			canceled_at TIMESTAMPTZ NULL,
+			paused BOOLEAN NOT NULL DEFAULT FALSE,
+			latest_invoice_id TEXT NOT NULL DEFAULT '',
+			default_payment_method TEXT NOT NULL DEFAULT '',
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_customer ON stripe_subscription_snapshots(customer_id, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_status ON stripe_subscription_snapshots(status, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_user ON stripe_subscription_snapshots(user_id, updated_at DESC)`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_subscription_history (
+			id BIGSERIAL PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			event_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount BIGINT NOT NULL DEFAULT 0,
+			quantity BIGINT NOT NULL DEFAULT 0,
+			period_start TIMESTAMPTZ NULL,
+			period_end TIMESTAMPTZ NULL,
+			cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_subscription_history_sub ON stripe_subscription_history(subscription_id, created_at DESC)`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_invoice_summaries (
+			invoice_id TEXT PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			amount_due BIGINT NOT NULL DEFAULT 0,
+			amount_paid BIGINT NOT NULL DEFAULT 0,
+			amount_remaining BIGINT NOT NULL DEFAULT 0,
+			attempt_count BIGINT NOT NULL DEFAULT 0,
+			paid BOOLEAN NOT NULL DEFAULT FALSE,
+			hosted_invoice_url TEXT NOT NULL DEFAULT '',
+			invoice_pdf TEXT NOT NULL DEFAULT '',
+			period_start TIMESTAMPTZ NULL,
+			period_end TIMESTAMPTZ NULL,
+			due_date TIMESTAMPTZ NULL,
+			finalized_at TIMESTAMPTZ NULL,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_customer ON stripe_invoice_summaries(customer_id, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_status ON stripe_invoice_summaries(status, updated_at DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_subscription ON stripe_invoice_summaries(subscription_id, updated_at DESC)`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_mutation_log (
+			idempotency_key TEXT PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '',
+			response_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at DESC)`)
+
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+			id BIGSERIAL PRIMARY KEY,
+			triggered_by TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			summary_json TEXT NOT NULL DEFAULT '',
+			error_json TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ NULL
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC)`)
 
 	return nil
 }
@@ -729,8 +975,8 @@ func (s *PostgresStore) CreateUser(email, hash, name string) (string, error) {
 		return "", err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO users (id, email, password_hash, name, tier)
-		VALUES ($1, $2, $3, $4, 'free')
+		INSERT INTO users (id, email, password_hash, name, tier, role)
+		VALUES ($1, $2, $3, $4, 'free', '')
 	`, id, strings.ToLower(strings.TrimSpace(email)), hash, strings.TrimSpace(name))
 	if err != nil {
 		return "", err
@@ -751,7 +997,7 @@ func (s *PostgresStore) UpdateUserProfile(user models.User) error {
 
 func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
 		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE email = $1
 	`, strings.ToLower(strings.TrimSpace(email)))
@@ -760,7 +1006,7 @@ func (s *PostgresStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *PostgresStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
 		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE id = $1
 	`, id)
@@ -769,7 +1015,7 @@ func (s *PostgresStore) GetUserByID(id string) (*models.User, error) {
 
 func (s *PostgresStore) GetUserByAuthIdentity(provider, subject string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.role, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
 		       u.postal_code, u.preferred_radius_km, u.cross_border_enabled, u.created_at, u.updated_at
 		FROM users u
 		JOIN user_auth_identities i ON i.user_id = u.id
@@ -828,6 +1074,11 @@ func (s *PostgresStore) UpdateUserTier(userID, tier string) error {
 	return err
 }
 
+func (s *PostgresStore) UpdateUserRole(userID, role string) error {
+	_, err := s.db.Exec(`UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2`, strings.TrimSpace(role), userID)
+	return err
+}
+
 func (s *PostgresStore) UpdateStripeCustomer(userID, customerID string) error {
 	_, err := s.db.Exec(`UPDATE users SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2`, customerID, userID)
 	return err
@@ -850,16 +1101,16 @@ func (s *PostgresStore) SetUserAdmin(userID string, isAdmin bool) error {
 
 func (s *PostgresStore) RecordAIUsage(entry models.AIUsageEntry) error {
 	_, err := s.db.Exec(`
-		INSERT INTO ai_usage_log (user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, entry.UserID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
+		INSERT INTO ai_usage_log (user_id, mission_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, entry.UserID, entry.MissionID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
 		entry.LatencyMs, entry.Success, entry.ErrorMsg)
 	return err
 }
 
 func (s *PostgresStore) ListAllUsers() ([]models.AdminUserSummary, error) {
 	rows, err := s.db.Query(`
-		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.role, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
 		       COALESCE(m.cnt, 0) AS mission_count,
 		       COALESCE(sc.cnt, 0) AS search_count,
 		       COALESCE(ai.cnt, 0) AS ai_call_count,
@@ -877,7 +1128,7 @@ func (s *PostgresStore) ListAllUsers() ([]models.AdminUserSummary, error) {
 	var out []models.AdminUserSummary
 	for rows.Next() {
 		var s models.AdminUserSummary
-		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.IsAdmin, &s.StripeCustomer,
+		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.Role, &s.IsAdmin, &s.StripeCustomer,
 			&s.CreatedAt, &s.UpdatedAt, &s.MissionCount, &s.SearchCount, &s.AICallCount, &s.AITokens); err != nil {
 			return nil, err
 		}
@@ -902,7 +1153,7 @@ func (s *PostgresStore) GetAIUsageStats(days int) (models.AIUsageStats, error) {
 
 func (s *PostgresStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
+		SELECT id, user_id, mission_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
 		FROM ai_usage_log
 		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
 		ORDER BY created_at DESC
@@ -915,7 +1166,7 @@ func (s *PostgresStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, err
 	var out []models.AIUsageEntry
 	for rows.Next() {
 		var e models.AIUsageEntry
-		if err := rows.Scan(&e.ID, &e.UserID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
+		if err := rows.Scan(&e.ID, &e.UserID, &e.MissionID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
 			&e.TotalTokens, &e.LatencyMs, &e.Success, &e.ErrorMsg, &e.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -1118,10 +1369,11 @@ func (s *PostgresStore) RecordSearchRun(entry models.SearchRunLog) error {
 func (s *PostgresStore) RecordAdminAuditLog(entry models.AdminAuditLogEntry) error {
 	_, err := s.db.Exec(`
 		INSERT INTO admin_audit_log (
-			actor_user_id, action, target_type, target_id, before_json, after_json
-		) VALUES ($1, $2, $3, $4, $5, $6)
-	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType),
-		strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
+			actor_user_id, actor_role, request_id, action, target_type, target_id, before_json, after_json
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.ActorRole), strings.TrimSpace(entry.RequestID),
+		strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType), strings.TrimSpace(entry.TargetID),
+		strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
 	return err
 }
 
@@ -1236,7 +1488,7 @@ func (s *PostgresStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntr
 		limit = 200
 	}
 	rows, err := s.db.Query(`
-		SELECT id, actor_user_id, action, target_type, target_id, before_json, after_json, created_at
+		SELECT id, actor_user_id, actor_role, request_id, action, target_type, target_id, before_json, after_json, created_at
 		FROM admin_audit_log
 		ORDER BY created_at DESC
 		LIMIT $1
@@ -1249,12 +1501,681 @@ func (s *PostgresStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntr
 	out := make([]models.AdminAuditLogEntry, 0, limit)
 	for rows.Next() {
 		var entry models.AdminAuditLogEntry
-		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &entry.CreatedAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.ActorRole, &entry.RequestID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &entry.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, entry)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpsertStripeWebhookEvent(entry models.StripeWebhookEventLog) error {
+	attemptCount := entry.AttemptCount
+	if attemptCount <= 0 {
+		attemptCount = 1
+	}
+	receivedAt := entry.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_webhook_events (
+			event_id, event_type, object_id, api_account, request_id, status, error_message,
+			attempt_count, payload_json, received_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT(event_id) DO UPDATE SET
+			event_type = EXCLUDED.event_type,
+			object_id = EXCLUDED.object_id,
+			api_account = EXCLUDED.api_account,
+			request_id = EXCLUDED.request_id,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message,
+			attempt_count = GREATEST(stripe_webhook_events.attempt_count, EXCLUDED.attempt_count),
+			payload_json = EXCLUDED.payload_json,
+			received_at = EXCLUDED.received_at,
+			processed_at = EXCLUDED.processed_at
+	`,
+		strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.EventType), strings.TrimSpace(entry.ObjectID),
+		strings.TrimSpace(entry.APIAccount), strings.TrimSpace(entry.RequestID), strings.TrimSpace(entry.Status),
+		strings.TrimSpace(entry.ErrorMessage), attemptCount, strings.TrimSpace(entry.PayloadJSON), receivedAt, nullTime(entry.ProcessedAt),
+	)
+	return err
+}
+
+func (s *PostgresStore) UpsertStripeSubscriptionSnapshot(snapshot models.StripeSubscriptionSnapshot) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_subscription_snapshots (
+			subscription_id, customer_id, user_id, status, plan_price_id, plan_interval, currency,
+			unit_amount, quantity, current_period_start, current_period_end, cancel_at_period_end,
+			canceled_at, paused, latest_invoice_id, default_payment_method, raw_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
+		ON CONFLICT(subscription_id) DO UPDATE SET
+			customer_id = EXCLUDED.customer_id,
+			user_id = EXCLUDED.user_id,
+			status = EXCLUDED.status,
+			plan_price_id = EXCLUDED.plan_price_id,
+			plan_interval = EXCLUDED.plan_interval,
+			currency = EXCLUDED.currency,
+			unit_amount = EXCLUDED.unit_amount,
+			quantity = EXCLUDED.quantity,
+			current_period_start = EXCLUDED.current_period_start,
+			current_period_end = EXCLUDED.current_period_end,
+			cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+			canceled_at = EXCLUDED.canceled_at,
+			paused = EXCLUDED.paused,
+			latest_invoice_id = EXCLUDED.latest_invoice_id,
+			default_payment_method = EXCLUDED.default_payment_method,
+			raw_json = EXCLUDED.raw_json,
+			updated_at = NOW()
+	`,
+		strings.TrimSpace(snapshot.SubscriptionID), strings.TrimSpace(snapshot.CustomerID), strings.TrimSpace(snapshot.UserID),
+		strings.TrimSpace(snapshot.Status), strings.TrimSpace(snapshot.PlanPriceID), strings.TrimSpace(snapshot.PlanInterval),
+		strings.ToUpper(strings.TrimSpace(snapshot.Currency)), snapshot.UnitAmount, snapshot.Quantity,
+		nullTime(snapshot.CurrentPeriodStart), nullTime(snapshot.CurrentPeriodEnd),
+		snapshot.CancelAtPeriodEnd, nullTime(snapshot.CanceledAt), snapshot.Paused,
+		strings.TrimSpace(snapshot.LatestInvoiceID), strings.TrimSpace(snapshot.DefaultPaymentMethod), strings.TrimSpace(snapshot.RawJSON),
+	)
+	return err
+}
+
+func (s *PostgresStore) AppendStripeSubscriptionHistory(entry models.StripeSubscriptionHistoryEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_subscription_history (
+			subscription_id, event_id, event_type, status, plan_price_id, currency, unit_amount, quantity,
+			period_start, period_end, cancel_at_period_end, raw_json
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`,
+		strings.TrimSpace(entry.SubscriptionID), strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.EventType),
+		strings.TrimSpace(entry.Status), strings.TrimSpace(entry.PlanPriceID), strings.ToUpper(strings.TrimSpace(entry.Currency)),
+		entry.UnitAmount, entry.Quantity, nullTime(entry.PeriodStart), nullTime(entry.PeriodEnd), entry.CancelAtEnd, strings.TrimSpace(entry.RawJSON),
+	)
+	return err
+}
+
+func (s *PostgresStore) UpsertStripeInvoiceSummary(invoice models.StripeInvoiceSummary) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_invoice_summaries (
+			invoice_id, subscription_id, customer_id, user_id, status, currency, amount_due, amount_paid,
+			amount_remaining, attempt_count, paid, hosted_invoice_url, invoice_pdf, period_start, period_end,
+			due_date, finalized_at, raw_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
+		ON CONFLICT(invoice_id) DO UPDATE SET
+			subscription_id = EXCLUDED.subscription_id,
+			customer_id = EXCLUDED.customer_id,
+			user_id = EXCLUDED.user_id,
+			status = EXCLUDED.status,
+			currency = EXCLUDED.currency,
+			amount_due = EXCLUDED.amount_due,
+			amount_paid = EXCLUDED.amount_paid,
+			amount_remaining = EXCLUDED.amount_remaining,
+			attempt_count = EXCLUDED.attempt_count,
+			paid = EXCLUDED.paid,
+			hosted_invoice_url = EXCLUDED.hosted_invoice_url,
+			invoice_pdf = EXCLUDED.invoice_pdf,
+			period_start = EXCLUDED.period_start,
+			period_end = EXCLUDED.period_end,
+			due_date = EXCLUDED.due_date,
+			finalized_at = EXCLUDED.finalized_at,
+			raw_json = EXCLUDED.raw_json,
+			updated_at = NOW()
+	`,
+		strings.TrimSpace(invoice.InvoiceID), strings.TrimSpace(invoice.SubscriptionID), strings.TrimSpace(invoice.CustomerID),
+		strings.TrimSpace(invoice.UserID), strings.TrimSpace(invoice.Status), strings.ToUpper(strings.TrimSpace(invoice.Currency)),
+		invoice.AmountDue, invoice.AmountPaid, invoice.AmountRemaining, invoice.AttemptCount, invoice.Paid,
+		strings.TrimSpace(invoice.HostedInvoiceURL), strings.TrimSpace(invoice.InvoicePDF),
+		nullTime(invoice.PeriodStart), nullTime(invoice.PeriodEnd), nullTime(invoice.DueDate), nullTime(invoice.FinalizedAt),
+		strings.TrimSpace(invoice.RawJSON),
+	)
+	return err
+}
+
+func (s *PostgresStore) RecordStripeMutation(entry models.StripeMutationLog) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_mutation_log (
+			idempotency_key, actor_user_id, actor_role, action, target_id, request_json, response_json, status,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		ON CONFLICT(idempotency_key) DO UPDATE SET
+			actor_user_id = EXCLUDED.actor_user_id,
+			actor_role = EXCLUDED.actor_role,
+			action = EXCLUDED.action,
+			target_id = EXCLUDED.target_id,
+			request_json = EXCLUDED.request_json,
+			response_json = EXCLUDED.response_json,
+			status = EXCLUDED.status,
+			updated_at = NOW()
+	`,
+		strings.TrimSpace(entry.IdempotencyKey), strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.ActorRole),
+		strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.RequestJSON),
+		strings.TrimSpace(entry.ResponseJSON), strings.TrimSpace(entry.Status),
+	)
+	return err
+}
+
+func (s *PostgresStore) StartBillingReconcileRun(run models.BillingReconcileRun) (int64, error) {
+	var id int64
+	startedAt := run.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	err := s.db.QueryRow(`
+		INSERT INTO billing_reconcile_runs (triggered_by, status, summary_json, error_json, started_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id
+	`,
+		strings.TrimSpace(run.TriggeredBy), strings.TrimSpace(run.Status), strings.TrimSpace(run.SummaryJSON),
+		strings.TrimSpace(run.ErrorJSON), startedAt,
+	).Scan(&id)
+	return id, err
+}
+
+func (s *PostgresStore) FinishBillingReconcileRun(id int64, status, summaryJSON, errorJSON string) error {
+	_, err := s.db.Exec(`
+		UPDATE billing_reconcile_runs
+		SET status = $1, summary_json = $2, error_json = $3, finished_at = NOW()
+		WHERE id = $4
+	`, strings.TrimSpace(status), strings.TrimSpace(summaryJSON), strings.TrimSpace(errorJSON), id)
+	return err
+}
+
+func (s *PostgresStore) GetLatestBusinessReconcileRun() (*models.BillingReconcileRun, error) {
+	row := s.db.QueryRow(`
+		SELECT id, triggered_by, status, summary_json, error_json, started_at, COALESCE(finished_at, TO_TIMESTAMP(0))
+		FROM billing_reconcile_runs
+		ORDER BY started_at DESC
+		LIMIT 1
+	`)
+	var run models.BillingReconcileRun
+	if err := row.Scan(&run.ID, &run.TriggeredBy, &run.Status, &run.SummaryJSON, &run.ErrorJSON, &run.StartedAt, &run.FinishedAt); err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if run.FinishedAt.Equal(time.Unix(0, 0).UTC()) {
+		run.FinishedAt = time.Time{}
+	}
+	return &run, nil
+}
+
+func (s *PostgresStore) ListUsersWithStripeCustomerIDs() ([]models.User, error) {
+	rows, err := s.db.Query(`
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
+		FROM users
+		WHERE COALESCE(stripe_customer_id, '') <> ''
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]models.User, 0)
+	for rows.Next() {
+		var user models.User
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.Role, &user.IsAdmin,
+			&user.StripeCustomer, &user.CountryCode, &user.Region, &user.City, &user.PostalCode,
+			&user.PreferredRadiusKm, &user.CrossBorderEnabled, &user.CreatedAt, &user.UpdatedAt); err != nil {
+			return nil, err
+		}
+		user.CountryCode = strings.ToUpper(strings.TrimSpace(user.CountryCode))
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *PostgresStore) GetStripeSubscriptionSnapshot(subscriptionID string) (*models.StripeSubscriptionSnapshot, error) {
+	row := s.db.QueryRow(`
+		SELECT subscription_id, customer_id, user_id, status, plan_price_id, plan_interval, currency, unit_amount, quantity,
+		       COALESCE(current_period_start, TO_TIMESTAMP(0)), COALESCE(current_period_end, TO_TIMESTAMP(0)),
+		       cancel_at_period_end, COALESCE(canceled_at, TO_TIMESTAMP(0)), paused, latest_invoice_id,
+		       default_payment_method, raw_json, updated_at, created_at
+		FROM stripe_subscription_snapshots
+		WHERE subscription_id = $1
+	`, strings.TrimSpace(subscriptionID))
+	var snapshot models.StripeSubscriptionSnapshot
+	if err := row.Scan(&snapshot.SubscriptionID, &snapshot.CustomerID, &snapshot.UserID, &snapshot.Status, &snapshot.PlanPriceID,
+		&snapshot.PlanInterval, &snapshot.Currency, &snapshot.UnitAmount, &snapshot.Quantity,
+		&snapshot.CurrentPeriodStart, &snapshot.CurrentPeriodEnd, &snapshot.CancelAtPeriodEnd, &snapshot.CanceledAt,
+		&snapshot.Paused, &snapshot.LatestInvoiceID, &snapshot.DefaultPaymentMethod, &snapshot.RawJSON, &snapshot.UpdatedAt, &snapshot.CreatedAt); err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	zero := time.Unix(0, 0).UTC()
+	if snapshot.CurrentPeriodStart.Equal(zero) {
+		snapshot.CurrentPeriodStart = time.Time{}
+	}
+	if snapshot.CurrentPeriodEnd.Equal(zero) {
+		snapshot.CurrentPeriodEnd = time.Time{}
+	}
+	if snapshot.CanceledAt.Equal(zero) {
+		snapshot.CanceledAt = time.Time{}
+	}
+	return &snapshot, nil
+}
+
+func (s *PostgresStore) GetBusinessOverview(days int) (models.BusinessOverview, error) {
+	if days <= 0 {
+		days = 30
+	}
+	overview := models.BusinessOverview{WindowDays: days}
+
+	rows, err := s.db.Query(`
+		SELECT status, plan_interval, currency, unit_amount, quantity, customer_id
+		FROM stripe_subscription_snapshots
+	`)
+	if err != nil {
+		return overview, err
+	}
+	defer rows.Close()
+
+	activeCustomers := map[string]bool{}
+	for rows.Next() {
+		var status, interval, currency, customerID string
+		var unitAmount, quantity int64
+		if err := rows.Scan(&status, &interval, &currency, &unitAmount, &quantity, &customerID); err != nil {
+			return overview, err
+		}
+		overview.SubscriptionsTotal++
+		if subscriptionIsPaidActive(status) {
+			overview.SubscriptionsActive++
+			if quantity <= 0 {
+				quantity = 1
+			}
+			monthlyAmount := float64(unitAmount * quantity)
+			if strings.EqualFold(strings.TrimSpace(interval), "year") {
+				monthlyAmount = monthlyAmount / 12.0
+			}
+			overview.MRR += amountToEUR(monthlyAmount, currency)
+			if strings.TrimSpace(customerID) != "" {
+				activeCustomers[customerID] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return overview, err
+	}
+	overview.ActivePaidAccounts = len(activeCustomers)
+	overview.ARR = overview.MRR * 12
+
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_invoice_summaries
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND paid = FALSE
+		  AND amount_remaining > 0
+	`, days).Scan(&overview.FailedPayments); err != nil {
+		return overview, err
+	}
+
+	recentRevenue, err := s.sumPaidRevenueInWindow(days)
+	if err != nil {
+		return overview, err
+	}
+	previousRevenue, err := s.sumPaidRevenueRange(days*2, days)
+	if err != nil {
+		return overview, err
+	}
+	overview.RevenueEUR30d = recentRevenue
+	if previousRevenue > 0 {
+		overview.RevenueTrendPct = ((recentRevenue - previousRevenue) / previousRevenue) * 100
+	}
+
+	var churned int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_subscription_history
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND (status IN ('canceled', 'incomplete_expired') OR event_type LIKE '%deleted')
+	`, days).Scan(&churned); err != nil {
+		return overview, err
+	}
+	if overview.ActivePaidAccounts+churned > 0 {
+		overview.ChurnRatePct = float64(churned) * 100 / float64(overview.ActivePaidAccounts+churned)
+	}
+
+	var lastWebhook sql.NullTime
+	if err := s.db.QueryRow(`SELECT MAX(received_at) FROM stripe_webhook_events`).Scan(&lastWebhook); err != nil {
+		return overview, err
+	}
+	if lastWebhook.Valid {
+		overview.WebhookLagMinutes = int(time.Since(lastWebhook.Time).Minutes())
+	}
+
+	latestRun, err := s.GetLatestBusinessReconcileRun()
+	if err != nil {
+		return overview, err
+	}
+	if latestRun != nil {
+		ref := latestRun.StartedAt
+		if !latestRun.FinishedAt.IsZero() {
+			ref = latestRun.FinishedAt
+		}
+		overview.ReconcileLagMinutes = int(time.Since(ref).Minutes())
+	}
+	return overview, nil
+}
+
+func (s *PostgresStore) ListBusinessSubscriptions(filter models.BusinessSubscriptionFilter) ([]models.BusinessSubscriptionRow, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`
+		SELECT ss.subscription_id, ss.customer_id, ss.user_id, COALESCE(u.email, ''), COALESCE(u.tier, 'free'),
+		       ss.status, ss.plan_price_id, ss.plan_interval, ss.currency, ss.unit_amount, ss.quantity,
+		       COALESCE(ss.current_period_start, TO_TIMESTAMP(0)), COALESCE(ss.current_period_end, TO_TIMESTAMP(0)),
+		       ss.cancel_at_period_end, ss.paused, ss.latest_invoice_id,
+		       COALESCE(inv.status, ''), COALESCE(inv.amount_due, 0), COALESCE(inv.amount_paid, 0), COALESCE(inv.amount_remaining, 0),
+		       COALESCE(inv.attempt_count, 0), ss.updated_at
+		FROM stripe_subscription_snapshots ss
+		LEFT JOIN users u ON u.id = ss.user_id
+		LEFT JOIN stripe_invoice_summaries inv ON inv.invoice_id = ss.latest_invoice_id
+		WHERE ($1 = '' OR ss.status = $1)
+		  AND ($2 = '' OR ss.plan_price_id = $2)
+		  AND ($3 = '' OR ss.user_id = $3)
+		  AND ($4 = '' OR UPPER(COALESCE(u.country_code, '')) = $4)
+		ORDER BY ss.updated_at DESC
+		LIMIT $5
+	`,
+		strings.TrimSpace(filter.Status),
+		strings.TrimSpace(filter.PlanPriceID),
+		strings.TrimSpace(filter.UserID),
+		strings.ToUpper(strings.TrimSpace(filter.CountryCode)),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.BusinessSubscriptionRow, 0, limit)
+	zero := time.Unix(0, 0).UTC()
+	for rows.Next() {
+		var row models.BusinessSubscriptionRow
+		if err := rows.Scan(
+			&row.SubscriptionID, &row.CustomerID, &row.UserID, &row.UserEmail, &row.UserTier,
+			&row.Status, &row.PlanPriceID, &row.PlanInterval, &row.Currency, &row.UnitAmount, &row.Quantity,
+			&row.CurrentPeriodStart, &row.CurrentPeriodEnd, &row.CancelAtPeriodEnd, &row.Paused, &row.LatestInvoiceID,
+			&row.InvoiceStatus, &row.AmountDue, &row.AmountPaid, &row.AmountRemaining, &row.AttemptCount, &row.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if row.CurrentPeriodStart.Equal(zero) {
+			row.CurrentPeriodStart = time.Time{}
+		}
+		if row.CurrentPeriodEnd.Equal(zero) {
+			row.CurrentPeriodEnd = time.Time{}
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetBusinessRevenue(days int) ([]models.BusinessRevenuePoint, error) {
+	if days <= 0 {
+		days = 30
+	}
+	rows, err := s.db.Query(`
+		SELECT DATE_TRUNC('day', created_at) AS bucket_day,
+		       UPPER(COALESCE(currency, 'EUR')) AS currency,
+		       COALESCE(SUM(amount_paid), 0) AS amount_paid,
+		       COUNT(*) AS invoices
+		FROM stripe_invoice_summaries
+		WHERE paid = TRUE
+		  AND created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		GROUP BY bucket_day, currency
+		ORDER BY bucket_day ASC
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	points := make([]models.BusinessRevenuePoint, 0)
+	for rows.Next() {
+		var point models.BusinessRevenuePoint
+		if err := rows.Scan(&point.BucketStart, &point.Currency, &point.AmountPaid, &point.Invoices); err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+func (s *PostgresStore) GetBusinessFunnel(days int) (models.BusinessFunnel, error) {
+	if days <= 0 {
+		days = 30
+	}
+	funnel := models.BusinessFunnel{WindowDays: days}
+
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM users
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+	`, days).Scan(&funnel.Signups); err != nil {
+		return funnel, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(DISTINCT u.id), 0)
+		FROM users u
+		WHERE u.created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND (
+			EXISTS (SELECT 1 FROM shopping_profiles sp WHERE sp.user_id = u.id)
+			OR EXISTS (SELECT 1 FROM search_configs sc WHERE sc.user_id = u.id)
+		  )
+	`, days).Scan(&funnel.Activated); err != nil {
+		return funnel, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(DISTINCT u.id), 0)
+		FROM users u
+		JOIN stripe_subscription_snapshots ss ON ss.user_id = u.id
+		WHERE u.created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND ss.status IN ('active', 'trialing', 'past_due', 'unpaid')
+	`, days).Scan(&funnel.Paid); err != nil {
+		return funnel, err
+	}
+	if funnel.Signups > 0 {
+		funnel.SignupToPaidPct = float64(funnel.Paid) * 100 / float64(funnel.Signups)
+	}
+	if funnel.Activated > 0 {
+		funnel.ActivationToPaid = float64(funnel.Paid) * 100 / float64(funnel.Activated)
+	}
+	return funnel, nil
+}
+
+func (s *PostgresStore) GetBusinessCohorts(months int) ([]models.BusinessCohortRow, error) {
+	if months <= 0 {
+		months = 6
+	}
+	rows, err := s.db.Query(`
+		SELECT TO_CHAR(DATE_TRUNC('month', u.created_at), 'YYYY-MM') AS cohort_month,
+		       COUNT(*) AS users,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = TRUE
+					  AND DATE_TRUNC('month', inv.created_at) = DATE_TRUNC('month', u.created_at)
+			   ) THEN 1 ELSE 0 END) AS paid_m0,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = TRUE
+					  AND DATE_TRUNC('month', inv.created_at) = DATE_TRUNC('month', u.created_at + INTERVAL '1 month')
+			   ) THEN 1 ELSE 0 END) AS paid_m1,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = TRUE
+					  AND DATE_TRUNC('month', inv.created_at) = DATE_TRUNC('month', u.created_at + INTERVAL '2 month')
+			   ) THEN 1 ELSE 0 END) AS paid_m2,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (EXTRACT(EPOCH FROM (ss.updated_at - u.created_at)) / 86400.0) <= 30 THEN 1
+					ELSE 0 END) AS churn_early,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (EXTRACT(EPOCH FROM (ss.updated_at - u.created_at)) / 86400.0) > 30
+					 AND (EXTRACT(EPOCH FROM (ss.updated_at - u.created_at)) / 86400.0) <= 90 THEN 1
+					ELSE 0 END) AS churn_middle,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (EXTRACT(EPOCH FROM (ss.updated_at - u.created_at)) / 86400.0) > 90 THEN 1
+					ELSE 0 END) AS churn_late
+		FROM users u
+		LEFT JOIN stripe_subscription_snapshots ss ON ss.user_id = u.id
+		WHERE u.created_at >= NOW() - MAKE_INTERVAL(months => $1)
+		GROUP BY cohort_month
+		ORDER BY cohort_month DESC
+		LIMIT $1
+	`, months)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cohorts := make([]models.BusinessCohortRow, 0, months)
+	for rows.Next() {
+		var row models.BusinessCohortRow
+		if err := rows.Scan(&row.CohortMonth, &row.Users, &row.PaidMonth0, &row.PaidMonth1, &row.PaidMonth2,
+			&row.ChurnBucketEarly, &row.ChurnBucketMiddle, &row.ChurnBucketLate); err != nil {
+			return nil, err
+		}
+		if row.Users > 0 {
+			row.RetentionMonth1 = float64(row.PaidMonth1) * 100 / float64(row.Users)
+			row.RetentionMonth2 = float64(row.PaidMonth2) * 100 / float64(row.Users)
+		}
+		cohorts = append(cohorts, row)
+	}
+	return cohorts, rows.Err()
+}
+
+func (s *PostgresStore) GetBusinessAlerts(days int) ([]models.BusinessAlert, error) {
+	if days <= 0 {
+		days = 7
+	}
+	alerts := make([]models.BusinessAlert, 0)
+
+	var failed24h int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = FALSE
+		  AND amount_remaining > 0
+		  AND created_at >= NOW() - INTERVAL '1 day'
+	`).Scan(&failed24h); err != nil {
+		return nil, err
+	}
+	if failed24h >= 3 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "failed_payments_spike",
+			Severity:    "high",
+			Title:       "Failed payment spike",
+			Description: "More than 3 failed invoices in the last 24h.",
+			Value:       fmt.Sprintf("%d", failed24h),
+			Threshold:   ">= 3",
+		})
+	}
+
+	var churned int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_subscription_history
+		WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		  AND (status IN ('canceled', 'incomplete_expired') OR event_type LIKE '%deleted')
+	`, days).Scan(&churned); err != nil {
+		return nil, err
+	}
+	overview, err := s.GetBusinessOverview(days)
+	if err != nil {
+		return nil, err
+	}
+	denom := overview.ActivePaidAccounts + churned
+	if denom > 0 {
+		churnPct := float64(churned) * 100 / float64(denom)
+		if churnPct >= 10 {
+			alerts = append(alerts, models.BusinessAlert{
+				Key:         "churn_spike",
+				Severity:    "high",
+				Title:       "Churn spike",
+				Description: "Cancellation ratio crossed the configured threshold.",
+				Value:       fmt.Sprintf("%.1f%%", churnPct),
+				Threshold:   ">= 10%",
+			})
+		}
+	}
+	if overview.WebhookLagMinutes >= 20 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "webhook_lag",
+			Severity:    "medium",
+			Title:       "Stripe webhook lag",
+			Description: "No fresh Stripe webhook events were processed recently.",
+			Value:       fmt.Sprintf("%d min", overview.WebhookLagMinutes),
+			Threshold:   ">= 20 min",
+		})
+	}
+	if overview.ReconcileLagMinutes >= 120 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "reconcile_lag",
+			Severity:    "medium",
+			Title:       "Reconcile lag",
+			Description: "Billing reconciliation is older than expected.",
+			Value:       fmt.Sprintf("%d min", overview.ReconcileLagMinutes),
+			Threshold:   ">= 120 min",
+		})
+	}
+	return alerts, nil
+}
+
+func (s *PostgresStore) sumPaidRevenueInWindow(days int) (float64, error) {
+	rows, err := s.db.Query(`
+		SELECT UPPER(COALESCE(currency, 'EUR')), COALESCE(SUM(amount_paid), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = TRUE
+		  AND created_at >= NOW() - MAKE_INTERVAL(days => $1)
+		GROUP BY UPPER(COALESCE(currency, 'EUR'))
+	`, days)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0.0
+	for rows.Next() {
+		var currency string
+		var amount int64
+		if err := rows.Scan(&currency, &amount); err != nil {
+			return 0, err
+		}
+		total += amountToEUR(float64(amount), currency)
+	}
+	return total, rows.Err()
+}
+
+func (s *PostgresStore) sumPaidRevenueRange(fromDaysAgo, toDaysAgo int) (float64, error) {
+	rows, err := s.db.Query(`
+		SELECT UPPER(COALESCE(currency, 'EUR')), COALESCE(SUM(amount_paid), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = TRUE
+		  AND created_at < NOW() - MAKE_INTERVAL(days => $1)
+		  AND created_at >= NOW() - MAKE_INTERVAL(days => $2)
+		GROUP BY UPPER(COALESCE(currency, 'EUR'))
+	`, toDaysAgo, fromDaysAgo)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0.0
+	for rows.Next() {
+		var currency string
+		var amount int64
+		if err := rows.Scan(&currency, &amount); err != nil {
+			return 0, err
+		}
+		total += amountToEUR(float64(amount), currency)
+	}
+	return total, rows.Err()
 }
 
 func (s *PostgresStore) fillPGSearchOpsBreakdown(days int, column string, out *map[string]int) error {
@@ -1637,7 +2558,7 @@ func scanPGMissionInternal(scanner interface{ Scan(dest ...any) error }, withSta
 
 func scanPGUser(row *sql.Row) (*models.User, error) {
 	var user models.User
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer,
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.Role, &user.IsAdmin, &user.StripeCustomer,
 		&user.CountryCode, &user.Region, &user.City, &user.PostalCode, &user.PreferredRadiusKm, &user.CrossBorderEnabled, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil

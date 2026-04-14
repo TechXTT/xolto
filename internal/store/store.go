@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,6 +161,7 @@ func migrate(db *sql.DB) error {
 			password_hash TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			tier TEXT NOT NULL DEFAULT 'free',
+			role TEXT NOT NULL DEFAULT '',
 			stripe_customer_id TEXT NOT NULL DEFAULT '',
 			country_code TEXT NOT NULL DEFAULT '',
 			region TEXT NOT NULL DEFAULT '',
@@ -257,6 +259,8 @@ func migrate(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS admin_audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
 			action TEXT NOT NULL DEFAULT '',
 			target_type TEXT NOT NULL DEFAULT '',
 			target_id TEXT NOT NULL DEFAULT '',
@@ -266,6 +270,117 @@ func migrate(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at);
 		CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at);
+
+		CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL DEFAULT '',
+			object_id TEXT NOT NULL DEFAULT '',
+			api_account TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'received',
+			error_message TEXT NOT NULL DEFAULT '',
+			attempt_count INTEGER NOT NULL DEFAULT 1,
+			payload_json TEXT NOT NULL DEFAULT '',
+			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			processed_at DATETIME NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at);
+		CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at);
+
+		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
+			subscription_id TEXT PRIMARY KEY,
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			plan_interval TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount INTEGER NOT NULL DEFAULT 0,
+			quantity INTEGER NOT NULL DEFAULT 0,
+			current_period_start DATETIME NULL,
+			current_period_end DATETIME NULL,
+			cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+			canceled_at DATETIME NULL,
+			paused INTEGER NOT NULL DEFAULT 0,
+			latest_invoice_id TEXT NOT NULL DEFAULT '',
+			default_payment_method TEXT NOT NULL DEFAULT '',
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_customer ON stripe_subscription_snapshots(customer_id, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_status ON stripe_subscription_snapshots(status, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_user ON stripe_subscription_snapshots(user_id, updated_at);
+
+		CREATE TABLE IF NOT EXISTS stripe_subscription_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			event_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount INTEGER NOT NULL DEFAULT 0,
+			quantity INTEGER NOT NULL DEFAULT 0,
+			period_start DATETIME NULL,
+			period_end DATETIME NULL,
+			cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_subscription_history_sub ON stripe_subscription_history(subscription_id, created_at);
+
+		CREATE TABLE IF NOT EXISTS stripe_invoice_summaries (
+			invoice_id TEXT PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			amount_due INTEGER NOT NULL DEFAULT 0,
+			amount_paid INTEGER NOT NULL DEFAULT 0,
+			amount_remaining INTEGER NOT NULL DEFAULT 0,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			paid INTEGER NOT NULL DEFAULT 0,
+			hosted_invoice_url TEXT NOT NULL DEFAULT '',
+			invoice_pdf TEXT NOT NULL DEFAULT '',
+			period_start DATETIME NULL,
+			period_end DATETIME NULL,
+			due_date DATETIME NULL,
+			finalized_at DATETIME NULL,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_customer ON stripe_invoice_summaries(customer_id, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_status ON stripe_invoice_summaries(status, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_subscription ON stripe_invoice_summaries(subscription_id, updated_at);
+
+		CREATE TABLE IF NOT EXISTS stripe_mutation_log (
+			idempotency_key TEXT PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '',
+			response_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at);
+
+		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			triggered_by TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			summary_json TEXT NOT NULL DEFAULT '',
+			error_json TEXT NOT NULL DEFAULT '',
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -302,6 +417,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN postal_code TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN preferred_radius_km INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN cross_border_enabled INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE search_configs ADD COLUMN city TEXT NOT NULL DEFAULT ''`)
@@ -321,10 +437,12 @@ func migrate(db *sql.DB) error {
 
 	// Admin & AI usage tracking.
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`UPDATE users SET role = 'admin' WHERE is_admin = 1 AND COALESCE(role, '') = ''`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS ai_usage_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id TEXT NOT NULL DEFAULT '',
+			mission_id INTEGER NOT NULL DEFAULT 0,
 			call_type TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -336,7 +454,9 @@ func migrate(db *sql.DB) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
+	_, _ = db.Exec(`ALTER TABLE ai_usage_log ADD COLUMN mission_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_user_mission ON ai_usage_log(user_id, mission_id, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_log(created_at)`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS user_auth_identities (
@@ -392,6 +512,131 @@ func migrate(db *sql.DB) error {
 	`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor ON admin_audit_log(actor_user_id, created_at)`)
+	_, _ = db.Exec(`ALTER TABLE admin_audit_log ADD COLUMN actor_role TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE admin_audit_log ADD COLUMN request_id TEXT NOT NULL DEFAULT ''`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL DEFAULT '',
+			object_id TEXT NOT NULL DEFAULT '',
+			api_account TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'received',
+			error_message TEXT NOT NULL DEFAULT '',
+			attempt_count INTEGER NOT NULL DEFAULT 1,
+			payload_json TEXT NOT NULL DEFAULT '',
+			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			processed_at DATETIME NULL
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at)`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
+			subscription_id TEXT PRIMARY KEY,
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			plan_interval TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount INTEGER NOT NULL DEFAULT 0,
+			quantity INTEGER NOT NULL DEFAULT 0,
+			current_period_start DATETIME NULL,
+			current_period_end DATETIME NULL,
+			cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+			canceled_at DATETIME NULL,
+			paused INTEGER NOT NULL DEFAULT 0,
+			latest_invoice_id TEXT NOT NULL DEFAULT '',
+			default_payment_method TEXT NOT NULL DEFAULT '',
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_customer ON stripe_subscription_snapshots(customer_id, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_status ON stripe_subscription_snapshots(status, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_subscription_snapshots_user ON stripe_subscription_snapshots(user_id, updated_at)`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_subscription_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			event_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			plan_price_id TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			unit_amount INTEGER NOT NULL DEFAULT 0,
+			quantity INTEGER NOT NULL DEFAULT 0,
+			period_start DATETIME NULL,
+			period_end DATETIME NULL,
+			cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_subscription_history_sub ON stripe_subscription_history(subscription_id, created_at)`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_invoice_summaries (
+			invoice_id TEXT PRIMARY KEY,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			customer_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			currency TEXT NOT NULL DEFAULT '',
+			amount_due INTEGER NOT NULL DEFAULT 0,
+			amount_paid INTEGER NOT NULL DEFAULT 0,
+			amount_remaining INTEGER NOT NULL DEFAULT 0,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			paid INTEGER NOT NULL DEFAULT 0,
+			hosted_invoice_url TEXT NOT NULL DEFAULT '',
+			invoice_pdf TEXT NOT NULL DEFAULT '',
+			period_start DATETIME NULL,
+			period_end DATETIME NULL,
+			due_date DATETIME NULL,
+			finalized_at DATETIME NULL,
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_customer ON stripe_invoice_summaries(customer_id, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_status ON stripe_invoice_summaries(status, updated_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_invoice_summaries_subscription ON stripe_invoice_summaries(subscription_id, updated_at)`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_mutation_log (
+			idempotency_key TEXT PRIMARY KEY,
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			actor_role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '',
+			response_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at)`)
+
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			triggered_by TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			summary_json TEXT NOT NULL DEFAULT '',
+			error_json TEXT NOT NULL DEFAULT '',
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME NULL
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC)`)
 
 	return nil
 }
@@ -822,8 +1067,8 @@ func (s *SQLiteStore) CreateUser(email, hash, name string) (string, error) {
 		return "", err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO users (id, email, password_hash, name, tier)
-		VALUES (?, ?, ?, ?, 'free')
+		INSERT INTO users (id, email, password_hash, name, tier, role)
+		VALUES (?, ?, ?, ?, 'free', '')
 	`, id, strings.ToLower(strings.TrimSpace(email)), hash, strings.TrimSpace(name))
 	if err != nil {
 		return "", err
@@ -843,7 +1088,7 @@ func (s *SQLiteStore) UpdateUserProfile(user models.User) error {
 
 func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
 		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE email = ?
 	`, strings.ToLower(strings.TrimSpace(email)))
@@ -852,7 +1097,7 @@ func (s *SQLiteStore) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *SQLiteStore) GetUserByID(id string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT id, email, password_hash, name, tier, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
 		       preferred_radius_km, cross_border_enabled, created_at, updated_at
 		FROM users WHERE id = ?
 	`, id)
@@ -861,7 +1106,7 @@ func (s *SQLiteStore) GetUserByID(id string) (*models.User, error) {
 
 func (s *SQLiteStore) GetUserByAuthIdentity(provider, subject string) (*models.User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.role, u.is_admin, u.stripe_customer_id, u.country_code, u.region, u.city,
 		       u.postal_code, u.preferred_radius_km, u.cross_border_enabled, u.created_at, u.updated_at
 		FROM users u
 		JOIN user_auth_identities i ON i.user_id = u.id
@@ -920,6 +1165,11 @@ func (s *SQLiteStore) UpdateUserTier(userID, tier string) error {
 	return err
 }
 
+func (s *SQLiteStore) UpdateUserRole(userID, role string) error {
+	_, err := s.db.Exec(`UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, strings.TrimSpace(role), userID)
+	return err
+}
+
 func (s *SQLiteStore) UpdateStripeCustomer(userID, customerID string) error {
 	_, err := s.db.Exec(`UPDATE users SET stripe_customer_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, customerID, userID)
 	return err
@@ -950,16 +1200,16 @@ func (s *SQLiteStore) RecordAIUsage(entry models.AIUsageEntry) error {
 		success = 0
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO ai_usage_log (user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, entry.UserID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
+		INSERT INTO ai_usage_log (user_id, mission_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, entry.UserID, entry.MissionID, entry.CallType, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
 		entry.LatencyMs, success, entry.ErrorMsg)
 	return err
 }
 
 func (s *SQLiteStore) ListAllUsers() ([]models.AdminUserSummary, error) {
 	rows, err := s.db.Query(`
-		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
+		SELECT u.id, u.email, u.password_hash, u.name, u.tier, u.role, u.is_admin, u.stripe_customer_id, u.created_at, u.updated_at,
 		       COALESCE(m.cnt, 0) AS mission_count,
 		       COALESCE(sc.cnt, 0) AS search_count,
 		       COALESCE(ai.cnt, 0) AS ai_call_count,
@@ -978,7 +1228,7 @@ func (s *SQLiteStore) ListAllUsers() ([]models.AdminUserSummary, error) {
 	for rows.Next() {
 		var s models.AdminUserSummary
 		var createdAt, updatedAt string
-		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.IsAdmin, &s.StripeCustomer,
+		if err := rows.Scan(&s.ID, &s.Email, &s.PasswordHash, &s.Name, &s.Tier, &s.Role, &s.IsAdmin, &s.StripeCustomer,
 			&createdAt, &updatedAt, &s.MissionCount, &s.SearchCount, &s.AICallCount, &s.AITokens); err != nil {
 			return nil, err
 		}
@@ -1005,7 +1255,7 @@ func (s *SQLiteStore) GetAIUsageStats(days int) (models.AIUsageStats, error) {
 
 func (s *SQLiteStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
+		SELECT id, user_id, mission_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error_msg, created_at
 		FROM ai_usage_log
 		WHERE created_at >= datetime('now', '-' || ? || ' days')
 		ORDER BY created_at DESC
@@ -1020,7 +1270,7 @@ func (s *SQLiteStore) GetAIUsageTimeline(days int) ([]models.AIUsageEntry, error
 		var e models.AIUsageEntry
 		var successInt int
 		var createdAt string
-		if err := rows.Scan(&e.ID, &e.UserID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
+		if err := rows.Scan(&e.ID, &e.UserID, &e.MissionID, &e.CallType, &e.Model, &e.PromptTokens, &e.CompletionTokens,
 			&e.TotalTokens, &e.LatencyMs, &successInt, &e.ErrorMsg, &createdAt); err != nil {
 			return nil, err
 		}
@@ -1430,10 +1680,11 @@ func (s *SQLiteStore) RecordSearchRun(entry models.SearchRunLog) error {
 func (s *SQLiteStore) RecordAdminAuditLog(entry models.AdminAuditLogEntry) error {
 	_, err := s.db.Exec(`
 		INSERT INTO admin_audit_log (
-			actor_user_id, action, target_type, target_id, before_json, after_json
-		) VALUES (?, ?, ?, ?, ?, ?)
-	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType),
-		strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
+			actor_user_id, actor_role, request_id, action, target_type, target_id, before_json, after_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.ActorRole), strings.TrimSpace(entry.RequestID),
+		strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetType), strings.TrimSpace(entry.TargetID),
+		strings.TrimSpace(entry.BeforeJSON), strings.TrimSpace(entry.AfterJSON))
 	return err
 }
 
@@ -1552,7 +1803,7 @@ func (s *SQLiteStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry,
 		limit = 200
 	}
 	rows, err := s.db.Query(`
-		SELECT id, actor_user_id, action, target_type, target_id, before_json, after_json, created_at
+		SELECT id, actor_user_id, actor_role, request_id, action, target_type, target_id, before_json, after_json, created_at
 		FROM admin_audit_log
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -1566,13 +1817,700 @@ func (s *SQLiteStore) ListAdminAuditLog(limit int) ([]models.AdminAuditLogEntry,
 	for rows.Next() {
 		var entry models.AdminAuditLogEntry
 		var createdAt string
-		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &createdAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.ActorUserID, &entry.ActorRole, &entry.RequestID, &entry.Action, &entry.TargetType, &entry.TargetID, &entry.BeforeJSON, &entry.AfterJSON, &createdAt); err != nil {
 			return nil, err
 		}
 		entry.CreatedAt, _ = parseSQLiteTime(createdAt)
 		out = append(out, entry)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpsertStripeWebhookEvent(entry models.StripeWebhookEventLog) error {
+	receivedAt := sqliteTimeOrZero(entry.ReceivedAt)
+	processedAt := sqliteTimeOrNil(entry.ProcessedAt)
+	attemptCount := entry.AttemptCount
+	if attemptCount <= 0 {
+		attemptCount = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_webhook_events (
+			event_id, event_type, object_id, api_account, request_id, status, error_message,
+			attempt_count, payload_json, received_at, processed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(event_id) DO UPDATE SET
+			event_type = excluded.event_type,
+			object_id = excluded.object_id,
+			api_account = excluded.api_account,
+			request_id = excluded.request_id,
+			status = excluded.status,
+			error_message = excluded.error_message,
+			attempt_count = CASE
+				WHEN excluded.attempt_count > stripe_webhook_events.attempt_count THEN excluded.attempt_count
+				ELSE stripe_webhook_events.attempt_count
+			END,
+			payload_json = excluded.payload_json,
+			received_at = excluded.received_at,
+			processed_at = excluded.processed_at
+	`,
+		strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.EventType), strings.TrimSpace(entry.ObjectID),
+		strings.TrimSpace(entry.APIAccount), strings.TrimSpace(entry.RequestID), strings.TrimSpace(entry.Status),
+		strings.TrimSpace(entry.ErrorMessage), attemptCount, strings.TrimSpace(entry.PayloadJSON), receivedAt, processedAt,
+	)
+	return err
+}
+
+func (s *SQLiteStore) UpsertStripeSubscriptionSnapshot(snapshot models.StripeSubscriptionSnapshot) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_subscription_snapshots (
+			subscription_id, customer_id, user_id, status, plan_price_id, plan_interval, currency,
+			unit_amount, quantity, current_period_start, current_period_end, cancel_at_period_end,
+			canceled_at, paused, latest_invoice_id, default_payment_method, raw_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(subscription_id) DO UPDATE SET
+			customer_id = excluded.customer_id,
+			user_id = excluded.user_id,
+			status = excluded.status,
+			plan_price_id = excluded.plan_price_id,
+			plan_interval = excluded.plan_interval,
+			currency = excluded.currency,
+			unit_amount = excluded.unit_amount,
+			quantity = excluded.quantity,
+			current_period_start = excluded.current_period_start,
+			current_period_end = excluded.current_period_end,
+			cancel_at_period_end = excluded.cancel_at_period_end,
+			canceled_at = excluded.canceled_at,
+			paused = excluded.paused,
+			latest_invoice_id = excluded.latest_invoice_id,
+			default_payment_method = excluded.default_payment_method,
+			raw_json = excluded.raw_json,
+			updated_at = CURRENT_TIMESTAMP
+	`,
+		strings.TrimSpace(snapshot.SubscriptionID), strings.TrimSpace(snapshot.CustomerID), strings.TrimSpace(snapshot.UserID),
+		strings.TrimSpace(snapshot.Status), strings.TrimSpace(snapshot.PlanPriceID), strings.TrimSpace(snapshot.PlanInterval),
+		strings.ToUpper(strings.TrimSpace(snapshot.Currency)), snapshot.UnitAmount, snapshot.Quantity,
+		sqliteTimeOrNil(snapshot.CurrentPeriodStart), sqliteTimeOrNil(snapshot.CurrentPeriodEnd),
+		boolToInt(snapshot.CancelAtPeriodEnd), sqliteTimeOrNil(snapshot.CanceledAt), boolToInt(snapshot.Paused),
+		strings.TrimSpace(snapshot.LatestInvoiceID), strings.TrimSpace(snapshot.DefaultPaymentMethod), strings.TrimSpace(snapshot.RawJSON),
+	)
+	return err
+}
+
+func (s *SQLiteStore) AppendStripeSubscriptionHistory(entry models.StripeSubscriptionHistoryEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_subscription_history (
+			subscription_id, event_id, event_type, status, plan_price_id, currency, unit_amount, quantity,
+			period_start, period_end, cancel_at_period_end, raw_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		strings.TrimSpace(entry.SubscriptionID), strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.EventType),
+		strings.TrimSpace(entry.Status), strings.TrimSpace(entry.PlanPriceID), strings.ToUpper(strings.TrimSpace(entry.Currency)),
+		entry.UnitAmount, entry.Quantity, sqliteTimeOrNil(entry.PeriodStart), sqliteTimeOrNil(entry.PeriodEnd),
+		boolToInt(entry.CancelAtEnd), strings.TrimSpace(entry.RawJSON),
+	)
+	return err
+}
+
+func (s *SQLiteStore) UpsertStripeInvoiceSummary(invoice models.StripeInvoiceSummary) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_invoice_summaries (
+			invoice_id, subscription_id, customer_id, user_id, status, currency, amount_due, amount_paid,
+			amount_remaining, attempt_count, paid, hosted_invoice_url, invoice_pdf, period_start, period_end,
+			due_date, finalized_at, raw_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(invoice_id) DO UPDATE SET
+			subscription_id = excluded.subscription_id,
+			customer_id = excluded.customer_id,
+			user_id = excluded.user_id,
+			status = excluded.status,
+			currency = excluded.currency,
+			amount_due = excluded.amount_due,
+			amount_paid = excluded.amount_paid,
+			amount_remaining = excluded.amount_remaining,
+			attempt_count = excluded.attempt_count,
+			paid = excluded.paid,
+			hosted_invoice_url = excluded.hosted_invoice_url,
+			invoice_pdf = excluded.invoice_pdf,
+			period_start = excluded.period_start,
+			period_end = excluded.period_end,
+			due_date = excluded.due_date,
+			finalized_at = excluded.finalized_at,
+			raw_json = excluded.raw_json,
+			updated_at = CURRENT_TIMESTAMP
+	`,
+		strings.TrimSpace(invoice.InvoiceID), strings.TrimSpace(invoice.SubscriptionID), strings.TrimSpace(invoice.CustomerID),
+		strings.TrimSpace(invoice.UserID), strings.TrimSpace(invoice.Status), strings.ToUpper(strings.TrimSpace(invoice.Currency)),
+		invoice.AmountDue, invoice.AmountPaid, invoice.AmountRemaining, invoice.AttemptCount, boolToInt(invoice.Paid),
+		strings.TrimSpace(invoice.HostedInvoiceURL), strings.TrimSpace(invoice.InvoicePDF),
+		sqliteTimeOrNil(invoice.PeriodStart), sqliteTimeOrNil(invoice.PeriodEnd), sqliteTimeOrNil(invoice.DueDate),
+		sqliteTimeOrNil(invoice.FinalizedAt), strings.TrimSpace(invoice.RawJSON),
+	)
+	return err
+}
+
+func (s *SQLiteStore) RecordStripeMutation(entry models.StripeMutationLog) error {
+	_, err := s.db.Exec(`
+		INSERT INTO stripe_mutation_log (
+			idempotency_key, actor_user_id, actor_role, action, target_id, request_json, response_json, status,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(idempotency_key) DO UPDATE SET
+			actor_user_id = excluded.actor_user_id,
+			actor_role = excluded.actor_role,
+			action = excluded.action,
+			target_id = excluded.target_id,
+			request_json = excluded.request_json,
+			response_json = excluded.response_json,
+			status = excluded.status,
+			updated_at = CURRENT_TIMESTAMP
+	`,
+		strings.TrimSpace(entry.IdempotencyKey), strings.TrimSpace(entry.ActorUserID), strings.TrimSpace(entry.ActorRole),
+		strings.TrimSpace(entry.Action), strings.TrimSpace(entry.TargetID), strings.TrimSpace(entry.RequestJSON),
+		strings.TrimSpace(entry.ResponseJSON), strings.TrimSpace(entry.Status),
+	)
+	return err
+}
+
+func (s *SQLiteStore) StartBillingReconcileRun(run models.BillingReconcileRun) (int64, error) {
+	result, err := s.db.Exec(`
+		INSERT INTO billing_reconcile_runs (triggered_by, status, summary_json, error_json, started_at)
+		VALUES (?, ?, ?, ?, ?)
+	`,
+		strings.TrimSpace(run.TriggeredBy), strings.TrimSpace(run.Status),
+		strings.TrimSpace(run.SummaryJSON), strings.TrimSpace(run.ErrorJSON), sqliteTimeOrZero(run.StartedAt),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (s *SQLiteStore) FinishBillingReconcileRun(id int64, status, summaryJSON, errorJSON string) error {
+	_, err := s.db.Exec(`
+		UPDATE billing_reconcile_runs
+		SET status = ?, summary_json = ?, error_json = ?, finished_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(summaryJSON), strings.TrimSpace(errorJSON), id)
+	return err
+}
+
+func (s *SQLiteStore) GetLatestBusinessReconcileRun() (*models.BillingReconcileRun, error) {
+	row := s.db.QueryRow(`
+		SELECT id, triggered_by, status, summary_json, error_json, started_at, finished_at
+		FROM billing_reconcile_runs
+		ORDER BY started_at DESC
+		LIMIT 1
+	`)
+	var run models.BillingReconcileRun
+	var startedAt string
+	var finishedAt sql.NullString
+	err := row.Scan(&run.ID, &run.TriggeredBy, &run.Status, &run.SummaryJSON, &run.ErrorJSON, &startedAt, &finishedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	run.StartedAt, _ = parseSQLiteTime(startedAt)
+	run.FinishedAt = parseNullSQLiteTime(finishedAt)
+	return &run, nil
+}
+
+func (s *SQLiteStore) ListUsersWithStripeCustomerIDs() ([]models.User, error) {
+	rows, err := s.db.Query(`
+		SELECT id, email, password_hash, name, tier, role, is_admin, stripe_customer_id, country_code, region, city, postal_code,
+		       preferred_radius_km, cross_border_enabled, created_at, updated_at
+		FROM users
+		WHERE IFNULL(stripe_customer_id, '') <> ''
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]models.User, 0)
+	for rows.Next() {
+		var user models.User
+		var crossBorder int
+		var createdAt, updatedAt string
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.Role, &user.IsAdmin,
+			&user.StripeCustomer, &user.CountryCode, &user.Region, &user.City, &user.PostalCode,
+			&user.PreferredRadiusKm, &crossBorder, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		user.CrossBorderEnabled = crossBorder == 1
+		user.CountryCode = strings.ToUpper(strings.TrimSpace(user.CountryCode))
+		user.CreatedAt, _ = parseSQLiteTime(createdAt)
+		user.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *SQLiteStore) GetStripeSubscriptionSnapshot(subscriptionID string) (*models.StripeSubscriptionSnapshot, error) {
+	row := s.db.QueryRow(`
+		SELECT subscription_id, customer_id, user_id, status, plan_price_id, plan_interval, currency, unit_amount, quantity,
+		       current_period_start, current_period_end, cancel_at_period_end, canceled_at, paused, latest_invoice_id,
+		       default_payment_method, raw_json, updated_at, created_at
+		FROM stripe_subscription_snapshots
+		WHERE subscription_id = ?
+	`, strings.TrimSpace(subscriptionID))
+	var snapshot models.StripeSubscriptionSnapshot
+	var periodStart, periodEnd, canceledAt sql.NullString
+	var updatedAt, createdAt string
+	var cancelAtEnd, paused int
+	err := row.Scan(&snapshot.SubscriptionID, &snapshot.CustomerID, &snapshot.UserID, &snapshot.Status, &snapshot.PlanPriceID,
+		&snapshot.PlanInterval, &snapshot.Currency, &snapshot.UnitAmount, &snapshot.Quantity, &periodStart, &periodEnd,
+		&cancelAtEnd, &canceledAt, &paused, &snapshot.LatestInvoiceID, &snapshot.DefaultPaymentMethod, &snapshot.RawJSON,
+		&updatedAt, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	snapshot.CurrentPeriodStart = parseNullSQLiteTime(periodStart)
+	snapshot.CurrentPeriodEnd = parseNullSQLiteTime(periodEnd)
+	snapshot.CanceledAt = parseNullSQLiteTime(canceledAt)
+	snapshot.CancelAtPeriodEnd = cancelAtEnd == 1
+	snapshot.Paused = paused == 1
+	snapshot.UpdatedAt, _ = parseSQLiteTime(updatedAt)
+	snapshot.CreatedAt, _ = parseSQLiteTime(createdAt)
+	return &snapshot, nil
+}
+
+func (s *SQLiteStore) GetBusinessOverview(days int) (models.BusinessOverview, error) {
+	if days <= 0 {
+		days = 30
+	}
+	overview := models.BusinessOverview{WindowDays: days}
+
+	rows, err := s.db.Query(`
+		SELECT status, plan_interval, currency, unit_amount, quantity, customer_id
+		FROM stripe_subscription_snapshots
+	`)
+	if err != nil {
+		return overview, err
+	}
+	defer rows.Close()
+
+	activeCustomers := map[string]bool{}
+	for rows.Next() {
+		var status, interval, currency, customerID string
+		var unitAmount, quantity int64
+		if err := rows.Scan(&status, &interval, &currency, &unitAmount, &quantity, &customerID); err != nil {
+			return overview, err
+		}
+		overview.SubscriptionsTotal++
+		if subscriptionIsPaidActive(status) {
+			overview.SubscriptionsActive++
+			if quantity <= 0 {
+				quantity = 1
+			}
+			monthlyAmount := float64(unitAmount * quantity)
+			if strings.EqualFold(strings.TrimSpace(interval), "year") {
+				monthlyAmount = monthlyAmount / 12.0
+			}
+			overview.MRR += amountToEUR(monthlyAmount, currency)
+			if strings.TrimSpace(customerID) != "" {
+				activeCustomers[customerID] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return overview, err
+	}
+	overview.ActivePaidAccounts = len(activeCustomers)
+	overview.ARR = overview.MRR * 12
+
+	var failedPayments int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_invoice_summaries
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+		  AND paid = 0
+		  AND amount_remaining > 0
+	`, days).Scan(&failedPayments); err != nil {
+		return overview, err
+	}
+	overview.FailedPayments = failedPayments
+
+	recentRevenue, err := s.sumPaidRevenueInWindow(days)
+	if err != nil {
+		return overview, err
+	}
+	previousRevenue, err := s.sumPaidRevenueRange(days*2, days)
+	if err != nil {
+		return overview, err
+	}
+	overview.RevenueEUR30d = recentRevenue
+	if previousRevenue > 0 {
+		overview.RevenueTrendPct = ((recentRevenue - previousRevenue) / previousRevenue) * 100
+	}
+
+	var churned int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_subscription_history
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+		  AND (status IN ('canceled', 'incomplete_expired') OR event_type LIKE '%deleted')
+	`, days).Scan(&churned); err != nil {
+		return overview, err
+	}
+	if overview.ActivePaidAccounts+churned > 0 {
+		overview.ChurnRatePct = float64(churned) * 100 / float64(overview.ActivePaidAccounts+churned)
+	}
+
+	var lastWebhook sql.NullString
+	if err := s.db.QueryRow(`
+		SELECT MAX(received_at) FROM stripe_webhook_events
+	`).Scan(&lastWebhook); err != nil {
+		return overview, err
+	}
+	if lastWebhook.Valid {
+		if parsed, err := parseSQLiteTime(lastWebhook.String); err == nil {
+			overview.WebhookLagMinutes = int(time.Since(parsed).Minutes())
+		}
+	}
+
+	latestRun, err := s.GetLatestBusinessReconcileRun()
+	if err != nil {
+		return overview, err
+	}
+	if latestRun != nil {
+		ref := latestRun.StartedAt
+		if !latestRun.FinishedAt.IsZero() {
+			ref = latestRun.FinishedAt
+		}
+		overview.ReconcileLagMinutes = int(time.Since(ref).Minutes())
+	}
+	return overview, nil
+}
+
+func (s *SQLiteStore) ListBusinessSubscriptions(filter models.BusinessSubscriptionFilter) ([]models.BusinessSubscriptionRow, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	status := strings.TrimSpace(filter.Status)
+	planPriceID := strings.TrimSpace(filter.PlanPriceID)
+	userID := strings.TrimSpace(filter.UserID)
+	country := strings.ToUpper(strings.TrimSpace(filter.CountryCode))
+
+	rows, err := s.db.Query(`
+		SELECT ss.subscription_id, ss.customer_id, ss.user_id, COALESCE(u.email, ''), COALESCE(u.tier, 'free'),
+		       ss.status, ss.plan_price_id, ss.plan_interval, ss.currency, ss.unit_amount, ss.quantity,
+		       ss.current_period_start, ss.current_period_end, ss.cancel_at_period_end, ss.paused, ss.latest_invoice_id,
+		       COALESCE(inv.status, ''), COALESCE(inv.amount_due, 0), COALESCE(inv.amount_paid, 0), COALESCE(inv.amount_remaining, 0),
+		       COALESCE(inv.attempt_count, 0), ss.updated_at
+		FROM stripe_subscription_snapshots ss
+		LEFT JOIN users u ON u.id = ss.user_id
+		LEFT JOIN stripe_invoice_summaries inv ON inv.invoice_id = ss.latest_invoice_id
+		WHERE (? = '' OR ss.status = ?)
+		  AND (? = '' OR ss.plan_price_id = ?)
+		  AND (? = '' OR ss.user_id = ?)
+		  AND (? = '' OR UPPER(COALESCE(u.country_code, '')) = ?)
+		ORDER BY ss.updated_at DESC
+		LIMIT ?
+	`, status, status, planPriceID, planPriceID, userID, userID, country, country, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.BusinessSubscriptionRow, 0, limit)
+	for rows.Next() {
+		var row models.BusinessSubscriptionRow
+		var periodStart, periodEnd, updatedAt sql.NullString
+		var cancelAtEnd, paused int
+		if err := rows.Scan(
+			&row.SubscriptionID, &row.CustomerID, &row.UserID, &row.UserEmail, &row.UserTier,
+			&row.Status, &row.PlanPriceID, &row.PlanInterval, &row.Currency, &row.UnitAmount, &row.Quantity,
+			&periodStart, &periodEnd, &cancelAtEnd, &paused, &row.LatestInvoiceID,
+			&row.InvoiceStatus, &row.AmountDue, &row.AmountPaid, &row.AmountRemaining, &row.AttemptCount,
+			&updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		row.CancelAtPeriodEnd = cancelAtEnd == 1
+		row.Paused = paused == 1
+		row.CurrentPeriodStart = parseNullSQLiteTime(periodStart)
+		row.CurrentPeriodEnd = parseNullSQLiteTime(periodEnd)
+		row.UpdatedAt = parseNullSQLiteTime(updatedAt)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) GetBusinessRevenue(days int) ([]models.BusinessRevenuePoint, error) {
+	if days <= 0 {
+		days = 30
+	}
+	rows, err := s.db.Query(`
+		SELECT strftime('%Y-%m-%d', created_at) AS bucket_day,
+		       UPPER(COALESCE(currency, 'EUR')) AS currency,
+		       COALESCE(SUM(amount_paid), 0) AS amount_paid,
+		       COUNT(*) AS invoices
+		FROM stripe_invoice_summaries
+		WHERE paid = 1
+		  AND created_at >= datetime('now', '-' || ? || ' days')
+		GROUP BY bucket_day, currency
+		ORDER BY bucket_day ASC
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	points := make([]models.BusinessRevenuePoint, 0)
+	for rows.Next() {
+		var day, currency string
+		var point models.BusinessRevenuePoint
+		if err := rows.Scan(&day, &currency, &point.AmountPaid, &point.Invoices); err != nil {
+			return nil, err
+		}
+		parsed, _ := time.Parse("2006-01-02", day)
+		point.BucketStart = parsed.UTC()
+		point.Currency = currency
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+func (s *SQLiteStore) GetBusinessFunnel(days int) (models.BusinessFunnel, error) {
+	if days <= 0 {
+		days = 30
+	}
+	funnel := models.BusinessFunnel{WindowDays: days}
+
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM users
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+	`, days).Scan(&funnel.Signups); err != nil {
+		return funnel, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(DISTINCT u.id), 0)
+		FROM users u
+		WHERE u.created_at >= datetime('now', '-' || ? || ' days')
+		  AND (
+			EXISTS (SELECT 1 FROM shopping_profiles sp WHERE sp.user_id = u.id)
+			OR EXISTS (SELECT 1 FROM search_configs sc WHERE sc.user_id = u.id)
+		  )
+	`, days).Scan(&funnel.Activated); err != nil {
+		return funnel, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(DISTINCT u.id), 0)
+		FROM users u
+		JOIN stripe_subscription_snapshots ss ON ss.user_id = u.id
+		WHERE u.created_at >= datetime('now', '-' || ? || ' days')
+		  AND ss.status IN ('active', 'trialing', 'past_due', 'unpaid')
+	`, days).Scan(&funnel.Paid); err != nil {
+		return funnel, err
+	}
+	if funnel.Signups > 0 {
+		funnel.SignupToPaidPct = float64(funnel.Paid) * 100 / float64(funnel.Signups)
+	}
+	if funnel.Activated > 0 {
+		funnel.ActivationToPaid = float64(funnel.Paid) * 100 / float64(funnel.Activated)
+	}
+	return funnel, nil
+}
+
+func (s *SQLiteStore) GetBusinessCohorts(months int) ([]models.BusinessCohortRow, error) {
+	if months <= 0 {
+		months = 6
+	}
+	rows, err := s.db.Query(`
+		SELECT strftime('%Y-%m', u.created_at) AS cohort_month,
+		       COUNT(*) AS users,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = 1
+					  AND strftime('%Y-%m', inv.created_at) = strftime('%Y-%m', u.created_at)
+			   ) THEN 1 ELSE 0 END) AS paid_m0,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = 1
+					  AND strftime('%Y-%m', inv.created_at) = strftime('%Y-%m', date(u.created_at, '+1 month'))
+			   ) THEN 1 ELSE 0 END) AS paid_m1,
+		       SUM(CASE WHEN EXISTS (
+					SELECT 1 FROM stripe_invoice_summaries inv
+					WHERE inv.user_id = u.id
+					  AND inv.paid = 1
+					  AND strftime('%Y-%m', inv.created_at) = strftime('%Y-%m', date(u.created_at, '+2 month'))
+			   ) THEN 1 ELSE 0 END) AS paid_m2,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (julianday(ss.updated_at) - julianday(u.created_at)) <= 30 THEN 1
+					ELSE 0 END) AS churn_early,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (julianday(ss.updated_at) - julianday(u.created_at)) > 30
+					 AND (julianday(ss.updated_at) - julianday(u.created_at)) <= 90 THEN 1
+					ELSE 0 END) AS churn_middle,
+		       SUM(CASE
+					WHEN ss.status IN ('canceled', 'incomplete_expired')
+					 AND (julianday(ss.updated_at) - julianday(u.created_at)) > 90 THEN 1
+					ELSE 0 END) AS churn_late
+		FROM users u
+		LEFT JOIN stripe_subscription_snapshots ss ON ss.user_id = u.id
+		WHERE u.created_at >= datetime('now', '-' || ? || ' months')
+		GROUP BY cohort_month
+		ORDER BY cohort_month DESC
+		LIMIT ?
+	`, months, months)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cohorts := make([]models.BusinessCohortRow, 0, months)
+	for rows.Next() {
+		var row models.BusinessCohortRow
+		if err := rows.Scan(&row.CohortMonth, &row.Users, &row.PaidMonth0, &row.PaidMonth1, &row.PaidMonth2,
+			&row.ChurnBucketEarly, &row.ChurnBucketMiddle, &row.ChurnBucketLate); err != nil {
+			return nil, err
+		}
+		if row.Users > 0 {
+			row.RetentionMonth1 = float64(row.PaidMonth1) * 100 / float64(row.Users)
+			row.RetentionMonth2 = float64(row.PaidMonth2) * 100 / float64(row.Users)
+		}
+		cohorts = append(cohorts, row)
+	}
+	return cohorts, rows.Err()
+}
+
+func (s *SQLiteStore) GetBusinessAlerts(days int) ([]models.BusinessAlert, error) {
+	if days <= 0 {
+		days = 7
+	}
+	alerts := make([]models.BusinessAlert, 0)
+
+	var failed24h int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = 0
+		  AND amount_remaining > 0
+		  AND created_at >= datetime('now', '-1 day')
+	`).Scan(&failed24h); err != nil {
+		return nil, err
+	}
+	if failed24h >= 3 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "failed_payments_spike",
+			Severity:    "high",
+			Title:       "Failed payment spike",
+			Description: "More than 3 failed invoices in the last 24h.",
+			Value:       strconv.Itoa(failed24h),
+			Threshold:   ">= 3",
+		})
+	}
+
+	var churned int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(COUNT(*), 0)
+		FROM stripe_subscription_history
+		WHERE created_at >= datetime('now', '-' || ? || ' days')
+		  AND (status IN ('canceled', 'incomplete_expired') OR event_type LIKE '%deleted')
+	`, days).Scan(&churned); err != nil {
+		return nil, err
+	}
+	overview, err := s.GetBusinessOverview(days)
+	if err != nil {
+		return nil, err
+	}
+	denom := overview.ActivePaidAccounts + churned
+	if denom > 0 {
+		churnPct := float64(churned) * 100 / float64(denom)
+		if churnPct >= 10 {
+			alerts = append(alerts, models.BusinessAlert{
+				Key:         "churn_spike",
+				Severity:    "high",
+				Title:       "Churn spike",
+				Description: "Cancellation ratio crossed the configured threshold.",
+				Value:       fmt.Sprintf("%.1f%%", churnPct),
+				Threshold:   ">= 10%",
+			})
+		}
+	}
+
+	if overview.WebhookLagMinutes >= 20 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "webhook_lag",
+			Severity:    "medium",
+			Title:       "Stripe webhook lag",
+			Description: "No fresh Stripe webhook events were processed recently.",
+			Value:       fmt.Sprintf("%d min", overview.WebhookLagMinutes),
+			Threshold:   ">= 20 min",
+		})
+	}
+	if overview.ReconcileLagMinutes >= 120 {
+		alerts = append(alerts, models.BusinessAlert{
+			Key:         "reconcile_lag",
+			Severity:    "medium",
+			Title:       "Reconcile lag",
+			Description: "Billing reconciliation is older than expected.",
+			Value:       fmt.Sprintf("%d min", overview.ReconcileLagMinutes),
+			Threshold:   ">= 120 min",
+		})
+	}
+	return alerts, nil
+}
+
+func (s *SQLiteStore) sumPaidRevenueInWindow(days int) (float64, error) {
+	rows, err := s.db.Query(`
+		SELECT UPPER(COALESCE(currency, 'EUR')), COALESCE(SUM(amount_paid), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = 1
+		  AND created_at >= datetime('now', '-' || ? || ' days')
+		GROUP BY UPPER(COALESCE(currency, 'EUR'))
+	`, days)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0.0
+	for rows.Next() {
+		var currency string
+		var amount int64
+		if err := rows.Scan(&currency, &amount); err != nil {
+			return 0, err
+		}
+		total += amountToEUR(float64(amount), currency)
+	}
+	return total, rows.Err()
+}
+
+func (s *SQLiteStore) sumPaidRevenueRange(fromDaysAgo, toDaysAgo int) (float64, error) {
+	rows, err := s.db.Query(`
+		SELECT UPPER(COALESCE(currency, 'EUR')), COALESCE(SUM(amount_paid), 0)
+		FROM stripe_invoice_summaries
+		WHERE paid = 1
+		  AND created_at < datetime('now', '-' || ? || ' days')
+		  AND created_at >= datetime('now', '-' || ? || ' days')
+		GROUP BY UPPER(COALESCE(currency, 'EUR'))
+	`, toDaysAgo, fromDaysAgo)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0.0
+	for rows.Next() {
+		var currency string
+		var amount int64
+		if err := rows.Scan(&currency, &amount); err != nil {
+			return 0, err
+		}
+		total += amountToEUR(float64(amount), currency)
+	}
+	return total, rows.Err()
 }
 
 func (s *SQLiteStore) fillSQLiteSearchOpsBreakdown(days int, column string, out *map[string]int) error {
@@ -1813,7 +2751,7 @@ func scanUser(row *sql.Row) (*models.User, error) {
 	var user models.User
 	var crossBorder int
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.IsAdmin, &user.StripeCustomer,
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.Tier, &user.Role, &user.IsAdmin, &user.StripeCustomer,
 		&user.CountryCode, &user.Region, &user.City, &user.PostalCode, &user.PreferredRadiusKm, &crossBorder, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1911,6 +2849,35 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func subscriptionIsPaidActive(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "active", "trialing", "past_due", "unpaid":
+		return true
+	default:
+		return false
+	}
+}
+
+func amountToEUR(amountMinor float64, currency string) float64 {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	rate := 1.0
+	switch currency {
+	case "", "EUR":
+		rate = 1.0
+	case "USD":
+		rate = 0.92
+	case "GBP":
+		rate = 1.16
+	case "BGN":
+		rate = 0.51
+	case "DKK":
+		rate = 0.13
+	default:
+		rate = 1.0
+	}
+	return (amountMinor / 100.0) * rate
 }
 
 func scopedItemID(userID, itemID string) string {

@@ -1,6 +1,17 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+type UserRole string
+
+const (
+	UserRoleOwner    UserRole = "owner"
+	UserRoleOperator UserRole = "operator"
+	UserRoleAdmin    UserRole = "admin"
+)
 
 type User struct {
 	ID                 string
@@ -8,6 +19,7 @@ type User struct {
 	PasswordHash       string
 	Name               string
 	Tier               string
+	Role               string
 	IsAdmin            bool
 	StripeCustomer     string
 	CountryCode        string
@@ -35,6 +47,7 @@ type AuthIdentity struct {
 type AIUsageEntry struct {
 	ID               int64
 	UserID           string
+	MissionID        int64
 	CallType         string // "reasoner", "generator", "brief_parser", "compare", "draft"
 	Model            string
 	PromptTokens     int
@@ -119,10 +132,49 @@ type AdminSearchRun struct {
 type AdminAuditLogEntry struct {
 	ID          int64     `json:"id"`
 	ActorUserID string    `json:"actor_user_id"`
+	ActorRole   string    `json:"actor_role"`
+	RequestID   string    `json:"request_id"`
 	Action      string    `json:"action"`
 	TargetType  string    `json:"target_type"`
 	TargetID    string    `json:"target_id"`
 	BeforeJSON  string    `json:"before_json"`
 	AfterJSON   string    `json:"after_json"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+func NormalizeUserRole(role string) string {
+	switch UserRole(strings.ToLower(strings.TrimSpace(role))) {
+	case UserRoleOwner:
+		return string(UserRoleOwner)
+	case UserRoleOperator:
+		return string(UserRoleOperator)
+	case UserRoleAdmin:
+		return string(UserRoleAdmin)
+	default:
+		return ""
+	}
+}
+
+func EffectiveUserRole(user User) string {
+	role := NormalizeUserRole(user.Role)
+	if role != "" {
+		return role
+	}
+	if user.IsAdmin {
+		return string(UserRoleAdmin)
+	}
+	return ""
+}
+
+func HasOperatorAccess(user User) bool {
+	switch EffectiveUserRole(user) {
+	case string(UserRoleOwner), string(UserRoleOperator), string(UserRoleAdmin):
+		return true
+	default:
+		return false
+	}
+}
+
+func HasOwnerAccess(user User) bool {
+	return EffectiveUserRole(user) == string(UserRoleOwner)
 }
