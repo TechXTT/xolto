@@ -20,8 +20,9 @@ import (
 // wordTokenRe extracts alphanumeric runs as discrete tokens. We intentionally
 // split on non-alphanumeric characters (including hyphens) so that OEM part
 // numbers like "52960-A6000" don't let a search for "a6000" bleed into unrelated
-// categories via substring matching.
-var wordTokenRe = regexp.MustCompile(`[a-z0-9]+`)
+// categories via substring matching. Unicode letter support matters for OLX BG
+// titles and queries.
+var wordTokenRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
 
 // queryStopWords are generic words or natural-language price qualifiers that
 // should not count toward relevance scoring. They frequently appear in mission
@@ -36,6 +37,38 @@ var queryStopWords = map[string]bool{
 	"eur": true, "euro": true, "euros": true, "usd": true,
 	"used": true, "new": true, "good": true, "like": true, "mint": true,
 	"cheap": true, "deal": true, "wanted": true, "buy": true, "buying": true,
+}
+
+// cameraIntentTokens indicate camera-focused searches where accessory-only
+// listings (bags, cases, straps, etc.) should be filtered unless the query
+// explicitly asks for accessories.
+var cameraIntentTokens = map[string]bool{
+	"camera": true, "mirrorless": true, "dslr": true, "body": true, "kit": true,
+	"апарат": true, "камера": true, "фотоапарат": true,
+}
+
+// cameraAccessoryTokens identify listing titles that are likely standalone
+// accessories. Includes common English, Dutch and Bulgarian marketplace terms.
+var cameraAccessoryTokens = map[string]bool{
+	"bag": true, "bags": true, "case": true, "cases": true, "cover": true, "covers": true,
+	"pouch": true, "pouches": true, "strap": true, "straps": true, "charger": true, "chargers": true,
+	"battery": true, "batteries": true, "tripod": true, "tripods": true, "filter": true, "filters": true,
+	"adapter": true, "adapters": true, "mount": true, "mounts": true, "hood": true, "hoods": true,
+	"cage": true, "cages": true, "cap": true, "caps": true, "grip": true, "grips": true,
+	"remote": true, "flash": true, "microphone": true, "mic": true, "housing": true, "underwater": true,
+	"tas": true, "hoes": true, "lader": true, "batterij": true, "statief": true,
+	"чанта": true, "чанти": true, "калъф": true, "калъфи": true, "каишка": true, "каишки": true,
+	"батерия": true, "батерии": true, "зарядно": true, "стойка": true, "филтър": true, "филтри": true,
+	"бокс": true, "кутия": true, "подводен": true,
+}
+
+// cameraCoreTokens suggest the listing is an actual camera offer (body/kit)
+// instead of a standalone accessory.
+var cameraCoreTokens = map[string]bool{
+	"camera": true, "body": true, "kit": true, "mirrorless": true, "dslr": true,
+	"lens": true, "lenses": true, "toestel": true,
+	"апарат": true, "камера": true, "фотоапарат": true,
+	"обектив": true, "обектива": true, "обективи": true, "комплект": true, "тяло": true,
 }
 
 type UserWorker struct {
@@ -70,6 +103,82 @@ func titleMatchesQuery(title, query string) bool {
 		}
 	}
 	return true
+}
+
+func listingMatchesSearch(listing models.Listing, spec models.SearchSpec) bool {
+	if !titleMatchesQuery(listing.Title, spec.Query) {
+		return false
+	}
+	if shouldRejectAccessoryListing(listing.Title, spec.Query) {
+		return false
+	}
+	return true
+}
+
+func shouldRejectAccessoryListing(title, query string) bool {
+	queryMeaningful := meaningfulQueryTokens(query)
+	if len(queryMeaningful) == 0 {
+		return false
+	}
+	queryTokens := make(map[string]struct{}, len(queryMeaningful))
+	for _, tok := range queryMeaningful {
+		queryTokens[tok] = struct{}{}
+	}
+
+	if !cameraIntentQuery(queryTokens) {
+		return false
+	}
+	// If the query itself asks for an accessory ("a6000 bag"), keep it.
+	if containsAnyToken(queryTokens, cameraAccessoryTokens) {
+		return false
+	}
+
+	titleTokens := tokenizeWords(title)
+	if !containsAnyToken(titleTokens, cameraAccessoryTokens) {
+		return false
+	}
+	// Accessory token + no camera-core token => likely irrelevant for camera hunt.
+	return !containsAnyToken(titleTokens, cameraCoreTokens)
+}
+
+func cameraIntentQuery(tokens map[string]struct{}) bool {
+	for tok := range tokens {
+		if cameraIntentTokens[tok] {
+			return true
+		}
+		if looksCameraModelToken(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksCameraModelToken(tok string) bool {
+	hasDigit := false
+	for _, r := range tok {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	if !hasDigit {
+		return false
+	}
+	return strings.HasPrefix(tok, "a") ||
+		strings.HasPrefix(tok, "ilce") ||
+		strings.HasPrefix(tok, "eos") ||
+		strings.HasPrefix(tok, "rx") ||
+		strings.HasPrefix(tok, "zv") ||
+		strings.HasPrefix(tok, "d")
+}
+
+func containsAnyToken(tokens map[string]struct{}, vocabulary map[string]bool) bool {
+	for token := range tokens {
+		if vocabulary[token] {
+			return true
+		}
+	}
+	return false
 }
 
 func tokenizeWords(s string) map[string]struct{} {
@@ -187,7 +296,7 @@ func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time
 	}
 
 	for _, listing := range listings {
-		if !titleMatchesQuery(listing.Title, spec.Query) {
+		if !listingMatchesSearch(listing, spec) {
 			continue
 		}
 		logEntry.ResultsFound++
