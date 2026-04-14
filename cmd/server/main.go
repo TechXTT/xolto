@@ -49,10 +49,11 @@ func main() {
 		Marktplaats: config.MarktplaatsConfig{},
 		Scoring:     config.ScoringConfig{MinScore: 7, MarketSampleSize: 20},
 		AI: config.NormalizeAIConfig(config.AIConfig{
-			Enabled: cfg.AIAPIKey != "",
-			BaseURL: cfg.AIBaseURL,
-			APIKey:  cfg.AIAPIKey,
-			Model:   cfg.AIModel,
+			Enabled:       cfg.AIAPIKey != "",
+			BaseURL:       cfg.AIBaseURL,
+			APIKey:        cfg.AIAPIKey,
+			Model:         cfg.AIModel,
+			PromptVersion: cfg.AIPromptVersion,
 		}),
 	}
 	provider := marktplaatsmp.New(appCfg.Marktplaats)

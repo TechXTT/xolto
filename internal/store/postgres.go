@@ -363,17 +363,26 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at DESC);
 
-		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
-			id BIGSERIAL PRIMARY KEY,
-			triggered_by TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT '',
-			summary_json TEXT NOT NULL DEFAULT '',
-			error_json TEXT NOT NULL DEFAULT '',
-			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			finished_at TIMESTAMPTZ NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
-	`)
+			CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+				id BIGSERIAL PRIMARY KEY,
+				triggered_by TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT '',
+				summary_json TEXT NOT NULL DEFAULT '',
+				error_json TEXT NOT NULL DEFAULT '',
+				started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				finished_at TIMESTAMPTZ NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
+
+			CREATE TABLE IF NOT EXISTS ai_score_cache (
+				key TEXT PRIMARY KEY,
+				score DOUBLE PRECISION NOT NULL DEFAULT 0,
+				reasoning TEXT NOT NULL DEFAULT '',
+				created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()))::BIGINT,
+				prompt_version INTEGER NOT NULL DEFAULT 1
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_score_cache_created ON ai_score_cache(created_at DESC);
+		`)
 	if err != nil {
 		return err
 	}
@@ -2357,6 +2366,28 @@ func (s *PostgresStore) GetListingScoringState(userID, itemID string) (price int
 	return price, reasoningSource, true, nil
 }
 
+func (s *PostgresStore) GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error) {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return 0, "", false, nil
+	}
+	if promptVersion <= 0 {
+		promptVersion = 1
+	}
+	err = s.db.QueryRow(`
+		SELECT score, reasoning
+		FROM ai_score_cache
+		WHERE key = $1 AND prompt_version = $2
+	`, cacheKey, promptVersion).Scan(&score, &reasoning)
+	if err == sql.ErrNoRows {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return score, reasoning, true, nil
+}
+
 func (s *PostgresStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
 	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
 	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
@@ -2392,6 +2423,26 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 
 func (s *PostgresStore) TouchListing(userID, itemID string) error {
 	_, err := s.db.Exec(`UPDATE listings SET last_seen = NOW() WHERE item_id = $1`, scopedItemID(userID, itemID))
+	return err
+}
+
+func (s *PostgresStore) SetAIScoreCache(cacheKey string, score float64, reasoning string, promptVersion int) error {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return nil
+	}
+	if promptVersion <= 0 {
+		promptVersion = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO ai_score_cache (key, score, reasoning, created_at, prompt_version)
+		VALUES ($1, $2, $3, (EXTRACT(EPOCH FROM NOW()))::BIGINT, $4)
+		ON CONFLICT(key) DO UPDATE SET
+			score = EXCLUDED.score,
+			reasoning = EXCLUDED.reasoning,
+			created_at = EXCLUDED.created_at,
+			prompt_version = EXCLUDED.prompt_version
+	`, cacheKey, score, strings.TrimSpace(reasoning), promptVersion)
 	return err
 }
 

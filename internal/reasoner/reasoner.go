@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"regexp"
@@ -43,6 +44,13 @@ func (r *Reasoner) SetUsageCallback(cb UsageCallback) { r.onUsage = cb }
 
 func (r *Reasoner) Enabled() bool {
 	return r.cfg.Enabled && r.cfg.APIKey != "" && r.cfg.Model != ""
+}
+
+func (r *Reasoner) PromptVersion() int {
+	if r.cfg.PromptVersion <= 0 {
+		return 1
+	}
+	return r.cfg.PromptVersion
 }
 
 func (r *Reasoner) Analyze(
@@ -202,6 +210,14 @@ func (r *Reasoner) callLLM(
 	if r.limiter != nil && !r.limiter.Allow(search.UserID) {
 		return models.DealAnalysis{}, errRateLimited
 	}
+	slog.Default().Info(
+		"calling llm scorer",
+		"op", "llm.score",
+		"user_id", search.UserID,
+		"mission_id", search.ProfileID,
+		"item_id", listing.ItemID,
+		"prompt_version", r.PromptVersion(),
+	)
 
 	payload := chatCompletionRequest{
 		Model:       r.cfg.Model,

@@ -162,6 +162,43 @@ func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
 	}
 }
 
+func TestAIScoreCacheRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-ai-score-cache.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const (
+		cacheKey      = "olxbg:12345:16361:1"
+		promptVersion = 1
+	)
+	if err := st.SetAIScoreCache(cacheKey, 16361, `{"relevant":true,"fair_price":16361}`, promptVersion); err != nil {
+		t.Fatalf("SetAIScoreCache() error = %v", err)
+	}
+
+	score, reasoning, found, err := st.GetAIScoreCache(cacheKey, promptVersion)
+	if err != nil {
+		t.Fatalf("GetAIScoreCache() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected cache entry to be found")
+	}
+	if score != 16361 {
+		t.Fatalf("expected cached score 16361, got %v", score)
+	}
+	if reasoning == "" {
+		t.Fatalf("expected cached reasoning payload")
+	}
+
+	if _, _, found, err := st.GetAIScoreCache(cacheKey, 2); err != nil {
+		t.Fatalf("GetAIScoreCache(promptVersion=2) error = %v", err)
+	} else if found {
+		t.Fatalf("expected cache miss for different prompt version")
+	}
+}
+
 func TestAdminSearchOpsAggregationAndFilters(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "xolto-admin-ops.db")
 	st, err := New(dbPath)

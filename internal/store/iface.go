@@ -11,6 +11,7 @@ type Reader interface {
 	GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error)
 	GetApprovedComparables(userID string, missionID int64, limit int) ([]models.ComparableDeal, error)
 	GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error)
+	GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error)
 	GetActiveMission(userID string) (*models.Mission, error)
 	GetMission(id int64) (*models.Mission, error)
 	ListMissions(userID string) ([]models.Mission, error)
@@ -62,6 +63,7 @@ type Writer interface {
 	ClearAssistantSession(userID string) error
 	SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error
 	TouchListing(userID, itemID string) error
+	SetAIScoreCache(cacheKey string, score float64, reasoning string, promptVersion int) error
 	SetListingFeedback(userID, itemID, feedback string) error
 	RecordPrice(query string, categoryID int, price int) error
 	MarkOffered(userID, itemID string) error

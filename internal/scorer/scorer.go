@@ -2,6 +2,7 @@ package scorer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -15,13 +16,33 @@ import (
 
 const minOfferCents = 1000 // EUR10 minimum offer
 
+type aiScoreCachePayload struct {
+	Relevant     bool    `json:"relevant"`
+	FairPrice    int     `json:"fair_price"`
+	Confidence   float64 `json:"confidence"`
+	Reason       string  `json:"reason"`
+	SearchAdvice string  `json:"search_advice,omitempty"`
+}
+
+type scoreStore interface {
+	store.Reader
+	SetAIScoreCache(cacheKey string, score float64, reasoning string, promptVersion int) error
+}
+
 type Scorer struct {
-	store      store.Reader
+	store      scoreStore
 	scoringCfg struct {
 		MinScore         float64
 		MarketSampleSize int
 	}
 	reasoner *reasoner.Reasoner
+}
+
+func (sc *Scorer) promptVersion() int {
+	if sc.reasoner != nil {
+		return sc.reasoner.PromptVersion()
+	}
+	return 1
 }
 
 func (sc *Scorer) shouldSkipLLM(listing models.Listing, search models.SearchSpec, heuristic models.DealAnalysis) bool {
@@ -38,7 +59,7 @@ func (sc *Scorer) shouldSkipLLM(listing models.Listing, search models.SearchSpec
 	return false
 }
 
-func New(s store.Reader, cfg interface {
+func New(s scoreStore, cfg interface {
 	GetMinScore() float64
 	GetMarketSampleSize() int
 }, rsn *reasoner.Reasoner) *Scorer {
@@ -126,10 +147,39 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		if sc.shouldSkipLLM(listing, search, heuristic) {
 			analysis.Source = "prefilter"
 		} else {
-			analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
-			if err != nil {
-				analysis = heuristic
-				slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+			promptVersion := sc.promptVersion()
+			cacheKey := aiScoreCacheKey(listing.ItemID, listing.Price, promptVersion)
+			cacheHit := false
+			if cacheKey != "" {
+				cachedScore, cachedReasoning, found, cacheErr := sc.store.GetAIScoreCache(cacheKey, promptVersion)
+				if cacheErr != nil {
+					slog.Warn("failed to load ai score cache", "item", listing.ItemID, "error", cacheErr)
+				} else if found {
+					cacheHit = true
+					cachedAnalysis, ok := decodeAIScoreCachePayload(cachedScore, cachedReasoning)
+					if ok {
+						analysis = cachedAnalysis
+					} else {
+						if cachedScore > 0 {
+							analysis.FairPrice = int(cachedScore)
+						}
+						if strings.TrimSpace(cachedReasoning) != "" {
+							analysis.Reason = strings.TrimSpace(cachedReasoning)
+						}
+						analysis.Source = "ai-cache"
+					}
+				}
+			}
+			if !cacheHit {
+				analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
+				if err != nil {
+					analysis = heuristic
+					slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+				} else if analysis.Source == "ai" && cacheKey != "" {
+					if cacheErr := sc.store.SetAIScoreCache(cacheKey, float64(analysis.FairPrice), encodeAIScoreCachePayload(analysis), promptVersion); cacheErr != nil {
+						slog.Warn("failed to persist ai score cache", "item", listing.ItemID, "error", cacheErr)
+					}
+				}
 			}
 		}
 	}
@@ -182,13 +232,13 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	score = clamp(score, 1, 10)
 
 	// AI explicitly judged the listing as irrelevant to the search query.
-	if analysis.Source == "ai" && !analysis.Relevant {
+	if (analysis.Source == "ai" || analysis.Source == "ai-cache") && !analysis.Relevant {
 		return models.ScoredListing{
 			Listing:         listing,
 			Score:           1.0,
 			OfferPrice:      0,
 			Reason:          "not relevant to search: " + analysis.Reason,
-			ReasoningSource: "ai",
+			ReasoningSource: analysis.Source,
 		}
 	}
 
@@ -213,6 +263,54 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		ComparableDeals: analysis.ComparableDeals,
 		RiskFlags:       riskFlags,
 	}
+}
+
+func aiScoreCacheKey(itemID string, price, promptVersion int) string {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" || price <= 0 {
+		return ""
+	}
+	if promptVersion <= 0 {
+		promptVersion = 1
+	}
+	return fmt.Sprintf("%s:%d:%d", itemID, price, promptVersion)
+}
+
+func encodeAIScoreCachePayload(analysis models.DealAnalysis) string {
+	payload := aiScoreCachePayload{
+		Relevant:     analysis.Relevant,
+		FairPrice:    analysis.FairPrice,
+		Confidence:   analysis.Confidence,
+		Reason:       strings.TrimSpace(analysis.Reason),
+		SearchAdvice: strings.TrimSpace(analysis.SearchAdvice),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return strings.TrimSpace(analysis.Reason)
+	}
+	return string(raw)
+}
+
+func decodeAIScoreCachePayload(score float64, raw string) (models.DealAnalysis, bool) {
+	payload := aiScoreCachePayload{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &payload); err != nil {
+		return models.DealAnalysis{}, false
+	}
+	if payload.FairPrice <= 0 && score > 0 {
+		payload.FairPrice = int(score)
+	}
+	if payload.Confidence <= 0 {
+		payload.Confidence = 0.7
+	}
+	return models.DealAnalysis{
+		Relevant:        payload.Relevant,
+		FairPrice:       payload.FairPrice,
+		Confidence:      clamp(payload.Confidence, 0.05, 0.99),
+		Reason:          strings.TrimSpace(payload.Reason),
+		Source:          "ai-cache",
+		SearchAdvice:    strings.TrimSpace(payload.SearchAdvice),
+		ComparableDeals: nil,
+	}, true
 }
 
 func calculateOffer(askingPrice, fairPrice, marketAvg int, hasMarket bool, offerPct int) int {

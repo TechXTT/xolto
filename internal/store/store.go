@@ -371,17 +371,26 @@ func migrate(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stripe_mutation_log_actor ON stripe_mutation_log(actor_user_id, created_at);
 
-		CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			triggered_by TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT '',
-			summary_json TEXT NOT NULL DEFAULT '',
-			error_json TEXT NOT NULL DEFAULT '',
-			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			finished_at DATETIME NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
-	`)
+			CREATE TABLE IF NOT EXISTS billing_reconcile_runs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				triggered_by TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT '',
+				summary_json TEXT NOT NULL DEFAULT '',
+				error_json TEXT NOT NULL DEFAULT '',
+				started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				finished_at DATETIME NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC);
+
+			CREATE TABLE IF NOT EXISTS ai_score_cache (
+				key TEXT PRIMARY KEY,
+				score REAL NOT NULL DEFAULT 0,
+				reasoning TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+				prompt_version INTEGER NOT NULL DEFAULT 1
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_score_cache_created ON ai_score_cache(created_at DESC);
+		`)
 	if err != nil {
 		return err
 	}
@@ -1625,6 +1634,28 @@ func (s *SQLiteStore) GetListingScoringState(userID, itemID string) (price int, 
 	return price, reasoningSource, true, nil
 }
 
+func (s *SQLiteStore) GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error) {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return 0, "", false, nil
+	}
+	if promptVersion <= 0 {
+		promptVersion = 1
+	}
+	err = s.db.QueryRow(`
+		SELECT score, reasoning
+		FROM ai_score_cache
+		WHERE key = ? AND prompt_version = ?
+	`, cacheKey, promptVersion).Scan(&score, &reasoning)
+	if err == sql.ErrNoRows {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return score, reasoning, true, nil
+}
+
 // SaveListing stores or updates a listing and its scored analysis.
 func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
 	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
@@ -1661,6 +1692,26 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 
 func (s *SQLiteStore) TouchListing(userID, itemID string) error {
 	_, err := s.db.Exec(`UPDATE listings SET last_seen = CURRENT_TIMESTAMP WHERE item_id = ?`, scopedItemID(userID, itemID))
+	return err
+}
+
+func (s *SQLiteStore) SetAIScoreCache(cacheKey string, score float64, reasoning string, promptVersion int) error {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return nil
+	}
+	if promptVersion <= 0 {
+		promptVersion = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO ai_score_cache (key, score, reasoning, created_at, prompt_version)
+		VALUES (?, ?, ?, CAST(strftime('%s','now') AS INTEGER), ?)
+		ON CONFLICT(key) DO UPDATE SET
+			score = excluded.score,
+			reasoning = excluded.reasoning,
+			created_at = excluded.created_at,
+			prompt_version = excluded.prompt_version
+	`, cacheKey, score, strings.TrimSpace(reasoning), promptVersion)
 	return err
 }
 

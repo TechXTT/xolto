@@ -83,6 +83,7 @@ type AIConfig struct {
 	BaseURL                string  `yaml:"base_url"`
 	APIKey                 string  `yaml:"api_key"`
 	Model                  string  `yaml:"model"`
+	PromptVersion          int     `yaml:"prompt_version"`
 	Temperature            float64 `yaml:"temperature"`
 	MaxComparables         int     `yaml:"max_comparables"`
 	MinConfidence          float64 `yaml:"min_confidence"`
@@ -169,6 +170,9 @@ func setDefaults(cfg *Config) {
 func NormalizeAIConfig(cfg AIConfig) AIConfig {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.openai.com/v1"
+	}
+	if cfg.PromptVersion <= 0 {
+		cfg.PromptVersion = 1
 	}
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.2

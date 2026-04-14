@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,7 @@ type ServerConfig struct {
 	AIAPIKey            string
 	AIBaseURL           string
 	AIModel             string
+	AIPromptVersion     int
 	SMTPHost            string
 	SMTPPort            string
 	SMTPUser            string
@@ -53,6 +55,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		AIAPIKey:            os.Getenv("AI_API_KEY"),
 		AIBaseURL:           getenvDefault("AI_BASE_URL", "https://api.openai.com/v1"),
 		AIModel:             getenvDefault("AI_MODEL", "gpt-4o-mini"),
+		AIPromptVersion:     parseIntDefault(os.Getenv("AI_PROMPT_VERSION"), 1),
 		SMTPHost:            os.Getenv("SMTP_HOST"),
 		SMTPPort:            getenvDefault("SMTP_PORT", "587"),
 		SMTPUser:            os.Getenv("SMTP_USER"),
@@ -176,4 +179,16 @@ func parseBoolDefault(s string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+func parseIntDefault(s string, def int) int {
+	value := strings.TrimSpace(s)
+	if value == "" {
+		return def
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return def
+	}
+	return parsed
 }
