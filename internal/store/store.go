@@ -206,7 +206,6 @@ func migrate(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_search_configs_user ON search_configs(user_id, enabled, updated_at);
 		CREATE INDEX IF NOT EXISTS idx_search_configs_profile ON search_configs(profile_id, enabled, updated_at);
-		CREATE INDEX IF NOT EXISTS idx_search_configs_due ON search_configs(enabled, next_run_at, user_id);
 		CREATE INDEX IF NOT EXISTS idx_listings_profile ON listings(profile_id, last_seen);
 
 		CREATE TABLE IF NOT EXISTS stripe_events (
