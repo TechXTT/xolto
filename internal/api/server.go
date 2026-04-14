@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,6 +25,7 @@ import (
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
+	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v81"
 	portalsession "github.com/stripe/stripe-go/v81/billingportal/session"
 	"github.com/stripe/stripe-go/v81/checkout/session"
@@ -130,7 +132,11 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.corsMiddleware(s.mux)
+	handler := http.Handler(s.mux)
+	handler = s.corsMiddleware(handler)
+	handler = s.requestLoggingMiddleware(handler)
+	handler = s.requestIDMiddleware(handler)
+	return handler
 }
 
 func (s *Server) StartBillingReconcileLoop(ctx context.Context, interval time.Duration) {
@@ -154,14 +160,20 @@ func (s *Server) StartBillingReconcileLoop(ctx context.Context, interval time.Du
 					StartedAt:   time.Now().UTC(),
 				})
 				if err != nil {
+					slog.Default().Error("billing reconcile run start failed", "op", "billing.reconcile.start_run", "error", err)
 					continue
 				}
 				summary, reconcileErr := s.runStripeReconcile(ctx)
 				if reconcileErr != nil {
-					_ = s.db.FinishBillingReconcileRun(runID, "failed", mustJSON(summary), mustJSON(map[string]any{"error": reconcileErr.Error()}))
+					slog.Default().Error("billing reconcile run failed", "op", "billing.reconcile.run", "error", reconcileErr, "run_id", runID)
+					if err := s.db.FinishBillingReconcileRun(runID, "failed", mustJSON(summary), mustJSON(map[string]any{"error": reconcileErr.Error()})); err != nil {
+						slog.Default().Error("billing reconcile run finalize failed", "op", "billing.reconcile.finish", "error", err, "run_id", runID, "status", "failed")
+					}
 					continue
 				}
-				_ = s.db.FinishBillingReconcileRun(runID, "success", mustJSON(summary), "")
+				if err := s.db.FinishBillingReconcileRun(runID, "success", mustJSON(summary), ""); err != nil {
+					slog.Default().Error("billing reconcile run finalize failed", "op", "billing.reconcile.finish", "error", err, "run_id", runID, "status", "success")
+				}
 			}
 		}
 	}()
@@ -2694,8 +2706,64 @@ func (s *Server) ownerIdempotencyKey(r *http.Request, action, targetID string) s
 	return fmt.Sprintf("owner:%s:%s:%x", strings.TrimSpace(action), strings.TrimSpace(targetID), buf)
 }
 
+type requestIDContextKey struct{}
+
+const requestIDHeader = "X-Request-ID"
+
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCapturingResponseWriter) Write(p []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := requestIDFromRequest(r)
+		if requestID == "" {
+			requestID = uuid.NewString()
+		}
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		w.Header().Set(requestIDHeader, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) requestLoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		slog.Default().Info(
+			"http request completed",
+			"op", "http.request",
+			"request_id", requestIDFromRequest(r),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", recorder.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+
 func requestIDFromRequest(r *http.Request) string {
-	for _, header := range []string{"X-Request-ID", "X-Request-Id", "CF-Ray"} {
+	if r == nil {
+		return ""
+	}
+	if value, ok := r.Context().Value(requestIDContextKey{}).(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	for _, header := range []string{requestIDHeader, "X-Request-Id", "CF-Ray"} {
 		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
 			return value
 		}

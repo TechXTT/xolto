@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +14,7 @@ import (
 	"github.com/TechXTT/xolto/internal/api"
 	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/logging"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	marktplaatsmp "github.com/TechXTT/xolto/internal/marketplace/marktplaats"
 	"github.com/TechXTT/xolto/internal/marketplace/olxbg"
@@ -29,14 +30,18 @@ import (
 
 func main() {
 	_ = godotenv.Load()
+	logger := logging.New(os.Getenv("APP_ENV"))
+	slog.SetDefault(logger)
 
 	cfg, err := config.LoadServerConfigFromEnv()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to load server config", "op", "server.config.load", "error", err)
+		os.Exit(1)
 	}
 	db, err := openServerStore(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to open database store", "op", "store.open", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -88,7 +93,7 @@ func main() {
 
 	// Backfill marketplace coverage for missions created before all-marketplace
 	// auto-deploy was enabled. AutoDeployHunts is idempotent (skips dupes).
-	backfillMissionHunts(context.Background(), db, asst)
+	backfillMissionHunts(context.Background(), db, asst, logger)
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
 	reconcileCtx, reconcileCancel := context.WithCancel(context.Background())
@@ -105,9 +110,10 @@ func main() {
 
 	// Start server in background.
 	go func() {
-		log.Printf("xolto server listening on %s", cfg.Address)
+		logger.Info("xolto server listening", "op", "server.start", "addr", cfg.Address)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logger.Error("server listen failed", "op", "server.listen", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -115,28 +121,30 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("shutting down...")
+	logger.Info("shutting down", "op", "server.shutdown.start")
 	reconcileCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("server shutdown error: %v", err)
-	}
-}
-
-func backfillMissionHunts(ctx context.Context, db store.Store, asst *assistant.Assistant) {
-	specs, err := db.GetAllEnabledSearchConfigs()
-	if err != nil {
-		log.Printf("backfill: failed to load search configs: %v", err)
+		logger.Error("server shutdown failed", "op", "server.shutdown", "error", err)
 		return
 	}
-	log.Printf("backfill: scanning %d existing search configs", len(specs))
+	logger.Info("server shutdown complete", "op", "server.shutdown.complete")
+}
+
+func backfillMissionHunts(ctx context.Context, db store.Store, asst *assistant.Assistant, logger *slog.Logger) {
+	specs, err := db.GetAllEnabledSearchConfigs()
+	if err != nil {
+		logger.Error("backfill failed to load search configs", "op", "backfill.load_specs", "error", err)
+		return
+	}
+	logger.Info("backfill scanning existing search configs", "op", "backfill.scan.start", "spec_count", len(specs))
 	seen := map[string]bool{}
 	deployed := 0
 	for _, spec := range specs {
 		if spec.UserID == "" || spec.ProfileID <= 0 {
-			log.Printf("backfill: skipping spec id=%d user=%q profile=%d (missing user or mission link)", spec.ID, spec.UserID, spec.ProfileID)
+			logger.Warn("backfill skipping invalid search config", "op", "backfill.scan.skip_invalid_spec", "search_id", spec.ID, "user_id", spec.UserID, "mission_id", spec.ProfileID)
 			continue
 		}
 		key := spec.UserID + "|" + strconv.FormatInt(spec.ProfileID, 10)
@@ -146,27 +154,27 @@ func backfillMissionHunts(ctx context.Context, db store.Store, asst *assistant.A
 		seen[key] = true
 		mission, err := db.GetMission(spec.ProfileID)
 		if err != nil {
-			log.Printf("backfill: GetMission(%d) err=%v", spec.ProfileID, err)
+			logger.Error("backfill mission lookup failed", "op", "backfill.mission.get", "mission_id", spec.ProfileID, "error", err)
 			continue
 		}
 		if mission == nil {
-			log.Printf("backfill: mission %d not found", spec.ProfileID)
+			logger.Warn("backfill mission not found", "op", "backfill.mission.missing", "mission_id", spec.ProfileID)
 			continue
 		}
 		if mission.UserID != spec.UserID {
-			log.Printf("backfill: mission %d user mismatch", spec.ProfileID)
+			logger.Warn("backfill mission user mismatch", "op", "backfill.mission.user_mismatch", "mission_id", spec.ProfileID, "mission_user_id", mission.UserID, "search_user_id", spec.UserID)
 			continue
 		}
-		log.Printf("backfill: deploying hunts for mission=%d name=%q queries=%d", mission.ID, mission.Name, len(mission.SearchQueries))
+		logger.Info("backfill deploying hunts", "op", "backfill.deploy.start", "mission_id", mission.ID, "mission_name", mission.Name, "query_count", len(mission.SearchQueries))
 		count, err := asst.AutoDeployHunts(ctx, spec.UserID, *mission)
 		if err != nil {
-			log.Printf("backfill: AutoDeployHunts mission=%d err=%v", mission.ID, err)
+			logger.Error("backfill auto deploy failed", "op", "backfill.deploy", "mission_id", mission.ID, "error", err)
 			continue
 		}
-		log.Printf("backfill: mission=%d added %d new hunts", mission.ID, count)
+		logger.Info("backfill deployed hunts", "op", "backfill.deploy.success", "mission_id", mission.ID, "deployed_count", count)
 		deployed += count
 	}
-	log.Printf("backfill: scanned %d unique missions, deployed %d new hunts", len(seen), deployed)
+	logger.Info("backfill completed", "op", "backfill.scan.complete", "mission_count", len(seen), "deployed_count", deployed)
 }
 
 func openServerStore(ctx context.Context, databaseURL string) (interface {
