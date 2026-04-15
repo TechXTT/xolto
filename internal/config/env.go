@@ -11,6 +11,9 @@ import (
 type ServerConfig struct {
 	Address             string
 	DatabaseURL         string
+	DBMaxOpenConns      int
+	DBMaxIdleConns      int
+	DBConnMaxLifetime   time.Duration
 	JWTSecret           string
 	GoogleClientID      string
 	GoogleClientSecret  string
@@ -42,6 +45,9 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	cfg := ServerConfig{
 		Address:             getenvDefault("SERVER_ADDR", ":8000"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		DBMaxOpenConns:      parseIntDefault(os.Getenv("DB_MAX_OPEN_CONNS"), 25),
+		DBMaxIdleConns:      parseIntDefault(os.Getenv("DB_MAX_IDLE_CONNS"), 5),
+		DBConnMaxLifetime:   parseDurationDefault(os.Getenv("DB_CONN_MAX_LIFETIME"), 30*time.Minute),
 		JWTSecret:           os.Getenv("JWT_SECRET"),
 		GoogleClientID:      os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret:  os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -71,6 +77,18 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 			IdleTimeout:       parseDurationDefault(os.Getenv("SERVER_IDLE_TIMEOUT"), defaultServerIdleTimeout),
 			ReadHeaderTimeout: parseDurationDefault(os.Getenv("SERVER_READ_HEADER_TIMEOUT"), defaultServerReadHeaderTimeout),
 		},
+	}
+	if cfg.DBMaxOpenConns <= 0 {
+		cfg.DBMaxOpenConns = 25
+	}
+	if cfg.DBMaxIdleConns < 0 {
+		cfg.DBMaxIdleConns = 5
+	}
+	if cfg.DBMaxIdleConns > cfg.DBMaxOpenConns {
+		cfg.DBMaxIdleConns = cfg.DBMaxOpenConns
+	}
+	if cfg.DBConnMaxLifetime <= 0 {
+		cfg.DBConnMaxLifetime = 30 * time.Minute
 	}
 	cfg.CORSAllowedOrigins = parseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"), cfg.AppBaseURL, cfg.AdminBaseURL)
 	if cfg.DatabaseURL == "" {

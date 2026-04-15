@@ -38,7 +38,12 @@ func main() {
 		logger.Error("failed to load server config", "op", "server.config.load", "error", err)
 		os.Exit(1)
 	}
-	db, err := openServerStore(context.Background(), cfg.DatabaseURL)
+	dbPoolCfg := store.NormalizeDBPoolConfig(store.DBPoolConfig{
+		MaxOpenConns:    cfg.DBMaxOpenConns,
+		MaxIdleConns:    cfg.DBMaxIdleConns,
+		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+	})
+	db, err := openServerStore(context.Background(), cfg.DatabaseURL, dbPoolCfg)
 	if err != nil {
 		logger.Error("failed to open database store", "op", "store.open", "error", err)
 		os.Exit(1)
@@ -111,7 +116,14 @@ func main() {
 
 	// Start server in background.
 	go func() {
-		logger.Info("xolto server listening", "op", "server.start", "addr", cfg.Address)
+		logger.Info(
+			"xolto server listening",
+			"op", "server.start",
+			"addr", cfg.Address,
+			"db_max_open_conns", dbPoolCfg.MaxOpenConns,
+			"db_max_idle_conns", dbPoolCfg.MaxIdleConns,
+			"db_conn_max_lifetime", dbPoolCfg.ConnMaxLifetime.String(),
+		)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server listen failed", "op", "server.listen", "error", err)
 			os.Exit(1)
@@ -178,14 +190,14 @@ func backfillMissionHunts(ctx context.Context, db store.Store, asst *assistant.A
 	logger.Info("backfill completed", "op", "backfill.scan.complete", "mission_count", len(seen), "deployed_count", deployed)
 }
 
-func openServerStore(ctx context.Context, databaseURL string) (interface {
+func openServerStore(ctx context.Context, databaseURL string, poolCfg store.DBPoolConfig) (interface {
 	store.Store
 	Close() error
 }, error) {
 	if looksLikePostgres(databaseURL) {
-		return store.NewPostgres(ctx, databaseURL)
+		return store.NewPostgresWithPool(ctx, databaseURL, poolCfg)
 	}
-	return store.New(databaseURL)
+	return store.NewWithPool(databaseURL, poolCfg)
 }
 
 func looksLikePostgres(databaseURL string) bool {

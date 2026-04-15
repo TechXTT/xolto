@@ -24,13 +24,62 @@ type CleanupStats struct {
 	PriceHistoryDeleted int64
 }
 
+type DBPoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+const (
+	defaultDBMaxOpenConns    = 25
+	defaultDBMaxIdleConns    = 5
+	defaultDBConnMaxLifetime = 30 * time.Minute
+)
+
+func DefaultDBPoolConfig() DBPoolConfig {
+	return DBPoolConfig{
+		MaxOpenConns:    defaultDBMaxOpenConns,
+		MaxIdleConns:    defaultDBMaxIdleConns,
+		ConnMaxLifetime: defaultDBConnMaxLifetime,
+	}
+}
+
+func NormalizeDBPoolConfig(cfg DBPoolConfig) DBPoolConfig {
+	if cfg.MaxOpenConns <= 0 {
+		cfg.MaxOpenConns = defaultDBMaxOpenConns
+	}
+	if cfg.MaxIdleConns < 0 {
+		cfg.MaxIdleConns = defaultDBMaxIdleConns
+	}
+	if cfg.MaxIdleConns > cfg.MaxOpenConns {
+		cfg.MaxIdleConns = cfg.MaxOpenConns
+	}
+	if cfg.ConnMaxLifetime <= 0 {
+		cfg.ConnMaxLifetime = defaultDBConnMaxLifetime
+	}
+	return cfg
+}
+
+func applyDBPoolConfig(db *sql.DB, cfg DBPoolConfig) DBPoolConfig {
+	cfg = NormalizeDBPoolConfig(cfg)
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	return cfg
+}
+
 var _ Store = (*SQLiteStore)(nil)
 
 func New(dbPath string) (*SQLiteStore, error) {
+	return NewWithPool(dbPath, DefaultDBPoolConfig())
+}
+
+func NewWithPool(dbPath string, poolCfg DBPoolConfig) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+	applyDBPoolConfig(db, poolCfg)
 
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()

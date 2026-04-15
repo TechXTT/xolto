@@ -22,10 +22,15 @@ type PostgresStore struct {
 var _ Store = (*PostgresStore)(nil)
 
 func NewPostgres(ctx context.Context, databaseURL string) (*PostgresStore, error) {
+	return NewPostgresWithPool(ctx, databaseURL, DefaultDBPoolConfig())
+}
+
+func NewPostgresWithPool(ctx context.Context, databaseURL string, poolCfg DBPoolConfig) (*PostgresStore, error) {
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("opening postgres database: %w", err)
 	}
+	applyDBPoolConfig(db, poolCfg)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("pinging postgres database: %w", err)
