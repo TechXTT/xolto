@@ -199,6 +199,31 @@ func TestAIScoreCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStripeProcessedEventIdempotency(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-stripe-idempotency.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	firstSeen, err := st.RecordStripeProcessedEvent("evt_test_123")
+	if err != nil {
+		t.Fatalf("RecordStripeProcessedEvent(first) error = %v", err)
+	}
+	if !firstSeen {
+		t.Fatalf("expected first webhook event insert to return firstSeen=true")
+	}
+
+	firstSeen, err = st.RecordStripeProcessedEvent("evt_test_123")
+	if err != nil {
+		t.Fatalf("RecordStripeProcessedEvent(second) error = %v", err)
+	}
+	if firstSeen {
+		t.Fatalf("expected duplicate webhook event insert to return firstSeen=false")
+	}
+}
+
 func TestAdminSearchOpsAggregationAndFilters(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "xolto-admin-ops.db")
 	st, err := New(dbPath)

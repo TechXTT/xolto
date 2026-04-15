@@ -208,6 +208,13 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 
+		CREATE TABLE IF NOT EXISTS stripe_processed_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL UNIQUE,
+			processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_processed_events_processed_at ON stripe_processed_events(processed_at DESC);
+
 		CREATE TABLE IF NOT EXISTS user_auth_identities (
 			id BIGSERIAL PRIMARY KEY,
 			user_id TEXT NOT NULL,
@@ -537,6 +544,14 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at DESC)`)
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stripe_processed_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL UNIQUE,
+			processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stripe_processed_events_processed_at ON stripe_processed_events(processed_at DESC)`)
 
 	_, _ = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
@@ -1102,6 +1117,22 @@ func (s *PostgresStore) UpdateUserTierByStripeCustomer(customerID, tier string) 
 func (s *PostgresStore) RecordStripeEvent(eventID string) error {
 	_, err := s.db.Exec(`INSERT INTO stripe_events (event_id) VALUES ($1) ON CONFLICT(event_id) DO NOTHING`, eventID)
 	return err
+}
+
+func (s *PostgresStore) RecordStripeProcessedEvent(eventID string) (bool, error) {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return false, nil
+	}
+	result, err := s.db.Exec(`INSERT INTO stripe_processed_events (event_id) VALUES ($1) ON CONFLICT(event_id) DO NOTHING`, eventID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 func (s *PostgresStore) SetUserAdmin(userID string, isAdmin bool) error {

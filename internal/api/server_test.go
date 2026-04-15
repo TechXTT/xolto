@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -50,6 +53,14 @@ func decodeBodyMap(t *testing.T, res *httptest.ResponseRecorder) map[string]any 
 		t.Fatalf("Decode() error = %v", err)
 	}
 	return body
+}
+
+func stripeTestSignature(secret string, payload []byte, ts int64) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(strconv.FormatInt(ts, 10)))
+	mac.Write([]byte("."))
+	mac.Write(payload)
+	return fmt.Sprintf("t=%d,v1=%x", ts, mac.Sum(nil))
 }
 
 func newAdminTestServer(t *testing.T) (*store.SQLiteStore, *Server, *stubRunner, string, string) {
@@ -189,6 +200,49 @@ func TestRegisterRejectsMissingRequiredField(t *testing.T) {
 	errMsg, _ := body["error"].(string)
 	if !strings.Contains(errMsg, "email is required") {
 		t.Fatalf("expected missing email validation error, got %#v", body)
+	}
+}
+
+func TestBillingWebhookIsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-webhook-idempotent.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	const webhookSecret = "whsec_test_123"
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:           "test-secret",
+		AppBaseURL:          "http://localhost:3000",
+		StripeWebhookSecret: webhookSecret,
+	}, st, nil, nil, nil, nil)
+
+	payload := []byte(`{"id":"evt_test_duplicate_1","object":"event","type":"product.created","data":{"object":{"id":"prod_123","object":"product"}}}`)
+	signature := stripeTestSignature(webhookSecret, payload, time.Now().Unix())
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/billing/webhook", strings.NewReader(string(payload)))
+	firstReq.Header.Set("Stripe-Signature", signature)
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("expected first webhook call status 200, got %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/billing/webhook", strings.NewReader(string(payload)))
+	secondReq.Header.Set("Stripe-Signature", signature)
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusOK {
+		t.Fatalf("expected duplicate webhook call status 200, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+
+	body := decodeBodyMap(t, secondRes)
+	if ok, _ := body["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true for duplicate webhook call, got %#v", body)
+	}
+	if duplicate, _ := body["duplicate"].(bool); !duplicate {
+		t.Fatalf("expected duplicate=true for duplicate webhook call, got %#v", body)
 	}
 }
 

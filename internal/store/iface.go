@@ -81,6 +81,7 @@ type Writer interface {
 	UpdateStripeCustomer(userID, customerID string) error
 	UpdateUserTierByStripeCustomer(customerID, tier string) error
 	RecordStripeEvent(eventID string) error
+	RecordStripeProcessedEvent(eventID string) (bool, error)
 	UpsertStripeWebhookEvent(entry models.StripeWebhookEventLog) error
 	UpsertStripeSubscriptionSnapshot(snapshot models.StripeSubscriptionSnapshot) error
 	AppendStripeSubscriptionHistory(entry models.StripeSubscriptionHistoryEntry) error

@@ -173,8 +173,17 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if event.ID != "" {
-		if err := s.db.RecordStripeEvent(event.ID); err != nil {
+		firstSeen, err := s.db.RecordStripeProcessedEvent(event.ID)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !firstSeen {
+			webhookEntry.Status = "duplicate"
+			webhookEntry.ProcessedAt = time.Now().UTC()
+			webhookEntry.AttemptCount = 2
+			_ = s.db.UpsertStripeWebhookEvent(webhookEntry)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
 			return
 		}
 	}

@@ -216,6 +216,13 @@ func migrate(db *sql.DB) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 
+		CREATE TABLE IF NOT EXISTS stripe_processed_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			processed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_stripe_processed_events_processed_at ON stripe_processed_events(processed_at);
+
 		CREATE TABLE IF NOT EXISTS user_auth_identities (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id TEXT NOT NULL,
@@ -543,6 +550,14 @@ func migrate(db *sql.DB) error {
 	`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_received ON stripe_webhook_events(received_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_events(status, received_at)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS stripe_processed_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			processed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_stripe_processed_events_processed_at ON stripe_processed_events(processed_at)`)
 
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS stripe_subscription_snapshots (
@@ -1193,6 +1208,22 @@ func (s *SQLiteStore) UpdateUserTierByStripeCustomer(customerID, tier string) er
 func (s *SQLiteStore) RecordStripeEvent(eventID string) error {
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO stripe_events (event_id) VALUES (?)`, eventID)
 	return err
+}
+
+func (s *SQLiteStore) RecordStripeProcessedEvent(eventID string) (bool, error) {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return false, nil
+	}
+	result, err := s.db.Exec(`INSERT OR IGNORE INTO stripe_processed_events (event_id) VALUES (?)`, eventID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 func (s *SQLiteStore) SetUserAdmin(userID string, isAdmin bool) error {
