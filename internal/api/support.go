@@ -230,6 +230,12 @@ func requestIP(r *http.Request, trustProxy bool) net.IP {
 func (s *Server) currentUser(r *http.Request) (*models.User, error) {
 	token := bearerToken(r)
 	if token == "" {
+		if cookie, err := r.Cookie("xolto_access"); err == nil {
+			token = strings.TrimSpace(cookie.Value)
+		}
+	}
+	if token == "" {
+		// Legacy cookie fallback during rollout.
 		if cookie, err := r.Cookie("xolto_session"); err == nil {
 			token = strings.TrimSpace(cookie.Value)
 		}
@@ -278,10 +284,12 @@ func (s *Server) setSessionCookies(w http.ResponseWriter, accessToken, refreshTo
 }
 
 func (s *Server) setAccessCookie(w http.ResponseWriter, token string) {
+	domain := s.cookieDomain()
 	http.SetCookie(w, &http.Cookie{
-		Name:     "xolto_session",
+		Name:     "xolto_access",
 		Value:    token,
 		Path:     "/",
+		Domain:   domain,
 		HttpOnly: true,
 		Secure:   s.secureCookies(),
 		SameSite: http.SameSiteLaxMode,
@@ -290,10 +298,12 @@ func (s *Server) setAccessCookie(w http.ResponseWriter, token string) {
 }
 
 func (s *Server) setRefreshCookie(w http.ResponseWriter, token string) {
+	domain := s.cookieDomain()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xolto_refresh",
 		Value:    token,
-		Path:     "/",
+		Path:     "/auth/refresh",
+		Domain:   domain,
 		HttpOnly: true,
 		Secure:   s.secureCookies(),
 		SameSite: http.SameSiteLaxMode,
@@ -302,21 +312,44 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, token string) {
 }
 
 func (s *Server) clearSessionCookies(w http.ResponseWriter) {
-	for _, name := range []string{"xolto_session", "xolto_refresh"} {
-		http.SetCookie(w, &http.Cookie{
-			Name:     name,
-			Value:    "",
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   s.secureCookies(),
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   -1,
-		})
-	}
+	s.expireCookie(w, "xolto_access", "/")
+	s.expireCookie(w, "xolto_refresh", "/auth/refresh")
+	// Legacy cleanup for old path/name combinations.
+	s.expireCookie(w, "xolto_session", "/")
+	s.expireCookie(w, "xolto_refresh", "/")
+}
+
+func (s *Server) expireCookie(w http.ResponseWriter, name, path string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     path,
+		Domain:   s.cookieDomain(),
+		HttpOnly: true,
+		Secure:   s.secureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
 }
 
 func (s *Server) secureCookies() bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(s.cfg.AppBaseURL)), "https://")
+}
+
+func (s *Server) cookieDomain() string {
+	if !s.secureCookies() {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(s.cfg.AppBaseURL))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "xolto.app" || strings.HasSuffix(host, ".xolto.app") {
+		return ".xolto.app"
+	}
+	return ""
 }
 
 func bearerToken(r *http.Request) string {

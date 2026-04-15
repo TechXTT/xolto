@@ -203,6 +203,159 @@ func TestRegisterRejectsMissingRequiredField(t *testing.T) {
 	}
 }
 
+func TestLoginSetsCookieSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-login-cookie-session.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	hash, err := auth.HashPassword("password123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := st.CreateUser("cookie-user@example.com", hash, "Cookie User"); err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"email":"cookie-user@example.com","password":"password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected login status 200, got %d body=%s", res.Code, res.Body.String())
+	}
+
+	var accessCookie *http.Cookie
+	var refreshCookie *http.Cookie
+	for _, cookie := range res.Result().Cookies() {
+		switch cookie.Name {
+		case "xolto_access":
+			accessCookie = cookie
+		case "xolto_refresh":
+			refreshCookie = cookie
+		}
+	}
+	if accessCookie == nil {
+		t.Fatal("expected xolto_access cookie to be set")
+	}
+	if accessCookie.Path != "/" {
+		t.Fatalf("expected xolto_access Path=/, got %q", accessCookie.Path)
+	}
+	if !accessCookie.HttpOnly {
+		t.Fatal("expected xolto_access to be HttpOnly")
+	}
+	if refreshCookie == nil {
+		t.Fatal("expected xolto_refresh cookie to be set")
+	}
+	if refreshCookie.Path != "/auth/refresh" {
+		t.Fatalf("expected xolto_refresh Path=/auth/refresh, got %q", refreshCookie.Path)
+	}
+	if !refreshCookie.HttpOnly {
+		t.Fatal("expected xolto_refresh to be HttpOnly")
+	}
+}
+
+func TestAuthAcceptsCookieTokens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-cookie-auth.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, nil, nil, nil, nil)
+
+	registerReq := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"email":"cookie-auth@example.com","password":"password123","name":"Cookie Auth"}`))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusCreated {
+		t.Fatalf("expected register status 201, got %d body=%s", registerRes.Code, registerRes.Body.String())
+	}
+
+	type registerResponse struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	var registered registerResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registered); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if strings.TrimSpace(registered.AccessToken) == "" {
+		t.Fatal("expected access token in register response")
+	}
+	if strings.TrimSpace(registered.RefreshToken) == "" {
+		t.Fatal("expected refresh token in register response")
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/users/me", nil)
+	meReq.AddCookie(&http.Cookie{Name: "xolto_access", Value: registered.AccessToken})
+	meRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(meRes, meReq)
+	if meRes.Code != http.StatusOK {
+		t.Fatalf("expected /users/me status 200 with access cookie, got %d body=%s", meRes.Code, meRes.Body.String())
+	}
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(&http.Cookie{Name: "xolto_refresh", Value: registered.RefreshToken})
+	refreshRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(refreshRes, refreshReq)
+	if refreshRes.Code != http.StatusOK {
+		t.Fatalf("expected /auth/refresh status 200 with refresh cookie, got %d body=%s", refreshRes.Code, refreshRes.Body.String())
+	}
+}
+
+func TestRefreshAllowsLegacyHeaderFallback(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-refresh-legacy-header.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, nil, nil, nil, nil)
+
+	registerReq := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"email":"legacy-refresh@example.com","password":"password123","name":"Legacy Refresh"}`))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusCreated {
+		t.Fatalf("expected register status 201, got %d body=%s", registerRes.Code, registerRes.Body.String())
+	}
+
+	type registerResponse struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	var registered registerResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registered); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if strings.TrimSpace(registered.RefreshToken) == "" {
+		t.Fatal("expected refresh token in register response")
+	}
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.Header.Set("X-Refresh-Token", registered.RefreshToken)
+	refreshRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(refreshRes, refreshReq)
+	if refreshRes.Code != http.StatusOK {
+		t.Fatalf("expected /auth/refresh status 200 with legacy header fallback, got %d body=%s", refreshRes.Code, refreshRes.Body.String())
+	}
+}
+
 func TestBillingWebhookIsIdempotent(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "api-webhook-idempotent.db")
 	st, err := store.New(dbPath)

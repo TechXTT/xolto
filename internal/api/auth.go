@@ -253,11 +253,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	refreshToken := strings.TrimSpace(r.Header.Get("X-Refresh-Token"))
+	refreshToken := ""
+	if cookie, err := r.Cookie("xolto_refresh"); err == nil {
+		refreshToken = strings.TrimSpace(cookie.Value)
+	}
 	if refreshToken == "" {
-		if cookie, err := r.Cookie("xolto_refresh"); err == nil {
-			refreshToken = strings.TrimSpace(cookie.Value)
-		}
+		// Backward-compatible fallback during cookie auth rollout.
+		refreshToken = strings.TrimSpace(r.Header.Get("X-Refresh-Token"))
 	}
 	if refreshToken == "" {
 		writeError(w, http.StatusUnauthorized, "missing refresh token")

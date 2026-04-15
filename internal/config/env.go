@@ -57,7 +57,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		StripeProPriceID:    os.Getenv("STRIPE_PRO_PRICE_ID"),
 		StripePowerPriceID:  os.Getenv("STRIPE_POWER_PRICE_ID"),
 		AppBaseURL:          getenvDefault("APP_BASE_URL", "http://localhost:3000"),
-		AdminBaseURL:        getenvDefault("ADMIN_BASE_URL", "http://localhost:3010"),
+		AdminBaseURL:        getenvDefault("ADMIN_BASE_URL", "http://localhost:3002"),
 		AIAPIKey:            os.Getenv("AI_API_KEY"),
 		AIBaseURL:           getenvDefault("AI_BASE_URL", "https://api.openai.com/v1"),
 		AIModel:             getenvDefault("AI_MODEL", "gpt-4o-mini"),
@@ -90,7 +90,7 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	if cfg.DBConnMaxLifetime <= 0 {
 		cfg.DBConnMaxLifetime = 30 * time.Minute
 	}
-	cfg.CORSAllowedOrigins = parseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"), cfg.AppBaseURL, cfg.AdminBaseURL)
+	cfg.CORSAllowedOrigins = parseAllowedOrigins(cfg)
 	if cfg.DatabaseURL == "" {
 		cfg.DatabaseURL = "xolto-server.db"
 	}
@@ -146,6 +146,15 @@ func parseOrigins(raw string, defaults ...string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func parseAllowedOrigins(cfg ServerConfig) []string {
+	allowedOriginsRaw := os.Getenv("ALLOWED_ORIGINS")
+	if strings.TrimSpace(allowedOriginsRaw) == "" {
+		// Backward-compatible fallback for one release.
+		allowedOriginsRaw = os.Getenv("CORS_ALLOWED_ORIGINS")
+	}
+	return parseOrigins(allowedOriginsRaw, cfg.AppBaseURL, cfg.AdminBaseURL)
 }
 
 func parseCSV(raw string) []string {
