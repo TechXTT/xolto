@@ -2294,6 +2294,76 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 	return listings, rows.Err()
 }
 
+// ListRecentListingsPaginated returns a page of listings ordered by
+// (last_seen DESC, item_id ASC) — a deterministic ordering with a unique
+// tie-breaker so adjacent pages never duplicate or skip rows. It also
+// returns the total count of matching rows ignoring limit/offset.
+func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset int, missionID int64) ([]models.Listing, int, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	prefix := scopedItemPrefix(userID)
+
+	var total int
+	countErr := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM listings
+		WHERE item_id LIKE $1
+		  AND ($2 = 0 OR profile_id = $2)
+		  AND COALESCE(feedback, '') <> 'dismissed'
+	`, prefix, missionID).Scan(&total)
+	if countErr != nil {
+		return nil, 0, countErr
+	}
+
+	rows, err := s.db.Query(`
+		SELECT item_id, profile_id, title, price, price_type, image_urls,
+		       url, condition, marketplace_id,
+		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       last_seen, feedback
+		FROM listings
+		WHERE item_id LIKE $1
+		  AND ($2 = 0 OR profile_id = $2)
+		  AND COALESCE(feedback, '') <> 'dismissed'
+		ORDER BY last_seen DESC, item_id ASC
+		LIMIT $3 OFFSET $4
+	`, prefix, missionID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var listings []models.Listing
+	for rows.Next() {
+		var listing models.Listing
+		var imageURLsJSON, riskFlagsJSON string
+		if err := rows.Scan(
+			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+			&listing.URL, &listing.Condition, &listing.MarketplaceID,
+			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
+			&listing.Reason, &riskFlagsJSON, &listing.Date, &listing.Feedback,
+		); err != nil {
+			return nil, 0, err
+		}
+		listing.ItemID = unscopedItemID(listing.ItemID)
+		if strings.TrimSpace(listing.MarketplaceID) == "" {
+			listing.MarketplaceID = "marktplaats"
+		}
+		listing.CanonicalID = listing.MarketplaceID + ":" + listing.ItemID
+		_ = json.Unmarshal([]byte(imageURLsJSON), &listing.ImageURLs)
+		_ = json.Unmarshal([]byte(riskFlagsJSON), &listing.RiskFlags)
+		listings = append(listings, listing)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return listings, total, nil
+}
+
 func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, error) {
 	row := s.db.QueryRow(`
 		SELECT item_id, profile_id, title, price, price_type, image_urls,

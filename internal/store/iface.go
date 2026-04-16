@@ -31,6 +31,13 @@ type Reader interface {
 	CountSearchConfigs(userID string) (int, error)
 	CountActiveMissions(userID string) (int, error)
 	ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error)
+	// ListRecentListingsPaginated returns a page of listings for the user
+	// ordered deterministically by (last_seen DESC, item_id ASC) with a
+	// stable tie-breaker on item_id. It also returns the total count of
+	// matching listings ignoring limit/offset, so callers can compute page
+	// counts without a second round-trip. missionID = 0 returns listings
+	// across all missions for the user.
+	ListRecentListingsPaginated(userID string, limit, offset int, missionID int64) (listings []models.Listing, total int, err error)
 	GetListing(userID, itemID string) (*models.Listing, error)
 	ListActionDrafts(userID string) ([]models.ActionDraft, error)
 	// Admin

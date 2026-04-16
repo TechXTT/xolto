@@ -13,6 +13,9 @@ import (
 
 func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
+	// /matches must be registered before /matches/feedback and /matches/analyze
+	// so that the more-specific sub-paths take priority in the ServeMux.
+	mux.HandleFunc("/matches", s.requireAuth(s.handleMatches))
 	mux.HandleFunc("/matches/feedback", s.requireAuth(s.handleMatchFeedback))
 	mux.HandleFunc("/matches/analyze", s.requireAuth(s.handleAnalyzeListing))
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
@@ -82,6 +85,94 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request, user *models
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"listings": listings, "user_id": user.ID})
+}
+
+// handleMatches serves GET /matches with offset pagination.
+//
+// Query parameters:
+//   - limit  int, optional, default = 20, min = 1, max = 100
+//   - offset int, optional, default = 0, min = 0
+//   - mission_id int64, optional, default = 0 (all missions)
+//
+// Ordering: last_seen DESC, item_id ASC.
+// The item_id tie-breaker guarantees that rows are never duplicated or skipped
+// across page boundaries even when two listings share the same last_seen value.
+//
+// Response shape:
+//
+//	{
+//	  "items":  [...Listing],
+//	  "limit":  <int>,
+//	  "offset": <int>,
+//	  "total":  <int>
+//	}
+//
+// Errors: 400 Bad Request for invalid param values, with the standard
+// {"ok": false, "error": "<message>"} envelope.
+func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	const (
+		defaultLimit = 20
+		maxLimit     = 100
+	)
+
+	limit := defaultLimit
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		if parsed < 1 || parsed > maxLimit {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "offset must be an integer")
+			return
+		}
+		if parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be 0 or greater")
+			return
+		}
+		offset = parsed
+	}
+
+	missionID := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("mission_id")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "mission_id must be a non-negative integer")
+			return
+		}
+		missionID = parsed
+	}
+
+	listings, total, err := s.db.ListRecentListingsPaginated(user.ID, limit, offset, missionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Return an empty slice rather than null so clients can always iterate.
+	if listings == nil {
+		listings = []models.Listing{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  listings,
+		"limit":  limit,
+		"offset": offset,
+		"total":  total,
+	})
 }
 
 // handleMatchFeedback records user feedback (approve/dismiss/clear) on a
