@@ -11,6 +11,64 @@ import (
 	"github.com/TechXTT/xolto/internal/models"
 )
 
+// matchesSortValues is the set of allowed values for the sort parameter.
+// "newest" is the default (last_seen DESC, item_id ASC) and matches the
+// Phase 1 ordering exactly, so Phase 2 dash clients get byte-for-byte the
+// same result when they omit the sort param.
+var matchesSortValues = map[string]bool{
+	"newest":     true,
+	"score":      true,
+	"price_asc":  true,
+	"price_desc": true,
+}
+
+// matchesMarketValues is the set of allowed market param values (dash vocabulary).
+// "all" means no market filter. The dash uses "olx_bg"; backend stores "olxbg";
+// "vinted" is a legacy alias for "vinted_nl" — both are normalised at parse time.
+var matchesMarketValues = map[string]bool{
+	"all":        true,
+	"marktplaats": true,
+	"vinted":     true, // legacy alias → normalised to "vinted_nl"
+	"vinted_nl":  true,
+	"vinted_dk":  true,
+	"olx_bg":     true, // dash vocabulary → normalised to "olxbg"
+	"olxbg":      true, // canonical backend ID; also accepted directly
+}
+
+// normalizeMarket maps the dash-facing market vocabulary to the backend's
+// canonical stored marketplace_id values. Returns "" for "all".
+func normalizeMarket(v string) string {
+	switch v {
+	case "all", "":
+		return ""
+	case "vinted":
+		return "vinted_nl"
+	case "olx_bg":
+		return "olxbg"
+	default:
+		return v // marktplaats, vinted_nl, vinted_dk, olxbg — pass through
+	}
+}
+
+// matchesConditionValues is the set of allowed condition param values.
+// These mirror the canonical condition strings stored by all marketplace
+// mappers (marktplaats, vinted, olxbg). "all" means no condition filter.
+var matchesConditionValues = map[string]bool{
+	"all":      true,
+	"new":      true,
+	"like_new": true,
+	"good":     true,
+	"fair":     true,
+}
+
+// normalizeCondition returns the stored condition value, or "" for "all".
+func normalizeCondition(v string) string {
+	if v == "all" || v == "" {
+		return ""
+	}
+	return v
+}
+
 func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
 	// /matches must be registered before /matches/feedback and /matches/analyze
@@ -87,24 +145,45 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request, user *models
 	writeJSON(w, http.StatusOK, map[string]any{"listings": listings, "user_id": user.ID})
 }
 
-// handleMatches serves GET /matches with offset pagination.
+// handleMatches serves GET /matches with offset pagination and server-side
+// filtering (Phase 3).
 //
-// Query parameters:
-//   - limit  int, optional, default = 20, min = 1, max = 100
-//   - offset int, optional, default = 0, min = 0
+// Existing query parameters (unchanged from Phase 1):
+//   - limit      int,   optional, default = 20, min = 1, max = 100
+//   - offset     int,   optional, default = 0, min = 0
 //   - mission_id int64, optional, default = 0 (all missions)
 //
-// Ordering: last_seen DESC, item_id ASC.
-// The item_id tie-breaker guarantees that rows are never duplicated or skipped
-// across page boundaries even when two listings share the same last_seen value.
+// New query parameters (Phase 3, all optional, all additive):
+//   - sort       string, default "newest"
+//                allowed: "score" | "price_asc" | "price_desc" | "newest"
+//   - market     string, default "all"
+//                allowed: "all" | "marktplaats" | "vinted" | "vinted_nl" |
+//                         "vinted_dk" | "olx_bg" | "olxbg"
+//                "vinted" is normalised to "vinted_nl".
+//                "olx_bg" (dash vocabulary) is normalised to "olxbg" (stored).
+//   - condition  string, default "all"
+//                allowed: "all" | "new" | "like_new" | "good" | "fair"
+//   - min_score  int,    default 0, range 0..10 (0 = no minimum)
 //
-// Response shape:
+// Semantic order of operations:
+//  1. Apply mission_id filter.
+//  2. Apply market / condition / min_score filters.
+//  3. Compute total = COUNT after all filters (ignoring limit/offset).
+//  4. Apply ORDER BY per sort (with item_id ASC tie-breaker).
+//  5. Apply LIMIT + OFFSET for the page.
+//
+// Default behaviour (no new params supplied) is byte-for-byte identical to
+// the Phase 1 response: sort=newest → last_seen DESC, item_id ASC. The
+// Phase 2 dash build (commit 95aa25e) calls /matches without new params and
+// must not experience any change.
+//
+// Response shape (unchanged):
 //
 //	{
 //	  "items":  [...Listing],
 //	  "limit":  <int>,
 //	  "offset": <int>,
-//	  "total":  <int>
+//	  "total":  <int>   <- filtered count, independent of limit/offset
 //	}
 //
 // Errors: 400 Bad Request for invalid param values, with the standard
@@ -119,6 +198,8 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 		defaultLimit = 20
 		maxLimit     = 100
 	)
+
+	// --- Existing Phase 1 params (unchanged) ---
 
 	limit := defaultLimit
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
@@ -158,7 +239,53 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 		missionID = parsed
 	}
 
-	listings, total, err := s.db.ListRecentListingsPaginated(user.ID, limit, offset, missionID)
+	// --- New Phase 3 filter params ---
+
+	var filter models.MatchesFilter
+
+	// sort
+	if raw := strings.TrimSpace(r.URL.Query().Get("sort")); raw != "" {
+		if !matchesSortValues[raw] {
+			writeError(w, http.StatusBadRequest, "sort must be one of: newest, score, price_asc, price_desc")
+			return
+		}
+		filter.Sort = raw
+	}
+	// Default sort "" is treated as "newest" in the store layer.
+
+	// market
+	if raw := strings.TrimSpace(r.URL.Query().Get("market")); raw != "" {
+		if !matchesMarketValues[raw] {
+			writeError(w, http.StatusBadRequest, "market must be one of: all, marktplaats, vinted, vinted_nl, vinted_dk, olx_bg, olxbg")
+			return
+		}
+		filter.Market = normalizeMarket(raw)
+	}
+
+	// condition
+	if raw := strings.TrimSpace(r.URL.Query().Get("condition")); raw != "" {
+		if !matchesConditionValues[raw] {
+			writeError(w, http.StatusBadRequest, "condition must be one of: all, new, like_new, good, fair")
+			return
+		}
+		filter.Condition = normalizeCondition(raw)
+	}
+
+	// min_score
+	if raw := strings.TrimSpace(r.URL.Query().Get("min_score")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "min_score must be an integer")
+			return
+		}
+		if parsed < 0 || parsed > 10 {
+			writeError(w, http.StatusBadRequest, "min_score must be between 0 and 10")
+			return
+		}
+		filter.MinScore = parsed
+	}
+
+	listings, total, err := s.db.ListRecentListingsPaginated(user.ID, limit, offset, missionID, filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

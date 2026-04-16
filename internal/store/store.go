@@ -1514,11 +1514,13 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 	return listings, rows.Err()
 }
 
-// ListRecentListingsPaginated returns a page of listings ordered by
-// (last_seen DESC, item_id ASC) — a deterministic ordering with a unique
-// tie-breaker so adjacent pages never duplicate or skip rows. It also
-// returns the total count of matching rows ignoring limit/offset.
-func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset int, missionID int64) ([]models.Listing, int, error) {
+// ListRecentListingsPaginated returns a page of listings with server-side
+// filtering and sorting. See models.MatchesFilter for the full contract.
+//
+// Default (zero-value filter) reproduces the Phase 1 ordering:
+// last_seen DESC, item_id ASC — byte-for-byte identical to the pre-Phase-3
+// behaviour when no filter params are supplied.
+func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset int, missionID int64, filter models.MatchesFilter) ([]models.Listing, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1528,19 +1530,47 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 
 	prefix := scopedItemPrefix(userID)
 
-	var total int
-	countErr := s.db.QueryRow(`
+	// Build the shared WHERE clause extras and args for market / condition /
+	// min_score filters. We append to a base args slice so the positional
+	// parameters stay consistent between the COUNT query and the page query.
+	//
+	// Base positional params: (prefix, missionID, missionID)  — indices 1,2,3
+	// (SQLite uses ?, not $N, so we track by append position.)
+	whereExtras := ""
+	baseArgs := []any{prefix, missionID, missionID}
+
+	if filter.Market != "" {
+		whereExtras += "\n  AND marketplace_id = ?"
+		baseArgs = append(baseArgs, filter.Market)
+	}
+	if filter.Condition != "" {
+		whereExtras += "\n  AND condition = ?"
+		baseArgs = append(baseArgs, filter.Condition)
+	}
+	if filter.MinScore > 0 {
+		whereExtras += "\n  AND score >= ?"
+		baseArgs = append(baseArgs, float64(filter.MinScore))
+	}
+
+	// Count query — same WHERE, no LIMIT/OFFSET.
+	countQuery := `
 		SELECT COUNT(*)
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
-		  AND COALESCE(feedback, '') <> 'dismissed'
-	`, prefix, missionID, missionID).Scan(&total)
-	if countErr != nil {
-		return nil, 0, countErr
+		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras
+
+	var total int
+	if err := s.db.QueryRow(countQuery, baseArgs...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 
-	rows, err := s.db.Query(`
+	// ORDER BY per sort mode — every mode includes the unique item_id tie-breaker.
+	orderBy := sqliteOrderBy(filter.Sort)
+
+	// Page query.
+	pageArgs := append(baseArgs, limit, offset)
+	pageQuery := `
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
@@ -1548,10 +1578,11 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
-		  AND COALESCE(feedback, '') <> 'dismissed'
-		ORDER BY last_seen DESC, item_id ASC
-		LIMIT ? OFFSET ?
-	`, prefix, missionID, missionID, limit, offset)
+		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras + `
+		` + orderBy + `
+		LIMIT ? OFFSET ?`
+
+	rows, err := s.db.Query(pageQuery, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1583,6 +1614,24 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 		return nil, 0, err
 	}
 	return listings, total, nil
+}
+
+// sqliteOrderBy returns the ORDER BY clause (without the keyword) for the
+// given sort mode. All modes include item_id ASC as a unique tie-breaker.
+// offer_price NULLs are sorted last in both price modes.
+//
+// SQLite does not support NULLS LAST by default; we use a CASE workaround.
+func sqliteOrderBy(sort string) string {
+	switch sort {
+	case "score":
+		return "ORDER BY score DESC, item_id ASC"
+	case "price_asc":
+		return "ORDER BY CASE WHEN offer_price IS NULL OR offer_price = 0 THEN 1 ELSE 0 END ASC, offer_price ASC, item_id ASC"
+	case "price_desc":
+		return "ORDER BY CASE WHEN offer_price IS NULL OR offer_price = 0 THEN 1 ELSE 0 END ASC, offer_price DESC, item_id ASC"
+	default: // "newest" and zero-value — preserves Phase 1 default
+		return "ORDER BY last_seen DESC, item_id ASC"
+	}
 }
 
 func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error) {

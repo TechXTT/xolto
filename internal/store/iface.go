@@ -31,13 +31,19 @@ type Reader interface {
 	CountSearchConfigs(userID string) (int, error)
 	CountActiveMissions(userID string) (int, error)
 	ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error)
-	// ListRecentListingsPaginated returns a page of listings for the user
-	// ordered deterministically by (last_seen DESC, item_id ASC) with a
-	// stable tie-breaker on item_id. It also returns the total count of
-	// matching listings ignoring limit/offset, so callers can compute page
-	// counts without a second round-trip. missionID = 0 returns listings
-	// across all missions for the user.
-	ListRecentListingsPaginated(userID string, limit, offset int, missionID int64) (listings []models.Listing, total int, err error)
+	// ListRecentListingsPaginated returns a page of listings for the user.
+	//
+	// Ordering and filter semantics (Phase 3):
+	//  1. Apply missionID filter (0 = all missions).
+	//  2. Apply filter.Market / filter.Condition / filter.MinScore.
+	//  3. Compute total = COUNT after all filters (ignoring limit/offset).
+	//  4. Apply ORDER BY per filter.Sort (default "newest" = last_seen DESC,
+	//     item_id ASC); every sort mode includes the item_id ASC tie-breaker.
+	//  5. Apply LIMIT + OFFSET for the page.
+	//
+	// An empty filter (zero-value MatchesFilter) reproduces the Phase 1
+	// default: last_seen DESC, item_id ASC, no market/condition/score filter.
+	ListRecentListingsPaginated(userID string, limit, offset int, missionID int64, filter models.MatchesFilter) (listings []models.Listing, total int, err error)
 	GetListing(userID, itemID string) (*models.Listing, error)
 	ListActionDrafts(userID string) ([]models.ActionDraft, error)
 	// Admin

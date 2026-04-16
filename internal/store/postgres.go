@@ -2294,11 +2294,13 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 	return listings, rows.Err()
 }
 
-// ListRecentListingsPaginated returns a page of listings ordered by
-// (last_seen DESC, item_id ASC) — a deterministic ordering with a unique
-// tie-breaker so adjacent pages never duplicate or skip rows. It also
-// returns the total count of matching rows ignoring limit/offset.
-func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset int, missionID int64) ([]models.Listing, int, error) {
+// ListRecentListingsPaginated returns a page of listings with server-side
+// filtering and sorting. See models.MatchesFilter for the full contract.
+//
+// Default (zero-value filter) reproduces the Phase 1 ordering:
+// last_seen DESC, item_id ASC — byte-for-byte identical to the pre-Phase-3
+// behaviour when no filter params are supplied.
+func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset int, missionID int64, filter models.MatchesFilter) ([]models.Listing, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -2308,30 +2310,68 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 
 	prefix := scopedItemPrefix(userID)
 
-	var total int
-	countErr := s.db.QueryRow(`
+	// Build the shared WHERE clause extras and positional args. Postgres uses
+	// $N placeholders; the base params occupy $1..$3 so extras start at $4.
+	//
+	// Base: ($1=prefix, $2=missionID, $2=missionID)
+	// N tracks the next placeholder index for additional filter params.
+	whereExtras := ""
+	extraArgs := []any{}
+	n := 3 // next placeholder index is n+1
+
+	if filter.Market != "" {
+		n++
+		whereExtras += fmt.Sprintf("\n  AND marketplace_id = $%d", n)
+		extraArgs = append(extraArgs, filter.Market)
+	}
+	if filter.Condition != "" {
+		n++
+		whereExtras += fmt.Sprintf("\n  AND condition = $%d", n)
+		extraArgs = append(extraArgs, filter.Condition)
+	}
+	if filter.MinScore > 0 {
+		n++
+		whereExtras += fmt.Sprintf("\n  AND score >= $%d", n)
+		extraArgs = append(extraArgs, float64(filter.MinScore))
+	}
+
+	baseArgs := []any{prefix, missionID}
+	countArgs := append(baseArgs, extraArgs...)
+
+	// Count query — same WHERE, no LIMIT/OFFSET.
+	countQuery := `
 		SELECT COUNT(*)
 		FROM listings
 		WHERE item_id LIKE $1
 		  AND ($2 = 0 OR profile_id = $2)
-		  AND COALESCE(feedback, '') <> 'dismissed'
-	`, prefix, missionID).Scan(&total)
-	if countErr != nil {
-		return nil, 0, countErr
+		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras
+
+	var total int
+	if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 
-	rows, err := s.db.Query(`
+	// ORDER BY per sort mode — every mode includes the unique item_id tie-breaker.
+	// Postgres supports NULLS LAST natively.
+	orderBy := postgresOrderBy(filter.Sort)
+
+	// LIMIT and OFFSET occupy the next two placeholders.
+	limitPlaceholder := n + 1
+	offsetPlaceholder := n + 2
+	pageArgs := append(countArgs, limit, offset)
+	pageQuery := fmt.Sprintf(`
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       last_seen, feedback
+		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id LIKE $1
 		  AND ($2 = 0 OR profile_id = $2)
-		  AND COALESCE(feedback, '') <> 'dismissed'
-		ORDER BY last_seen DESC, item_id ASC
-		LIMIT $3 OFFSET $4
-	`, prefix, missionID, limit, offset)
+		  AND COALESCE(feedback, '') <> 'dismissed'`+whereExtras+`
+		%s
+		LIMIT $%d OFFSET $%d`, orderBy, limitPlaceholder, offsetPlaceholder)
+
+	rows, err := s.db.Query(pageQuery, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2362,6 +2402,25 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 		return nil, 0, err
 	}
 	return listings, total, nil
+}
+
+// postgresOrderBy returns the ORDER BY clause for the given sort mode.
+// All modes include item_id ASC as a unique tie-breaker.
+//
+// Price sorts treat offer_price = 0 as unknown/unparsed (same as NULL) and
+// push those rows to the end of results in both price_asc and price_desc,
+// matching the SQLite CASE-based behaviour in sqliteOrderBy.
+func postgresOrderBy(sort string) string {
+	switch sort {
+	case "score":
+		return "ORDER BY score DESC, item_id ASC"
+	case "price_asc":
+		return "ORDER BY CASE WHEN offer_price IS NULL OR offer_price = 0 THEN 1 ELSE 0 END ASC, offer_price ASC NULLS LAST, item_id ASC"
+	case "price_desc":
+		return "ORDER BY CASE WHEN offer_price IS NULL OR offer_price = 0 THEN 1 ELSE 0 END ASC, offer_price DESC NULLS LAST, item_id ASC"
+	default: // "newest" and zero-value — preserves Phase 1 default
+		return "ORDER BY last_seen DESC, item_id ASC"
+	}
 }
 
 func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, error) {

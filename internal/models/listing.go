@@ -216,3 +216,31 @@ type SearchRunLog struct {
 	ErrorCode       string
 	SearchesAvoided int
 }
+
+// MatchesFilter holds the server-side filter and sort parameters for
+// GET /matches (Phase 3). All fields are optional — zero values mean
+// "no filter / default".
+//
+// Sort modes:
+//
+//	"newest"     -> last_seen DESC, item_id ASC  (default, matches Phase 1)
+//	"score"      -> score DESC, item_id ASC
+//	"price_asc"  -> offer_price ASC  NULLS LAST, item_id ASC
+//	"price_desc" -> offer_price DESC NULLS LAST, item_id ASC
+//
+// Market/Condition must be stored-canonical values (e.g. "marktplaats",
+// "vinted_nl", "olxbg", "vinted_dk" for market; "new", "like_new", "good",
+// "fair" for condition). The handler normalises the wire vocabulary before
+// constructing this struct.
+type MatchesFilter struct {
+	// Sort is one of "newest", "score", "price_asc", "price_desc".
+	// Empty string is equivalent to "newest".
+	Sort string
+	// Market filters by stored marketplace_id. Empty string means "all".
+	Market string
+	// Condition filters by stored condition value. Empty string means "all".
+	Condition string
+	// MinScore, when > 0, excludes listings with score < MinScore.
+	// Range: 0..10 inclusive; 0 means no minimum.
+	MinScore int
+}
