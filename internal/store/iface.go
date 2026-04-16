@@ -31,6 +31,7 @@ type Reader interface {
 	CountSearchConfigs(userID string) (int, error)
 	CountActiveMissions(userID string) (int, error)
 	ListRecentListings(userID string, limit int, missionID int64) ([]models.Listing, error)
+	GetListing(userID, itemID string) (*models.Listing, error)
 	ListActionDrafts(userID string) ([]models.ActionDraft, error)
 	// Admin
 	ListAllUsers() ([]models.AdminUserSummary, error)

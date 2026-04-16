@@ -1514,6 +1514,40 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 	return listings, rows.Err()
 }
 
+func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error) {
+	row := s.db.QueryRow(`
+		SELECT item_id, profile_id, title, price, price_type, image_urls,
+		       url, condition, marketplace_id,
+		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       last_seen, COALESCE(feedback, '')
+		FROM listings
+		WHERE item_id = ?
+	`, scopedItemID(userID, itemID))
+
+	var listing models.Listing
+	var imageURLsJSON, riskFlagsJSON, lastSeen string
+	if err := row.Scan(
+		&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+		&listing.URL, &listing.Condition, &listing.MarketplaceID,
+		&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
+		&listing.Reason, &riskFlagsJSON, &lastSeen, &listing.Feedback,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	listing.ItemID = unscopedItemID(listing.ItemID)
+	if strings.TrimSpace(listing.MarketplaceID) == "" {
+		listing.MarketplaceID = "marktplaats"
+	}
+	listing.CanonicalID = listing.MarketplaceID + ":" + listing.ItemID
+	listing.Date, _ = parseSQLiteTime(lastSeen)
+	_ = json.Unmarshal([]byte(imageURLsJSON), &listing.ImageURLs)
+	_ = json.Unmarshal([]byte(riskFlagsJSON), &listing.RiskFlags)
+	return &listing, nil
+}
+
 // SetListingFeedback marks a listing as approved/dismissed or clears feedback.
 // feedback must be one of "", "approved", "dismissed".
 func (s *SQLiteStore) SetListingFeedback(userID, itemID, feedback string) error {

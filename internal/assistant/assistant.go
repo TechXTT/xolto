@@ -307,7 +307,7 @@ func (a *Assistant) ExplainListing(ctx context.Context, userID, itemID string) (
 }
 
 func (a *Assistant) SaveToShortlist(ctx context.Context, userID, itemID string) (*models.ShortlistEntry, error) {
-	rec, mission, err := a.findRecommendationByItemID(ctx, userID, itemID, 0)
+	rec, mission, err := a.resolveRecommendation(ctx, userID, itemID)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +334,41 @@ func (a *Assistant) SaveToShortlist(ctx context.Context, userID, itemID string) 
 		return nil, err
 	}
 	return a.store.GetShortlistEntry(userID, itemID)
+}
+
+// resolveRecommendation resolves a listing itemID to a Recommendation, preferring
+// the persisted listings table over a live marketplace scrape. The live scrape
+// path only surfaces the top N matches within the current polling window, so
+// listings the user sees in the UI (loaded from the DB) may not be present in
+// that live view. Falling back to live scrape covers the edge case where a
+// listing was never persisted.
+func (a *Assistant) resolveRecommendation(ctx context.Context, userID, itemID string) (*models.Recommendation, *models.Mission, error) {
+	listing, err := a.store.GetListing(userID, itemID)
+	if err == nil && listing != nil {
+		var mission *models.Mission
+		if listing.ProfileID > 0 {
+			if loaded, err := a.store.GetMission(listing.ProfileID); err == nil && loaded != nil && loaded.UserID == userID {
+				mission = loaded
+			}
+		}
+		if mission == nil {
+			mission, _ = a.store.GetActiveMission(userID)
+		}
+		if mission != nil {
+			scored := models.ScoredListing{
+				Listing:    *listing,
+				Score:      listing.Score,
+				FairPrice:  listing.FairPrice,
+				OfferPrice: listing.OfferPrice,
+				Confidence: listing.Confidence,
+				Reason:     listing.Reason,
+				RiskFlags:  listing.RiskFlags,
+			}
+			rec := buildRecommendation(scored, *mission)
+			return &rec, mission, nil
+		}
+	}
+	return a.findRecommendationByItemID(ctx, userID, itemID, 0)
 }
 
 func (a *Assistant) ListShortlist(userID string) ([]models.ShortlistEntry, error) {
@@ -1041,7 +1076,10 @@ func renderConversationMatches(missionName string, recs []models.Recommendation)
 func buildHeuristicDraft(entry models.ShortlistEntry, mission *models.Mission, locale messageLocale) string {
 	offerAmt := suggestedOfferAmount(entry)
 	question := categorySpecificQuestion(mission, entry.Title, locale)
-	if len(entry.SuggestedQuestions) > 0 {
+	// SuggestedQuestions are hardcoded English in buildQuestions; only substitute
+	// them into the draft when the target locale is English to avoid mixed-language
+	// messages on non-EN marketplaces (e.g. OLX BG, Marktplaats).
+	if locale == localeEN && len(entry.SuggestedQuestions) > 0 {
 		question = entry.SuggestedQuestions[0]
 	}
 	switch locale {
@@ -1590,6 +1628,15 @@ func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []
 
 func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models.ShortlistEntry, marketplaceID string, locale messageLocale) (string, error) {
 	language := localeLabel(locale)
+	// Reference data (Concerns, SuggestedQuestions, Verdict) is generated in
+	// English by the scorer/buildQuestions. Stripping those fields for non-EN
+	// locales prevents the model from echoing English phrasing into the draft.
+	entryForPrompt := entry
+	if locale != localeEN {
+		entryForPrompt.SuggestedQuestions = nil
+		entryForPrompt.Concerns = nil
+		entryForPrompt.Verdict = ""
+	}
 	payload := map[string]any{
 		"model":       a.cfg.AI.Model,
 		"temperature": 0.5,
@@ -1597,18 +1644,19 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 			{
 				"role": "system",
 				"content": "You help buyers draft seller messages on European secondhand marketplaces (Marktplaats, Vinted, OLX BG). " +
-					"Write a short, friendly, natural-sounding message in " + language + ". " +
+					"Write the entire message in " + language + ". The reference data may be in English — ignore its phrasing and produce natural " + language + " prose. " +
 					"Match the marketplace tone and language expectations for " + marketplaceID + ". " +
 					"Include: a brief mention of what appeals about the listing, one question about condition or completeness if relevant, " +
 					"and the suggested offer phrased naturally as 'would you consider X?'. " +
-					"Keep it to 2-3 sentences. Do not commit to buying. Do not be pushy.",
+					"Keep it to 2-3 sentences. Do not commit to buying. Do not be pushy. " +
+					"Output only the message body — no preamble, no translation notes.",
 			},
 			{
 				"role": "user",
 				"content": "Draft a seller message for this listing:\n" + mustJSON(map[string]any{
 					"marketplace": marketplaceID,
 					"language":    string(locale),
-					"entry":       entry,
+					"entry":       entryForPrompt,
 				}),
 			},
 		},

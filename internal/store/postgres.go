@@ -2294,6 +2294,39 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 	return listings, rows.Err()
 }
 
+func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, error) {
+	row := s.db.QueryRow(`
+		SELECT item_id, profile_id, title, price, price_type, image_urls,
+		       url, condition, marketplace_id,
+		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       last_seen, COALESCE(feedback, '')
+		FROM listings
+		WHERE item_id = $1
+	`, scopedItemID(userID, itemID))
+
+	var listing models.Listing
+	var imageURLsJSON, riskFlagsJSON string
+	if err := row.Scan(
+		&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
+		&listing.URL, &listing.Condition, &listing.MarketplaceID,
+		&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
+		&listing.Reason, &riskFlagsJSON, &listing.Date, &listing.Feedback,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	listing.ItemID = unscopedItemID(listing.ItemID)
+	if strings.TrimSpace(listing.MarketplaceID) == "" {
+		listing.MarketplaceID = "marktplaats"
+	}
+	listing.CanonicalID = listing.MarketplaceID + ":" + listing.ItemID
+	_ = json.Unmarshal([]byte(imageURLsJSON), &listing.ImageURLs)
+	_ = json.Unmarshal([]byte(riskFlagsJSON), &listing.RiskFlags)
+	return &listing, nil
+}
+
 // SetListingFeedback marks a listing as approved/dismissed or clears feedback.
 // feedback must be one of "", "approved", "dismissed".
 func (s *PostgresStore) SetListingFeedback(userID, itemID, feedback string) error {
