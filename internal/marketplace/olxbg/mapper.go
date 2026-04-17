@@ -135,13 +135,17 @@ const (
 	CurrencyStatusUnknown = "unknown"
 )
 
-// currencyStatus returns the currency_status string and the EUR-cent price for
-// the given raw offer price and API-reported currency. The conversion rules:
+// CurrencyStatusFromAPI returns the EUR-cent price and the currency_status
+// string for the given raw offer price and API-reported currency string. This
+// function is the single source of truth for OLX BG currency conversion; both
+// the crawler mapper and the ad-hoc fetcher (listingfetcher) must use it.
+//
+// Conversion rules:
 //
 //   - "EUR": price is already in EUR; multiply by 100 for cents — no peg division.
 //   - "BGN": price is in BGN; divide by BGNPerEUR after converting to stotinki.
 //   - anything else: fall back to BGN assumption; emit "unknown" status + warn log.
-func currencyStatus(rawPrice float64, apiCurrency, offerID string) (eurCents int, status string) {
+func CurrencyStatusFromAPI(rawPrice float64, apiCurrency, offerID string) (eurCents int, status string) {
 	switch strings.ToUpper(strings.TrimSpace(apiCurrency)) {
 	case "EUR":
 		// OLX returns e.g. 700 meaning 700 EUR. Store as EUR cents directly.
@@ -168,7 +172,7 @@ func currencyStatus(rawPrice float64, apiCurrency, offerID string) (eurCents int
 func mapListing(offer apiOffer) models.Listing {
 	rawPrice, apiCurrency, priceType := priceFromParams(offer.Params)
 	offerID := string(offer.ID)
-	eurCents, status := currencyStatus(rawPrice, apiCurrency, offerID)
+	eurCents, status := CurrencyStatusFromAPI(rawPrice, apiCurrency, offerID)
 
 	// price_local stores the original API value in its original currency unit
 	// (not stotinki — the API already returns the face value, e.g. 700 for 700 BGN).
