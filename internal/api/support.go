@@ -41,6 +41,20 @@ func (w *statusCapturingResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
+// Flush delegates to the underlying ResponseWriter when it implements http.Flusher.
+// Without this, the interface wrapper hides the concrete type's Flush method, causing
+// SSE handlers that type-assert w.(http.Flusher) to receive ok=false and return 500.
+func (w *statusCapturingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter, enabling http.ResponseController (Go 1.20+).
+func (w *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := requestIDFromRequest(r)
