@@ -21,14 +21,16 @@ type Listing struct {
 	Attributes    map[string]string // condition, brand, etc.
 	// Analysis fields: zero-value when listing comes from a marketplace search;
 	// populated when loaded from the store (ListRecentListings).
-	Score             float64
-	FairPrice         int // cents
-	OfferPrice        int // cents
-	Confidence        float64
-	Reason            string
-	RiskFlags         []string
-	RecommendedAction string // one of: buy | negotiate | ask_seller | skip
-	Feedback          string // "", "approved", "dismissed"
+	Score                   float64
+	FairPrice               int // cents
+	OfferPrice              int // cents
+	Confidence              float64
+	Reason                  string
+	RiskFlags               []string
+	RecommendedAction       string // one of: buy | negotiate | ask_seller | skip
+	ComparablesCount        int    // number of comparable deals used by the scorer
+	ComparablesMedianAgeDays int   // median age of comparables in days; 0 if none
+	Feedback                string // "", "approved", "dismissed"
 }
 
 type Seller struct {
@@ -74,9 +76,11 @@ type ScoredListing struct {
 	Reason            string
 	ReasoningSource   string
 	SearchAdvice      string
-	ComparableDeals   []ComparableDeal
-	RiskFlags         []string
-	RecommendedAction string // one of: buy | negotiate | ask_seller | skip
+	ComparableDeals          []ComparableDeal
+	RiskFlags                []string
+	RecommendedAction        string // one of: buy | negotiate | ask_seller | skip
+	ComparablesCount         int    // number of comparable deals used by the scorer
+	ComparablesMedianAgeDays int    // median age of comparables in days; 0 if none
 }
 
 type PricePoint struct {

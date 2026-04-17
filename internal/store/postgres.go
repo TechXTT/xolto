@@ -410,6 +410,8 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS reasoning_source TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS risk_flags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS recommended_action TEXT NOT NULL DEFAULT 'ask_seller'`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS comparables_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS comparables_median_age_days INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS profile_id BIGINT NOT NULL DEFAULT 0`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS feedback TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS feedback_at TIMESTAMPTZ NULL`)
@@ -2259,6 +2261,7 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
+		       comparables_count, comparables_median_age_days,
 		       last_seen, feedback
 		FROM listings
 		WHERE item_id LIKE $1
@@ -2280,7 +2283,9 @@ func (s *PostgresStore) ListRecentListings(userID string, limit int, missionID i
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction, &listing.Date, &listing.Feedback,
+			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
+			&listing.Date, &listing.Feedback,
 		); err != nil {
 			return nil, err
 		}
@@ -2368,6 +2373,7 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
+		       comparables_count, comparables_median_age_days,
 		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id LIKE $1
@@ -2390,7 +2396,9 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction, &listing.Date, &listing.Feedback,
+			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
+			&listing.Date, &listing.Feedback,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2434,6 +2442,7 @@ func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, erro
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
+		       comparables_count, comparables_median_age_days,
 		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id = $1
@@ -2445,7 +2454,9 @@ func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, erro
 		&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 		&listing.URL, &listing.Condition, &listing.MarketplaceID,
 		&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-		&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction, &listing.Date, &listing.Feedback,
+		&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+		&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
+		&listing.Date, &listing.Feedback,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -2609,29 +2620,33 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 			url, condition, marketplace_id,
 			fair_price, offer_price, confidence, reasoning, reasoning_source, risk_flags,
 			recommended_action,
+			comparables_count, comparables_median_age_days,
 			first_seen, last_seen
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW(),NOW())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW())
 		ON CONFLICT(item_id) DO UPDATE SET
-			price              = EXCLUDED.price,
-			score              = EXCLUDED.score,
-			profile_id         = EXCLUDED.profile_id,
-			image_urls         = EXCLUDED.image_urls,
-			url                = EXCLUDED.url,
-			condition          = EXCLUDED.condition,
-			marketplace_id     = EXCLUDED.marketplace_id,
-			fair_price         = EXCLUDED.fair_price,
-			offer_price        = EXCLUDED.offer_price,
-			confidence         = EXCLUDED.confidence,
-			reasoning          = EXCLUDED.reasoning,
-			reasoning_source   = EXCLUDED.reasoning_source,
-			risk_flags         = EXCLUDED.risk_flags,
-			recommended_action = EXCLUDED.recommended_action,
-			last_seen          = NOW()
+			price                      = EXCLUDED.price,
+			score                      = EXCLUDED.score,
+			profile_id                 = EXCLUDED.profile_id,
+			image_urls                 = EXCLUDED.image_urls,
+			url                        = EXCLUDED.url,
+			condition                  = EXCLUDED.condition,
+			marketplace_id             = EXCLUDED.marketplace_id,
+			fair_price                 = EXCLUDED.fair_price,
+			offer_price                = EXCLUDED.offer_price,
+			confidence                 = EXCLUDED.confidence,
+			reasoning                  = EXCLUDED.reasoning,
+			reasoning_source           = EXCLUDED.reasoning_source,
+			risk_flags                 = EXCLUDED.risk_flags,
+			recommended_action         = EXCLUDED.recommended_action,
+			comparables_count          = EXCLUDED.comparables_count,
+			comparables_median_age_days = EXCLUDED.comparables_median_age_days,
+			last_seen                  = NOW()
 	`,
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
 		recommendedAction,
+		scored.ComparablesCount, scored.ComparablesMedianAgeDays,
 	)
 	return err
 }

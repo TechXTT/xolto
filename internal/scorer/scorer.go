@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,15 +91,17 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		}
 
 		return models.ScoredListing{
-			Listing:           listing,
-			Score:             1.0,
-			OfferPrice:        0,
-			FairPrice:         0,
-			MarketAverage:     0,
-			Confidence:        0,
-			Reason:            reason.String(),
-			ReasoningSource:   "rule",
-			RecommendedAction: ActionAskSeller,
+			Listing:                  listing,
+			Score:                    1.0,
+			OfferPrice:               0,
+			FairPrice:                0,
+			MarketAverage:            0,
+			Confidence:               0,
+			Reason:                   reason.String(),
+			ReasoningSource:          "rule",
+			RecommendedAction:        ActionAskSeller,
+			ComparablesCount:         0,
+			ComparablesMedianAgeDays: 0,
 		}
 	}
 
@@ -234,13 +237,16 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 
 	// AI explicitly judged the listing as irrelevant to the search query.
 	if (analysis.Source == "ai" || analysis.Source == "ai-cache") && !analysis.Relevant {
+		compCount, compMedian := computeComparableStats(comparables)
 		return models.ScoredListing{
-			Listing:           listing,
-			Score:             1.0,
-			OfferPrice:        0,
-			Reason:            "not relevant to search: " + analysis.Reason,
-			ReasoningSource:   analysis.Source,
-			RecommendedAction: ActionSkip,
+			Listing:                  listing,
+			Score:                    1.0,
+			OfferPrice:               0,
+			Reason:                   "not relevant to search: " + analysis.Reason,
+			ReasoningSource:          analysis.Source,
+			RecommendedAction:        ActionSkip,
+			ComparablesCount:         compCount,
+			ComparablesMedianAgeDays: compMedian,
 		}
 	}
 
@@ -272,20 +278,53 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		reason.WriteString(analysis.Reason)
 	}
 
+	compCount, compMedian := computeComparableStats(comparables)
 	return models.ScoredListing{
-		Listing:           listing,
-		Score:             score,
-		OfferPrice:        offerPrice,
-		FairPrice:         analysis.FairPrice,
-		MarketAverage:     marketAvg,
-		Confidence:        analysis.Confidence,
-		Reason:            reason.String(),
-		ReasoningSource:   analysis.Source,
-		SearchAdvice:      analysis.SearchAdvice,
-		ComparableDeals:   analysis.ComparableDeals,
-		RiskFlags:         riskFlags,
-		RecommendedAction: recommendedAction,
+		Listing:                  listing,
+		Score:                    score,
+		OfferPrice:               offerPrice,
+		FairPrice:                analysis.FairPrice,
+		MarketAverage:            marketAvg,
+		Confidence:               analysis.Confidence,
+		Reason:                   reason.String(),
+		ReasoningSource:          analysis.Source,
+		SearchAdvice:             analysis.SearchAdvice,
+		ComparableDeals:          analysis.ComparableDeals,
+		RiskFlags:                riskFlags,
+		RecommendedAction:        recommendedAction,
+		ComparablesCount:         compCount,
+		ComparablesMedianAgeDays: compMedian,
 	}
+}
+
+// computeComparableStats returns (count, medianAgeDays) for a slice of
+// ComparableDeals. Comparables with a zero LastSeen are excluded from both
+// count and median. Negative ages (LastSeen in the future) are treated as 0.
+func computeComparableStats(comparables []models.ComparableDeal) (count int, medianDays int) {
+	now := time.Now()
+	var ages []int
+	for _, c := range comparables {
+		if c.LastSeen.IsZero() {
+			continue
+		}
+		age := int(now.Sub(c.LastSeen).Hours() / 24)
+		if age < 0 {
+			age = 0
+		}
+		ages = append(ages, age)
+	}
+	n := len(ages)
+	if n == 0 {
+		return 0, 0
+	}
+	sort.Ints(ages)
+	var median int
+	if n%2 == 1 {
+		median = ages[n/2]
+	} else {
+		median = (ages[n/2-1] + ages[n/2] + 1) / 2 // round half-up
+	}
+	return n, median
 }
 
 func aiScoreCacheKey(itemID string, price, promptVersion int) string {
