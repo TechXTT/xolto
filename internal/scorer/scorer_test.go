@@ -101,3 +101,48 @@ func TestScoreUsesAICacheForRepeatedListing(t *testing.T) {
 		t.Fatalf("expected exactly 1 llm call, got %d", llmCalls.Load())
 	}
 }
+
+// TestScoreEmitsRecommendedActionForUnscorableListing locks the contract that
+// reserved/fast-bid/no-price listings — which bypass the full scoring pipeline
+// — still carry a non-empty recommended_action so the dash never sees an empty
+// enum. Per the F-5 locked taxonomy, the trust-preservation default is
+// ask_seller.
+func TestScoreEmitsRecommendedActionForUnscorableListing(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer-unscorable.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	rsn := reasoner.New(config.AIConfig{})
+	sc := New(st, config.ScoringConfig{MinScore: 7, MarketSampleSize: 20}, rsn)
+
+	cases := []struct {
+		name      string
+		priceType string
+		price     int
+	}{
+		{"reserved", "reserved", 0},
+		{"fast-bid", "fast-bid", 0},
+		{"zero-price-fixed", "fixed", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scored := sc.Score(context.Background(), models.Listing{
+				ItemID:    "m-" + tc.name,
+				Title:     "Sony A6000 " + tc.name,
+				Price:     tc.price,
+				PriceType: tc.priceType,
+			}, models.SearchSpec{
+				UserID:   "u1",
+				Query:    "sony a6000",
+				MaxPrice: 90000,
+			})
+			if scored.RecommendedAction != ActionAskSeller {
+				t.Fatalf("unscorable listing RecommendedAction = %q, want %q",
+					scored.RecommendedAction, ActionAskSeller)
+			}
+		})
+	}
+}

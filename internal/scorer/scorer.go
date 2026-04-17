@@ -90,14 +90,15 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		}
 
 		return models.ScoredListing{
-			Listing:         listing,
-			Score:           1.0,
-			OfferPrice:      0,
-			FairPrice:       0,
-			MarketAverage:   0,
-			Confidence:      0,
-			Reason:          reason.String(),
-			ReasoningSource: "rule",
+			Listing:           listing,
+			Score:             1.0,
+			OfferPrice:        0,
+			FairPrice:         0,
+			MarketAverage:     0,
+			Confidence:        0,
+			Reason:            reason.String(),
+			ReasoningSource:   "rule",
+			RecommendedAction: ActionAskSeller,
 		}
 	}
 
@@ -234,11 +235,12 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	// AI explicitly judged the listing as irrelevant to the search query.
 	if (analysis.Source == "ai" || analysis.Source == "ai-cache") && !analysis.Relevant {
 		return models.ScoredListing{
-			Listing:         listing,
-			Score:           1.0,
-			OfferPrice:      0,
-			Reason:          "not relevant to search: " + analysis.Reason,
-			ReasoningSource: analysis.Source,
+			Listing:           listing,
+			Score:             1.0,
+			OfferPrice:        0,
+			Reason:            "not relevant to search: " + analysis.Reason,
+			ReasoningSource:   analysis.Source,
+			RecommendedAction: ActionSkip,
 		}
 	}
 
