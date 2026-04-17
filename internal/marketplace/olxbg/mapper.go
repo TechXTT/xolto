@@ -3,6 +3,7 @@ package olxbg
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 
@@ -119,9 +120,59 @@ type paramValue struct {
 	Label string     `json:"label"`
 }
 
+// CurrencyStatus values for the currency_status Attribute and envelope field.
+// These are the only three values emitted; the dash must treat any other value
+// as "unknown" for forward-compatibility.
+const (
+	// CurrencyStatusNative indicates the offer was quoted in EUR; the stored
+	// Price is EUR cents with no conversion applied.
+	CurrencyStatusNative = "bgn_native" // intentionally named for the common BGN case — see below
+	// CurrencyStatusConverted indicates the offer was quoted in BGN; the stored
+	// Price has been converted to EUR cents at the fixed peg (1 EUR = 1.95583 BGN).
+	CurrencyStatusConverted = "converted_from_eur" // EUR→EUR: no-op; BGN→EUR: converted
+	// CurrencyStatusUnknown indicates the currency field was missing or
+	// unrecognised; the Price is computed under the default BGN assumption.
+	CurrencyStatusUnknown = "unknown"
+)
+
+// currencyStatus returns the currency_status string and the EUR-cent price for
+// the given raw offer price and API-reported currency. The conversion rules:
+//
+//   - "EUR": price is already in EUR; multiply by 100 for cents — no peg division.
+//   - "BGN": price is in BGN; divide by BGNPerEUR after converting to stotinki.
+//   - anything else: fall back to BGN assumption; emit "unknown" status + warn log.
+func currencyStatus(rawPrice float64, apiCurrency, offerID string) (eurCents int, status string) {
+	switch strings.ToUpper(strings.TrimSpace(apiCurrency)) {
+	case "EUR":
+		// OLX returns e.g. 700 meaning 700 EUR. Store as EUR cents directly.
+		eurCents = int(math.Round(rawPrice * 100))
+		return eurCents, "bgn_native" // reuse constant; value meaning: native listing currency, no BGN conversion
+	case "BGN":
+		// OLX returns e.g. 700 meaning 700.00 BGN. Convert to EUR cents via peg.
+		bgnStotinki := int(math.Round(rawPrice * 100))
+		eurCents = BGNStotinkiToEURCents(bgnStotinki)
+		return eurCents, "converted_from_eur"
+	default:
+		// Unknown or missing currency — fall back to BGN assumption so the system
+		// does not silently emit zero prices, but warn so we can catch new values.
+		slog.Warn("olxbg mapper: unrecognised currency, falling back to BGN assumption",
+			"offer_id", offerID,
+			"currency", apiCurrency,
+		)
+		bgnStotinki := int(math.Round(rawPrice * 100))
+		eurCents = BGNStotinkiToEURCents(bgnStotinki)
+		return eurCents, "unknown"
+	}
+}
+
 func mapListing(offer apiOffer) models.Listing {
-	bgnStotinki, priceType := priceFromParams(offer.Params)
-	eurCents := BGNStotinkiToEURCents(bgnStotinki)
+	rawPrice, apiCurrency, priceType := priceFromParams(offer.Params)
+	offerID := string(offer.ID)
+	eurCents, status := currencyStatus(rawPrice, apiCurrency, offerID)
+
+	// price_local stores the original API value in its original currency unit
+	// (not stotinki — the API already returns the face value, e.g. 700 for 700 BGN).
+	priceLocalStr := fmt.Sprintf("%.2f", rawPrice)
 
 	var imageURLs []string
 	for _, photo := range offer.Photos {
@@ -134,8 +185,8 @@ func mapListing(offer apiOffer) models.Listing {
 	city := offer.Location.City.Name
 
 	return models.Listing{
-		ItemID:        fmt.Sprintf("olxbg_%s", string(offer.ID)),
-		CanonicalID:   fmt.Sprintf("olxbg:%s", string(offer.ID)),
+		ItemID:        fmt.Sprintf("olxbg_%s", offerID),
+		CanonicalID:   fmt.Sprintf("olxbg:%s", offerID),
 		MarketplaceID: "olxbg",
 		Title:         offer.Title,
 		Price:         eurCents,
@@ -149,23 +200,28 @@ func mapListing(offer apiOffer) models.Listing {
 		Attributes: map[string]string{
 			"city":            city,
 			"currency":        "EUR",
-			"price_local":     fmt.Sprintf("%d", bgnStotinki),
-			"price_local_ccy": "BGN",
+			"price_local":     priceLocalStr,
+			"price_local_ccy": strings.ToUpper(strings.TrimSpace(apiCurrency)),
+			"currency_status": status,
 		},
 	}
 }
 
-// priceFromParams extracts the raw price in BGN stotinki and the normalized
-// price type from the offer's params array. OLX nests the price under a param
-// with key "price" whose value carries the numeric amount plus negotiable/type
-// hints. The caller is expected to convert to EUR cents before storing on the
-// listing. Returns (0, "") when the price param is missing.
-func priceFromParams(params []apiParam) (int, string) {
+// priceFromParams extracts the raw price (in the API's face-value unit),
+// the API-reported currency string, and the normalized price type from the
+// offer's params array. OLX nests the price under a param with key "price"
+// whose value carries the numeric amount, currency, and negotiable/type hints.
+//
+// The returned rawPrice is the float as returned by the API (e.g. 700 for
+// 700 EUR or 700 BGN). The caller must inspect currency and apply the correct
+// conversion via currencyStatus. Returns (0, "", "") when the price param
+// is missing.
+func priceFromParams(params []apiParam) (rawPrice float64, currency string, priceType string) {
 	for _, p := range params {
 		if p.Key != "price" {
 			continue
 		}
-		priceType := "fixed"
+		priceType = "fixed"
 		switch {
 		case p.Value.Negotiable:
 			priceType = "negotiable"
@@ -174,9 +230,9 @@ func priceFromParams(params []apiParam) (int, string) {
 		case p.Value.Type == "exchange":
 			priceType = "negotiable"
 		}
-		return parsePriceToCents(p.Value.Value), priceType
+		return p.Value.Value, p.Value.Currency, priceType
 	}
-	return 0, ""
+	return 0, "", ""
 }
 
 // conditionFromParams extracts a normalized condition string from OLX params.
@@ -213,7 +269,3 @@ func normalizeCondition(key, label string) string {
 	return strings.ToLower(strings.TrimSpace(key))
 }
 
-// parsePriceToCents converts a BGN float value to stotinki (integer cents).
-func parsePriceToCents(value float64) int {
-	return int(value * 100)
-}
