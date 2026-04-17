@@ -26,11 +26,22 @@ import (
 // pricePhrasePattern strips natural-language budget qualifiers from search
 // queries. Budget belongs in BudgetMax; leaving phrases like "under 500" in the
 // literal query pollutes marketplace results and defeats title matching.
-var pricePhrasePattern = regexp.MustCompile(`(?i)\b(under|below|less\s+than|up\s+to|max(?:imum)?|onder|tot|maximaal|above|over|more\s+than|min(?:imum)?)\s*[€$]?\s*\d+([.,]\d+)?\s*(eur|euro|usd|\$|€)?\b`)
+// Supports EN, NL, and BG Cyrillic prefixes (XOL-39 M3-E).
+//
+//   EN:  under, below, less than, up to, max, maximum, above, over, more than, min, minimum
+//   NL:  onder, tot, maximaal
+//   BG:  под (under), до (up to), максимум (maximum), над (above), мин (min)
+//
+// Currency markers: €, $, лв (BGN lev), BGN, EUR, euro, USD.
+// Note: Go RE2 does not support lookbehind — Cyrillic word anchoring relies on
+// the surrounding whitespace/start-of-string context via the optional \s* below.
+var pricePhrasePattern = regexp.MustCompile(`(?i)(under|below|less\s+than|up\s+to|max(?:imum)?|onder|tot|maximaal|above|over|more\s+than|min(?:imum)?|под|до|максимум|над|мин)\s*[€$]?\s*\d+([.,]\d+)?\s*(лв|bgn|eur|euro|usd|\$|€)?`)
 
-// priceWordPattern catches trailing price hints like "500 eur" that lack a
-// leading qualifier.
-var priceWordPattern = regexp.MustCompile(`(?i)\b\d+([.,]\d+)?\s*(eur|euro|euros|usd|\$|€)\b`)
+// priceWordPattern catches trailing price hints like "500 eur" or "500 лв"
+// that lack a leading qualifier. Supports BGN lev (лв) and BGN (XOL-39 M3-E).
+// Note: trailing \b is omitted for Cyrillic currency markers because Go RE2
+// uses ASCII-only word boundaries — Cyrillic is not a word character.
+var priceWordPattern = regexp.MustCompile(`(?i)\b\d+([.,]\d+)?\s*(лв|bgn|eur|euro|euros|usd|\$|€)`)
 
 // conditionWordPattern removes condition qualifiers — those belong in the
 // Condition filter, not the free-text query.
@@ -1420,7 +1431,12 @@ func parseConditions(text string) []string {
 }
 
 func extractBudget(text string) int {
-	for _, marker := range []string{"under ", "max ", "budget "} {
+	// EN, NL, and BG Cyrillic budget markers (XOL-39 M3-E).
+	// "под" = under, "до" = up to, "максимум" = maximum, "бюджет" = budget.
+	for _, marker := range []string{
+		"under ", "max ", "budget ",
+		"под ", "до ", "максимум ", "бюджет ",
+	} {
 		idx := strings.Index(text, marker)
 		if idx >= 0 {
 			var value int

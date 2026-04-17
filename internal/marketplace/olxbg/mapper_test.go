@@ -181,3 +181,132 @@ func TestEURPriceAccuracy(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizeConditionEnKeys verifies English API key mappings (XOL-40 M3-F).
+func TestNormalizeConditionEnKeys(t *testing.T) {
+	cases := []struct {
+		key  string
+		want string
+	}{
+		{"new", "new"},
+		{"New", "new"}, // case-insensitive
+		{"like_new", "like_new"},
+		{"likenew", "like_new"},
+		{"good", "good"},
+		{"fair", "fair"},
+		{"for_parts", "for_parts"},
+		{"forparts", "for_parts"},
+		{"used", "used"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			got := normalizeCondition(tc.key, "")
+			if got != tc.want {
+				t.Errorf("key=%q: expected %q, got %q", tc.key, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestNormalizeConditionBGLabels verifies Bulgarian Cyrillic label mappings (XOL-40 M3-F).
+func TestNormalizeConditionBGLabels(t *testing.T) {
+	cases := []struct {
+		label string
+		want  string
+	}{
+		{"Нова", "new"},
+		{"Ново", "new"},
+		{"Като нова", "like_new"},
+		{"Като ново", "like_new"},
+		{"Добра", "good"},
+		{"Добро", "good"},
+		{"Приемлива", "fair"},
+		{"За части", "for_parts"},
+		{"Използвана", "used"},
+		{"Употребявана", "used"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			// key="" forces label fallback path
+			got := normalizeCondition("", tc.label)
+			if got != tc.want {
+				t.Errorf("label=%q: expected %q, got %q", tc.label, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestNormalizeConditionUnknownKeyEmitsUnknown verifies that an unrecognised key
+// emits "unknown" rather than forwarding the raw value (XOL-40 M3-F).
+func TestNormalizeConditionUnknownKeyEmitsUnknown(t *testing.T) {
+	got := normalizeCondition("damaged", "")
+	if got != "unknown" {
+		t.Errorf("unrecognised key: expected unknown, got %q", got)
+	}
+}
+
+// TestNormalizeConditionVagueConditionFlagSuppressed verifies that a listing with a
+// valid condition key (e.g. "like_new") does NOT get Condition="" — which would
+// previously cause the scorer's vague_condition flag to fire falsely (XOL-40 M3-F).
+func TestNormalizeConditionVagueConditionFlagSuppressed(t *testing.T) {
+	offer := apiOffer{
+		ID:    "VALID1",
+		URL:   "https://www.olx.bg/ad/VALID1.html",
+		Title: "iPhone 13 Pro",
+		Params: []apiParam{
+			{
+				Key: "price",
+				Value: paramValue{Value: 700, Currency: "EUR", Type: "price"},
+			},
+			{
+				Key: "state",
+				Value: paramValue{Key: "like_new", Label: "Като нова"},
+			},
+		},
+	}
+	listing := mapListing(offer)
+	if listing.Condition == "" {
+		t.Errorf("like_new condition must not produce empty Condition field; got %q", listing.Condition)
+	}
+	if listing.Condition != "like_new" {
+		t.Errorf("expected condition like_new, got %q", listing.Condition)
+	}
+}
+
+// TestEURCentsToBGNWholeCeil verifies that price-filter conversion uses ceil
+// rather than round so user budget ceilings are never clipped (XOL-41 M3-G).
+//
+// Illustrative case where ceil differs from round:
+//   200 EUR = 20000 cents → 200 × 1.95583 = 391.166 BGN
+//   round(391.166) = 391  — cuts off listings at 391–392 BGN
+//   ceil(391.166)  = 392  — correct: passes all listings within user intent
+//
+// Expected values derived from math.Ceil(float64(eurCents)/100 * 1.95583):
+//   0 cents   → 0
+//   1 cent    → ceil(0.0195583) = 1
+//   10000     → ceil(195.583)   = 196
+//   20000     → ceil(391.166)   = 392  (round would give 391 — the "clipping" case)
+//   50000     → ceil(977.915)   = 978
+//   100000    → ceil(1955.83)   = 1956
+func TestEURCentsToBGNWholeCeil(t *testing.T) {
+	cases := []struct {
+		name     string
+		eurCents int
+		wantBGN  int
+	}{
+		{"0 EUR", 0, 0},
+		{"1 cent", 1, 1},
+		{"100 EUR (10000 cents)", 10000, 196},
+		{"200 EUR (20000 cents) — ceil>round", 20000, 392},
+		{"500 EUR (50000 cents)", 50000, 978},
+		{"1000 EUR (100000 cents)", 100000, 1956},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EURCentsToBGNWhole(tc.eurCents)
+			if got != tc.wantBGN {
+				t.Errorf("EURCentsToBGNWhole(%d): expected %d BGN, got %d", tc.eurCents, tc.wantBGN, got)
+			}
+		})
+	}
+}

@@ -26,11 +26,18 @@ func BGNStotinkiToEURCents(bgnStotinki int) int {
 
 // EURCentsToBGNWhole converts EUR cents to whole BGN units, which is the
 // shape OLX API v1 expects for price[from]/price[to] filters.
+//
+// Rounding: ceil (round-up), not round/truncate. A €500 max equals exactly
+// 978.9985 BGN; truncation/round gives 979 but math.Round also gives 979 here.
+// The critical case is prices like €200 → 391.166 BGN: floor = 391 (cuts off
+// listings at 391–392 BGN), ceil = 392 (includes all listings within intent).
+// Using math.Ceil ensures the filter always passes listings up to the user's
+// intent ceiling rather than cutting off the highest sub-BGN tier (XOL-41 M3-G).
 func EURCentsToBGNWhole(eurCents int) int {
 	if eurCents <= 0 {
 		return 0
 	}
-	return int(math.Round(float64(eurCents) / 100 * BGNPerEUR))
+	return int(math.Ceil(float64(eurCents) / 100 * BGNPerEUR))
 }
 
 // flexString unmarshals a JSON field that may be a string, number, or array.
@@ -251,26 +258,50 @@ func conditionFromParams(params []apiParam) string {
 	return ""
 }
 
-// normalizeCondition maps OLX BG condition keys/labels to the standard set.
-// OLX BG condition keys observed: "new", "used"
-// Bulgarian labels: "Ново" (new), "Като ново" (like new), "Добро" (good), "За ремонт" (for repair)
+// normalizeCondition maps OLX BG condition keys/labels to the canonical set.
+// Canonical enum: new | like_new | good | fair | for_parts | used | unknown.
+//
+// Key mappings cover both English API keys and observed OLX.bg key variants.
+// Label mappings cover Bulgarian Cyrillic labels returned by the OLX.bg API.
+// All comparisons are case-insensitive and whitespace-trimmed (XOL-40 M3-F).
 func normalizeCondition(key, label string) string {
+	// Normalise key first (English API keys are the primary signal).
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "new":
 		return "new"
-	case "used":
-		return "good"
-	}
-	switch strings.ToLower(strings.TrimSpace(label)) {
-	case "ново":
-		return "new"
-	case "като ново":
+	case "like_new", "likenew":
 		return "like_new"
-	case "добро":
+	case "good":
 		return "good"
-	case "за ремонт":
+	case "fair":
 		return "fair"
+	case "for_parts", "forparts":
+		return "for_parts"
+	case "used":
+		return "used"
 	}
-	return strings.ToLower(strings.TrimSpace(key))
+
+	// Fallback to Bulgarian label (Cyrillic text from OLX.bg API).
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "нова", "ново":
+		return "new"
+	case "като нова", "като ново":
+		return "like_new"
+	case "добра", "добро":
+		return "good"
+	case "приемлива", "приемливо", "за ремонт":
+		return "fair"
+	case "за части":
+		return "for_parts"
+	case "използвана", "използвано", "употребявана", "употребявано":
+		return "used"
+	}
+
+	// If the raw key is non-empty but unrecognised, emit "unknown" rather than
+	// forwarding the raw value — a blank Condition is less honest than "unknown".
+	if strings.TrimSpace(key) != "" {
+		return "unknown"
+	}
+	return "unknown"
 }
 

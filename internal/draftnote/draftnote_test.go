@@ -282,3 +282,174 @@ func TestInvalidVerdictFallsToGeneric(t *testing.T) {
 		t.Errorf("unexpected verdict should fall to generic, got %q", note.Shape)
 	}
 }
+
+// bgListing returns a listing whose title contains a Bulgarian Cyrillic
+// stop-word so detectLang returns LangBG (XOL-38 M3-D).
+func bgListing(title string, flags []string, fairPriceCents int) models.Listing {
+	return models.Listing{
+		Title:     title,
+		FairPrice: fairPriceCents,
+		RiskFlags: flags,
+	}
+}
+
+// TestLanguageDetectionBG verifies that a Bulgarian listing gets lang=bg (XOL-38 M3-D).
+func TestLanguageDetectionBG(t *testing.T) {
+	listing := models.Listing{
+		// "батерия" is a BG stop-word in the bgStopWords set
+		Title:     "Фотоапарат Canon EOS R10 батерия 94%",
+		RiskFlags: []string{},
+	}
+	note := draftnote.Draft(scorer.ActionBuy, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Errorf("expected lang bg for Bulgarian listing, got %q", note.Lang)
+	}
+}
+
+// TestBGBuyDraft verifies BG buy template text (XOL-38 M3-D).
+func TestBGBuyDraft(t *testing.T) {
+	listing := bgListing("Фотоапарат Canon EOS R10 батерия", []string{}, 0)
+	note := draftnote.Draft(scorer.ActionBuy, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Fatalf("expected lang bg, got %q", note.Lang)
+	}
+	if note.Shape != draftnote.ShapeBuy {
+		t.Fatalf("expected shape buy, got %q", note.Shape)
+	}
+	// Must include a Bulgarian greeting
+	if !strings.Contains(note.Text, "Здравейте") {
+		t.Errorf("BG buy draft must contain 'Здравейте', got: %s", note.Text)
+	}
+	// Must reference the listing title
+	if !strings.Contains(note.Text, "Canon EOS R10") {
+		t.Errorf("BG buy draft must include listing title, got: %s", note.Text)
+	}
+}
+
+// TestBGNegotiateDraft verifies BG negotiate template text (XOL-38 M3-D).
+func TestBGNegotiateDraft(t *testing.T) {
+	listing := bgListing("Sony A6000 батерия 88%", []string{}, 30000)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Fatalf("expected lang bg, got %q", note.Lang)
+	}
+	if note.Shape != draftnote.ShapeNegotiate {
+		t.Fatalf("expected shape negotiate, got %q", note.Shape)
+	}
+	if !strings.Contains(note.Text, "Здравейте") {
+		t.Errorf("BG negotiate draft must contain 'Здравейте', got: %s", note.Text)
+	}
+	// Price anchor must appear when FairPrice > 0
+	if !strings.Contains(note.Text, "EUR") {
+		t.Errorf("BG negotiate draft with fairPrice>0 must contain EUR price anchor, got: %s", note.Text)
+	}
+}
+
+// TestBGNegotiateDraftNoAnchor verifies BG negotiate without fair price (XOL-38 M3-D).
+func TestBGNegotiateDraftNoAnchor(t *testing.T) {
+	listing := bgListing("iPhone 13 Pro употребяван", []string{}, 0)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Fatalf("expected lang bg, got %q", note.Lang)
+	}
+	if strings.Contains(note.Text, "EUR") {
+		t.Errorf("BG negotiate draft with fairPrice=0 must not contain EUR anchor, got: %s", note.Text)
+	}
+}
+
+// TestBGAskSellerDraft verifies BG ask-seller template including flag question (XOL-38 M3-D).
+func TestBGAskSellerDraft(t *testing.T) {
+	listing := bgListing("MacBook Pro М1 батерия", []string{"no_battery_health"}, 0)
+	note := draftnote.Draft(scorer.ActionAskSeller, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Fatalf("expected lang bg, got %q", note.Lang)
+	}
+	if note.Shape != draftnote.ShapeAskSeller {
+		t.Fatalf("expected shape ask_seller, got %q", note.Shape)
+	}
+	// BG battery question must appear
+	if !strings.Contains(note.Text, "батерия") && !strings.Contains(note.Text, "батер") {
+		t.Errorf("BG ask_seller with no_battery_health flag must include battery question, got: %s", note.Text)
+	}
+}
+
+// TestBGGenericDraft verifies BG generic (skip) template (XOL-38 M3-D).
+func TestBGGenericDraft(t *testing.T) {
+	listing := bgListing("Nikon D750 употребяван", []string{}, 0)
+	note := draftnote.Draft(scorer.ActionSkip, listing)
+	if note.Lang != draftnote.LangBG {
+		t.Fatalf("expected lang bg, got %q", note.Lang)
+	}
+	if note.Shape != draftnote.ShapeGeneric {
+		t.Fatalf("expected shape generic, got %q", note.Shape)
+	}
+	if !strings.Contains(note.Text, "Здравейте") {
+		t.Errorf("BG generic draft must contain 'Здравейте', got: %s", note.Text)
+	}
+}
+
+// TestBGFlagPriorityOrder verifies that BG flag-question priority order works
+// correctly — same priority as NL/EN (XOL-38 M3-D).
+func TestBGFlagPriorityOrder(t *testing.T) {
+	cases := []struct {
+		flags          []string
+		expectedSubstr string // BG question keyword expected in text
+	}{
+		{
+			[]string{"anomaly_price", "vague_condition", "no_battery_health"},
+			"откраднат",
+		},
+		{
+			[]string{"vague_condition", "no_battery_health"},
+			"дефект",
+		},
+		{
+			[]string{"missing_key_photos"},
+			"снимки",
+		},
+	}
+	for _, c := range cases {
+		// "употребяван" triggers BG detection
+		listing := bgListing("Canon EOS R10 употребяван", c.flags, 0)
+		note := draftnote.Draft(scorer.ActionAskSeller, listing)
+		if note.Lang != draftnote.LangBG {
+			t.Errorf("flags=%v: expected lang bg, got %q", c.flags, note.Lang)
+		}
+		if !strings.Contains(strings.ToLower(note.Text), c.expectedSubstr) {
+			t.Errorf("flags=%v: expected text to contain %q, got: %s", c.flags, c.expectedSubstr, note.Text)
+		}
+	}
+}
+
+// TestNLDraftUnchanged verifies that an NL listing still produces NL output
+// after the BG language detection was added (regression guard, XOL-38 M3-D).
+func TestNLDraftUnchanged(t *testing.T) {
+	listing := models.Listing{
+		Title:     "de Canon EOS R5 body in goede staat",
+		RiskFlags: []string{},
+	}
+	note := draftnote.Draft(scorer.ActionBuy, listing)
+	if note.Lang != draftnote.LangNL {
+		t.Errorf("NL listing must still produce lang nl after BG detection addition, got %q", note.Lang)
+	}
+	if !strings.Contains(note.Text, "Hoi") {
+		t.Errorf("NL buy draft must contain 'Hoi', got: %s", note.Text)
+	}
+}
+
+// TestENDraftUnchanged verifies that a non-BG/non-NL listing still produces EN
+// output (regression guard, XOL-38 M3-D).
+func TestENDraftUnchanged(t *testing.T) {
+	listing := models.Listing{
+		Title:       "Sony A7IV Full Frame Camera Body",
+		Description: "Excellent condition, barely used. Comes with original box.",
+		RiskFlags:   []string{},
+	}
+	note := draftnote.Draft(scorer.ActionBuy, listing)
+	if note.Lang != draftnote.LangEN {
+		t.Errorf("EN listing must still produce lang en, got %q", note.Lang)
+	}
+	if !strings.Contains(note.Text, "Hi!") {
+		t.Errorf("EN buy draft must contain 'Hi!', got: %s", note.Text)
+	}
+}
