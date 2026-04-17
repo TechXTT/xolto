@@ -124,12 +124,12 @@ type paramValue struct {
 // These are the only three values emitted; the dash must treat any other value
 // as "unknown" for forward-compatibility.
 const (
-	// CurrencyStatusNative indicates the offer was quoted in EUR; the stored
+	// CurrencyStatusEURNative indicates the offer was quoted in EUR; the stored
 	// Price is EUR cents with no conversion applied.
-	CurrencyStatusNative = "bgn_native" // intentionally named for the common BGN case — see below
-	// CurrencyStatusConverted indicates the offer was quoted in BGN; the stored
-	// Price has been converted to EUR cents at the fixed peg (1 EUR = 1.95583 BGN).
-	CurrencyStatusConverted = "converted_from_eur" // EUR→EUR: no-op; BGN→EUR: converted
+	CurrencyStatusEURNative = "eur_native"
+	// CurrencyStatusConvertedFromBGN indicates the offer was quoted in BGN; the
+	// stored Price has been converted to EUR cents at the fixed peg (1 EUR = 1.95583 BGN).
+	CurrencyStatusConvertedFromBGN = "converted_from_bgn"
 	// CurrencyStatusUnknown indicates the currency field was missing or
 	// unrecognised; the Price is computed under the default BGN assumption.
 	CurrencyStatusUnknown = "unknown"
@@ -150,12 +150,12 @@ func CurrencyStatusFromAPI(rawPrice float64, apiCurrency, offerID string) (eurCe
 	case "EUR":
 		// OLX returns e.g. 700 meaning 700 EUR. Store as EUR cents directly.
 		eurCents = int(math.Round(rawPrice * 100))
-		return eurCents, "bgn_native" // reuse constant; value meaning: native listing currency, no BGN conversion
+		return eurCents, CurrencyStatusEURNative
 	case "BGN":
 		// OLX returns e.g. 700 meaning 700.00 BGN. Convert to EUR cents via peg.
 		bgnStotinki := int(math.Round(rawPrice * 100))
 		eurCents = BGNStotinkiToEURCents(bgnStotinki)
-		return eurCents, "converted_from_eur"
+		return eurCents, CurrencyStatusConvertedFromBGN
 	default:
 		// Unknown or missing currency — fall back to BGN assumption so the system
 		// does not silently emit zero prices, but warn so we can catch new values.

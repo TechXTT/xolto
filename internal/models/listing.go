@@ -33,10 +33,10 @@ type Listing struct {
 	Feedback                 string // "", "approved", "dismissed"
 	// CurrencyStatus describes how the listing price was normalised from the
 	// marketplace's native currency into EUR cents. Values (XOL-33):
-	//   "bgn_native"        — offer was quoted in EUR; stored as-is × 100
-	//   "converted_from_eur"— offer was quoted in BGN; divided by 1.95583 peg
-	//   "unknown"           — currency field missing or unrecognised; BGN fallback used
-	//   ""                  — non-OLX marketplace or field not yet populated
+	//   "eur_native"         — offer was quoted in EUR; stored as-is × 100, no peg conversion
+	//   "converted_from_bgn" — offer was quoted in BGN; divided by 1.95583 peg
+	//   "unknown"            — currency field missing or unrecognised; BGN fallback used
+	//   ""                   — non-OLX marketplace or field not yet populated
 	CurrencyStatus string
 }
 

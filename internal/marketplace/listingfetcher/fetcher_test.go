@@ -69,8 +69,8 @@ func TestFetchOLXByIDEURListing(t *testing.T) {
 			float64(absInt(listing.Price-wantCents))/float64(wantCents)*100,
 		)
 	}
-	if got := listing.Attributes["currency_status"]; got != "bgn_native" {
-		t.Errorf("expected currency_status=bgn_native, got %q", got)
+	if got := listing.Attributes["currency_status"]; got != "eur_native" {
+		t.Errorf("expected currency_status=eur_native, got %q", got)
 	}
 }
 
@@ -100,8 +100,8 @@ func TestFetchOLXByIDBGNListing(t *testing.T) {
 	if listing.Price < 19800 || listing.Price > 20100 {
 		t.Errorf("BGN listing: expected ~19940 cents, got %d", listing.Price)
 	}
-	if got := listing.Attributes["currency_status"]; got != "converted_from_eur" {
-		t.Errorf("expected currency_status=converted_from_eur, got %q", got)
+	if got := listing.Attributes["currency_status"]; got != "converted_from_bgn" {
+		t.Errorf("expected currency_status=converted_from_bgn, got %q", got)
 	}
 }
 

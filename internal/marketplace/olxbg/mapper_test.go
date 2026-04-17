@@ -9,9 +9,9 @@ import (
 // with no BGN conversion applied. A 1000 EUR listing must NOT be divided by
 // 1.95583 — it must land as 100000 EUR cents (within ±1% of truth per XOL-30 AC).
 func TestCurrencyStatusEUR(t *testing.T) {
-	eurCents, status := currencyStatus(1000.0, "EUR", "test-offer-1")
-	if status != "bgn_native" {
-		t.Errorf("expected status bgn_native, got %q", status)
+	eurCents, status := CurrencyStatusFromAPI(1000.0, "EUR", "test-offer-1")
+	if status != "eur_native" {
+		t.Errorf("expected status eur_native, got %q", status)
 	}
 	want := 100000 // 1000 EUR × 100
 	if eurCents != want {
@@ -24,9 +24,9 @@ func TestCurrencyStatusEUR(t *testing.T) {
 // cents using the fixed 1.95583 peg. 700 BGN → 700/1.95583 EUR ≈ 357.90 EUR
 // → 35790 cents.
 func TestCurrencyStatusBGN(t *testing.T) {
-	eurCents, status := currencyStatus(700.0, "BGN", "test-offer-2")
-	if status != "converted_from_eur" {
-		t.Errorf("expected status converted_from_eur, got %q", status)
+	eurCents, status := CurrencyStatusFromAPI(700.0, "BGN", "test-offer-2")
+	if status != "converted_from_bgn" {
+		t.Errorf("expected status converted_from_bgn, got %q", status)
 	}
 	// 700 BGN in stotinki = 70000; 70000 / 1.95583 ≈ 35790
 	wantApprox := 35790
@@ -39,7 +39,7 @@ func TestCurrencyStatusBGN(t *testing.T) {
 // TestCurrencyStatusMissing verifies that a missing/unknown currency falls back
 // to the BGN assumption and emits status "unknown".
 func TestCurrencyStatusMissing(t *testing.T) {
-	eurCents, status := currencyStatus(500.0, "", "test-offer-3")
+	eurCents, status := CurrencyStatusFromAPI(500.0, "", "test-offer-3")
 	if status != "unknown" {
 		t.Errorf("expected status unknown, got %q", status)
 	}
@@ -52,7 +52,7 @@ func TestCurrencyStatusMissing(t *testing.T) {
 // TestCurrencyStatusUnrecognised verifies that an unrecognised currency code
 // also triggers the "unknown" fallback path.
 func TestCurrencyStatusUnrecognised(t *testing.T) {
-	_, status := currencyStatus(200.0, "USD", "test-offer-4")
+	_, status := CurrencyStatusFromAPI(200.0, "USD", "test-offer-4")
 	if status != "unknown" {
 		t.Errorf("expected status unknown for USD, got %q", status)
 	}
@@ -60,7 +60,7 @@ func TestCurrencyStatusUnrecognised(t *testing.T) {
 
 // TestMapListingEURPrice verifies the end-to-end mapping path: a EUR-quoted
 // offer must emerge with the correct EUR-cents price and currency_status
-// attribute set to "bgn_native" (no BGN conversion).
+// attribute set to "eur_native" (no BGN conversion).
 func TestMapListingEURPrice(t *testing.T) {
 	offer := apiOffer{
 		ID:    "ABC123",
@@ -94,13 +94,13 @@ func TestMapListingEURPrice(t *testing.T) {
 			math.Abs(float64(listing.Price-wantCents))/float64(wantCents)*100,
 		)
 	}
-	if got := listing.Attributes["currency_status"]; got != "bgn_native" {
-		t.Errorf("expected currency_status=bgn_native, got %q", got)
+	if got := listing.Attributes["currency_status"]; got != "eur_native" {
+		t.Errorf("expected currency_status=eur_native, got %q", got)
 	}
 }
 
 // TestMapListingBGNPrice verifies that a BGN-quoted offer is correctly
-// converted to EUR cents and tagged with currency_status=converted_from_eur.
+// converted to EUR cents and tagged with currency_status=converted_from_bgn.
 func TestMapListingBGNPrice(t *testing.T) {
 	offer := apiOffer{
 		ID:    "DEF456",
@@ -124,8 +124,8 @@ func TestMapListingBGNPrice(t *testing.T) {
 	if listing.Price <= 0 {
 		t.Fatalf("BGN offer: expected non-zero price, got %d", listing.Price)
 	}
-	if got := listing.Attributes["currency_status"]; got != "converted_from_eur" {
-		t.Errorf("expected currency_status=converted_from_eur, got %q", got)
+	if got := listing.Attributes["currency_status"]; got != "converted_from_bgn" {
+		t.Errorf("expected currency_status=converted_from_bgn, got %q", got)
 	}
 }
 
@@ -172,7 +172,7 @@ func TestEURPriceAccuracy(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			eurCents, _ := currencyStatus(tc.quotedEUR, "EUR", "test")
+			eurCents, _ := CurrencyStatusFromAPI(tc.quotedEUR, "EUR", "test")
 			deltaFrac := math.Abs(float64(eurCents-tc.wantCents)) / float64(tc.wantCents)
 			if deltaFrac > 0.01 {
 				t.Errorf("%s: got %d cents, want %d cents (%.2f%% off, limit 1%%)",
