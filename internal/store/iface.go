@@ -10,7 +10,7 @@ type Reader interface {
 	GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error)
 	GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error)
 	GetApprovedComparables(userID string, missionID int64, limit int) ([]models.ComparableDeal, error)
-	GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error)
+	GetListingScoringState(userID, itemID string) (price int, reasoningSource string, comparablesCount int, found bool, err error)
 	GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error)
 	GetActiveMission(userID string) (*models.Mission, error)
 	GetMission(id int64) (*models.Mission, error)

@@ -1709,7 +1709,7 @@ func (s *SQLiteStore) GetApprovedComparables(userID string, missionID int64, lim
 		limit = 10
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, score, last_seen
+		SELECT item_id, title, price, score, first_seen
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND feedback = 'approved'
@@ -1726,12 +1726,12 @@ func (s *SQLiteStore) GetApprovedComparables(userID string, missionID int64, lim
 	var deals []models.ComparableDeal
 	for rows.Next() {
 		var deal models.ComparableDeal
-		var lastSeen string
-		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &lastSeen); err != nil {
+		var firstSeen string
+		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &firstSeen); err != nil {
 			return nil, err
 		}
 		deal.ItemID = unscopedItemID(deal.ItemID)
-		if t, err := parseSQLiteTime(lastSeen); err == nil {
+		if t, err := parseSQLiteTime(firstSeen); err == nil {
 			deal.LastSeen = t
 		}
 		deal.Similarity = 1.0
@@ -1868,19 +1868,19 @@ func (s *SQLiteStore) GetListingScore(userID, itemID string) (float64, bool, err
 	return score, true, nil
 }
 
-func (s *SQLiteStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error) {
+func (s *SQLiteStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, comparablesCount int, found bool, err error) {
 	err = s.db.QueryRow(`
-		SELECT price, reasoning_source
+		SELECT price, reasoning_source, comparables_count
 		FROM listings
 		WHERE item_id = ?
-	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource)
+	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource, &comparablesCount)
 	if err == sql.ErrNoRows {
-		return 0, "", false, nil
+		return 0, "", 0, false, nil
 	}
 	if err != nil {
-		return 0, "", false, err
+		return 0, "", 0, false, err
 	}
-	return price, reasoningSource, true, nil
+	return price, reasoningSource, comparablesCount, true, nil
 }
 
 func (s *SQLiteStore) GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error) {
@@ -2931,7 +2931,7 @@ func (s *SQLiteStore) GetPriceHistory(query string) ([]models.PricePoint, error)
 // GetComparableDeals returns recent listings for the same configured query to help estimate fair value.
 func (s *SQLiteStore) GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error) {
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, score, last_seen
+		SELECT item_id, title, price, score, first_seen
 		FROM listings
 		WHERE query = ?
 		  AND item_id LIKE ?
@@ -2949,13 +2949,13 @@ func (s *SQLiteStore) GetComparableDeals(userID, query, excludeItemID string, li
 	var deals []models.ComparableDeal
 	for rows.Next() {
 		var deal models.ComparableDeal
-		var lastSeen string
-		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &lastSeen); err != nil {
+		var firstSeen string
+		if err := rows.Scan(&deal.ItemID, &deal.Title, &deal.Price, &deal.Score, &firstSeen); err != nil {
 			return nil, err
 		}
 		deal.ItemID = unscopedItemID(deal.ItemID)
 		deal.MatchReason = strings.TrimSpace(deal.Title)
-		if t, err := parseSQLiteTime(lastSeen); err == nil {
+		if t, err := parseSQLiteTime(firstSeen); err == nil {
 			deal.LastSeen = t
 		}
 		deals = append(deals, deal)

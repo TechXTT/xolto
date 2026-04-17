@@ -2500,7 +2500,7 @@ func (s *PostgresStore) GetApprovedComparables(userID string, missionID int64, l
 		limit = 10
 	}
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, score, last_seen
+		SELECT item_id, title, price, score, first_seen
 		FROM listings
 		WHERE item_id LIKE $1
 		  AND feedback = 'approved'
@@ -2566,19 +2566,19 @@ func (s *PostgresStore) GetListingScore(userID, itemID string) (float64, bool, e
 	return score, err == nil, err
 }
 
-func (s *PostgresStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, found bool, err error) {
+func (s *PostgresStore) GetListingScoringState(userID, itemID string) (price int, reasoningSource string, comparablesCount int, found bool, err error) {
 	err = s.db.QueryRow(`
-		SELECT price, reasoning_source
+		SELECT price, reasoning_source, comparables_count
 		FROM listings
 		WHERE item_id = $1
-	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource)
+	`, scopedItemID(userID, itemID)).Scan(&price, &reasoningSource, &comparablesCount)
 	if err == sql.ErrNoRows {
-		return 0, "", false, nil
+		return 0, "", 0, false, nil
 	}
 	if err != nil {
-		return 0, "", false, err
+		return 0, "", 0, false, err
 	}
-	return price, reasoningSource, true, nil
+	return price, reasoningSource, comparablesCount, true, nil
 }
 
 func (s *PostgresStore) GetAIScoreCache(cacheKey string, promptVersion int) (score float64, reasoning string, found bool, err error) {
@@ -2747,7 +2747,7 @@ func (s *PostgresStore) GetPriceHistory(query string) ([]models.PricePoint, erro
 
 func (s *PostgresStore) GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error) {
 	rows, err := s.db.Query(`
-		SELECT item_id, title, price, score, last_seen
+		SELECT item_id, title, price, score, first_seen
 		FROM listings
 		WHERE query = $1
 		  AND item_id LIKE $2

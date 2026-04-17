@@ -143,7 +143,7 @@ func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
 		t.Fatalf("SaveListing() error = %v", err)
 	}
 
-	price, source, found, err := st.GetListingScoringState("u1", "m1")
+	price, source, _, found, err := st.GetListingScoringState("u1", "m1")
 	if err != nil {
 		t.Fatalf("GetListingScoringState() error = %v", err)
 	}
@@ -159,6 +159,135 @@ func TestListingScoringStatePersistsReasoningSource(t *testing.T) {
 
 	if err := st.TouchListing("u1", "m1"); err != nil {
 		t.Fatalf("TouchListing() error = %v", err)
+	}
+}
+
+// TestGetListingScoringStateReturnsComparablesCount verifies that
+// GetListingScoringState returns the stored comparables_count so the worker can
+// detect stale rows (count=0) and force a re-score (XOL-17 regression).
+func TestGetListingScoringStateReturnsComparablesCount(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scoring-state-count.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	listing := models.Listing{
+		ItemID:    "rc1",
+		Title:     "ThinkPad X1 Carbon",
+		Price:     35000,
+		PriceType: "fixed",
+	}
+
+	// Save with comparables_count=0 (simulates a listing scored before XOL-16).
+	scoredZero := models.ScoredListing{
+		Score:                    6.5,
+		ReasoningSource:          "ai",
+		ComparablesCount:         0,
+		ComparablesMedianAgeDays: 0,
+	}
+	if err := st.SaveListing("u1", listing, "thinkpad x1", scoredZero); err != nil {
+		t.Fatalf("SaveListing(zero) error = %v", err)
+	}
+
+	_, _, count, found, err := st.GetListingScoringState("u1", "rc1")
+	if err != nil {
+		t.Fatalf("GetListingScoringState() error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected scoring state to be found")
+	}
+	if count != 0 {
+		t.Fatalf("expected comparablesCount=0 (stale row), got %d", count)
+	}
+
+	// Now save with comparables_count=12 (simulates a post-XOL-16 re-score).
+	scoredPopulated := models.ScoredListing{
+		Score:                    7.2,
+		ReasoningSource:          "ai",
+		ComparablesCount:         12,
+		ComparablesMedianAgeDays: 8,
+	}
+	if err := st.SaveListing("u1", listing, "thinkpad x1", scoredPopulated); err != nil {
+		t.Fatalf("SaveListing(populated) error = %v", err)
+	}
+
+	_, _, count, found, err = st.GetListingScoringState("u1", "rc1")
+	if err != nil {
+		t.Fatalf("GetListingScoringState() (populated) error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected scoring state to be found after re-save")
+	}
+	if count != 12 {
+		t.Fatalf("expected comparablesCount=12 after re-score, got %d", count)
+	}
+}
+
+// TestGetComparableDealsUsesFirstSeen verifies that GetComparableDeals populates
+// ComparableDeal.LastSeen from first_seen (not last_seen) so that
+// computeComparableStats produces a non-zero MedianAgeDays for listings that
+// were discovered days ago but recently touched by the worker (XOL-17 regression).
+func TestGetComparableDealsUsesFirstSeen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-first-seen.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	// Insert anchor listing (the one we are scoring).
+	anchor := models.Listing{
+		ItemID:    "anchor",
+		Title:     "ThinkPad X1 Carbon anchor",
+		Price:     35000,
+		PriceType: "fixed",
+	}
+	if err := st.SaveListing("u1", anchor, "thinkpad x1 carbon", models.ScoredListing{Score: 7.0, ReasoningSource: "ai"}); err != nil {
+		t.Fatalf("SaveListing(anchor) error = %v", err)
+	}
+
+	// Insert a comparable listing.
+	comp := models.Listing{
+		ItemID:    "comp1",
+		Title:     "ThinkPad X1 Carbon comp",
+		Price:     33000,
+		PriceType: "fixed",
+	}
+	if err := st.SaveListing("u1", comp, "thinkpad x1 carbon", models.ScoredListing{Score: 6.5, ReasoningSource: "ai"}); err != nil {
+		t.Fatalf("SaveListing(comp) error = %v", err)
+	}
+
+	// Simulate the passage of time by backdating first_seen to 10 days ago
+	// using a direct SQL UPDATE (mirrors what really happens in prod: the
+	// listing was first discovered days ago but the worker keeps touching it).
+	_, updErr := st.db.Exec(
+		`UPDATE listings SET first_seen = datetime('now', '-10 days') WHERE item_id = ?`,
+		scopedItemID("u1", "comp1"),
+	)
+	if updErr != nil {
+		t.Fatalf("UPDATE first_seen error = %v", updErr)
+	}
+
+	// TouchListing advances last_seen to now — simulating that the worker just
+	// saw it again — while first_seen stays 10 days old.
+	if err := st.TouchListing("u1", "comp1"); err != nil {
+		t.Fatalf("TouchListing() error = %v", err)
+	}
+
+	deals, err := st.GetComparableDeals("u1", "thinkpad x1 carbon", "anchor", 10)
+	if err != nil {
+		t.Fatalf("GetComparableDeals() error = %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("expected 1 comparable, got %d", len(deals))
+	}
+
+	ageDays := int(time.Since(deals[0].LastSeen).Hours() / 24)
+	if ageDays < 9 || ageDays > 11 {
+		t.Fatalf("expected comparable age ~10 days (from first_seen), got %d days — "+
+			"GetComparableDeals must use first_seen, not last_seen (XOL-17)", ageDays)
 	}
 }
 

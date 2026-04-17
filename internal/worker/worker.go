@@ -307,10 +307,14 @@ func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time
 		isNew, _ := w.db.IsNew(spec.UserID, listing.ItemID)
 		prevScore, hadPrev, _ := w.db.GetListingScore(spec.UserID, listing.ItemID)
 		if !isNew {
-			storedPrice, storedSource, found, err := w.db.GetListingScoringState(spec.UserID, listing.ItemID)
+			storedPrice, storedSource, storedComparablesCount, found, err := w.db.GetListingScoringState(spec.UserID, listing.ItemID)
 			if err != nil {
 				slog.Warn("failed to load listing scoring state", "item", listing.ItemID, "error", err)
-			} else if found && storedPrice == listing.Price && storedSource == "ai" {
+			} else if found && storedPrice == listing.Price && storedSource == "ai" && storedComparablesCount > 0 {
+				// Skip re-scoring only when the listing was previously scored with AI
+				// at the same price AND comparables_count was already populated.
+				// If comparables_count==0 the listing was saved before XOL-17 populated
+				// this field, so we must re-score to fill it.
 				if err := w.db.TouchListing(spec.UserID, listing.ItemID); err != nil {
 					slog.Warn("failed to touch cached listing", "item", listing.ItemID, "error", err)
 				}
