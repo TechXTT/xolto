@@ -2311,13 +2311,15 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 	prefix := scopedItemPrefix(userID)
 
 	// Build the shared WHERE clause extras and positional args. Postgres uses
-	// $N placeholders; the base params occupy $1..$3 so extras start at $4.
+	// $N placeholders; the base params occupy $1..$2 so extras start at $3.
 	//
-	// Base: ($1=prefix, $2=missionID, $2=missionID)
-	// N tracks the next placeholder index for additional filter params.
+	// Base: ($1=prefix, $2=missionID) — Postgres reuses $2 in both the
+	// equality check and the IS-zero guard within ($2 = 0 OR profile_id = $2),
+	// so only 2 driver args are needed for the base clause.
+	// N tracks the last placeholder index already used; extras claim n+1, n+2, …
 	whereExtras := ""
 	extraArgs := []any{}
-	n := 3 // next placeholder index is n+1
+	n := 2 // last used placeholder; next extra gets $3
 
 	if filter.Market != "" {
 		n++

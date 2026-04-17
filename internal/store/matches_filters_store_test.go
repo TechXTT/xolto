@@ -5,8 +5,10 @@ package store
 // These tests exercise the SQLite implementation directly (no HTTP layer).
 // The Postgres ORDER BY and WHERE clause construction is validated by unit
 // tests of the postgresOrderBy helper (same logic; Postgres-specific NULLS
-// LAST syntax is verified via query inspection rather than live Postgres
-// integration, as no Postgres service is available in the test harness).
+// LAST syntax is verified via query inspection).
+//
+// Live Postgres integration tests live in postgres_matches_integration_test.go
+// and are gated on the TEST_POSTGRES_DSN environment variable.
 
 import (
 	"path/filepath"
