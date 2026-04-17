@@ -393,7 +393,7 @@ Response (plain object, not an envelope):
 {
   "text":  "<plain-text seller note>",
   "shape": "buy",
-  "lang":  "nl"
+  "lang":  "bg"
 }
 ```
 
@@ -401,11 +401,11 @@ Response (plain object, not an envelope):
 |---|---|---|
 | `text` | string | Plain text (no markdown). Ready to copy-paste to a seller. |
 | `shape` | string | `buy` \| `negotiate` \| `ask_seller` \| `generic` |
-| `lang` | string | `nl` \| `en` |
+| `lang` | string | `bg` \| `nl` \| `en` |
 
 Shape derivation: `buy → buy`, `negotiate → negotiate`, `ask_seller → ask_seller`, `skip → generic`.
 
-Lang detection: defaults to `nl`. Falls back to `en` when the listing title/description contains no Dutch stop-word hits.
+Lang detection: defaults to `bg` (OLX.bg is the primary wedge as of 2026-04-17). Returns `bg` when the listing title/description contains Bulgarian Cyrillic stop-words, `nl` for legacy Marktplaats Dutch listings, and `en` when neither language is detected.
 
 ### `GET /events` — SSE Contract
 
