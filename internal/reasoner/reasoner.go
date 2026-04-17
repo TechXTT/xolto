@@ -225,8 +225,17 @@ func (r *Reasoner) callLLM(
 		Messages: []chatMessage{
 			{
 				Role: "system",
-				Content: "You analyze secondhand marketplace listings for resale and value hunting. " +
-					"You must also judge whether the listing is actually relevant to what the user searched for — " +
+				// Wedge context: primary market is BG/OLX.bg; user is a Bulgarian buyer.
+				// BGN pricing correctness is trust-critical: prices in input are always
+				// integer EUR cents (e.g. 16361 = EUR 163.61 ≈ BGN 320 at peg 1.95583).
+				// Legacy Marktplaats (NL) listings may appear as comparables — treat equally.
+				// Do NOT present NL as the design center; BG/OLX.bg is primary (XOL-37 M3-C).
+				Content: "You analyze secondhand marketplace listings for a Bulgarian buyer on OLX.bg (primary market) " +
+					"and other used-electronics marketplaces. " +
+					"All numeric prices in the input are integer euro cents (e.g. 16361 means EUR 163.61, " +
+					"approximately BGN 320 at the fixed peg of 1 EUR = 1.95583 BGN). " +
+					"Listings may be written in Bulgarian, English, or Dutch — treat all equally. " +
+					"You must judge whether the listing is actually relevant to what the user searched for — " +
 					"a listing is NOT relevant if it is a completely different product category than the search intent " +
 					"(e.g. a phone appearing in a camera search, or a bag appearing in a laptop search). " +
 					"Reply with strict JSON only.",
