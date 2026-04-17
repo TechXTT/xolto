@@ -476,10 +476,14 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 func isElectronicsListing(text string) bool {
 	lower := strings.ToLower(text)
 	keywords := []string{
+		// EN/NL terms (existing)
 		"camera", "lens", "laptop", "macbook", "iphone", "ipad", "samsung", "pixel",
 		"sony", "nikon", "canon", "fuji", "fujifilm", "gpu", "cpu", "graphics card",
 		"smartphone", "tablet", "notebook", "thinkpad", "surface", "playstation", "xbox", "nintendo",
 		"monitor", "television", "tv", "router", "modem", "headphone", "airpods", "charger", "battery",
+		// BG Cyrillic terms — added for OLX.bg wedge (XOL-35 M3-A)
+		"фотоапарат", "камера", "обектив", "лаптоп", "компютър",
+		"слушалки", "телефон", "таблет",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
@@ -498,13 +502,24 @@ func isPhoneOrLaptop(text string) bool {
 
 func hasBatteryHealthSignal(text string) bool {
 	return containsAny(text,
-		"battery health", "battery capaciteit", "battery capacity", "accu", "accuprestatie",
-		"cycle count", "battery cycles", "batterijconditie", "battery condition",
+		// EN terms (existing)
+		"battery health", "battery capacity", "battery condition", "cycle count", "battery cycles",
+		// NL terms (existing)
+		"battery capaciteit", "accu", "accuprestatie", "batterijconditie",
+		// BG Cyrillic terms — added for OLX.bg wedge (XOL-35 M3-A)
+		"батерия", "акумулатор", "капацитет",
 	)
 }
 
 func hasRefurbishedAmbiguity(text string) bool {
-	if !containsAny(text, "refurb", "renewed", "reconditioned", "gereviseerd") {
+	if !containsAny(text,
+		// EN terms (existing)
+		"refurb", "renewed", "reconditioned",
+		// NL terms (existing)
+		"gereviseerd",
+		// BG Cyrillic terms — added for OLX.bg wedge (XOL-35 M3-A)
+		"рециклиран", "възстановен", "ремонтиран",
+	) {
 		return false
 	}
 	if containsAny(text, "grade a", "grade b", "grade c", "warranty", "garantie", "12 month", "24 month") {
