@@ -329,7 +329,7 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"matches": matches,
-		"items":   listings, // kept for backward compatibility with pre-XOL-18 clients
+		"items":   matches,
 		"limit":   limit,
 		"offset":  offset,
 		"total":   total,
