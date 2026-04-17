@@ -28,9 +28,16 @@ type Listing struct {
 	Reason                  string
 	RiskFlags               []string
 	RecommendedAction       string // one of: buy | negotiate | ask_seller | skip
-	ComparablesCount        int    // number of comparable deals used by the scorer
-	ComparablesMedianAgeDays int   // median age of comparables in days; 0 if none
-	Feedback                string // "", "approved", "dismissed"
+	ComparablesCount         int    // number of comparable deals used by the scorer
+	ComparablesMedianAgeDays int    // median age of comparables in days; 0 if none
+	Feedback                 string // "", "approved", "dismissed"
+	// CurrencyStatus describes how the listing price was normalised from the
+	// marketplace's native currency into EUR cents. Values (XOL-33):
+	//   "bgn_native"        — offer was quoted in EUR; stored as-is × 100
+	//   "converted_from_eur"— offer was quoted in BGN; divided by 1.95583 peg
+	//   "unknown"           — currency field missing or unrecognised; BGN fallback used
+	//   ""                  — non-OLX marketplace or field not yet populated
+	CurrencyStatus string
 }
 
 type Seller struct {

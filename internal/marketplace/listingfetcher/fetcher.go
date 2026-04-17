@@ -222,15 +222,16 @@ func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listi
 	}
 
 	listing := models.Listing{
-		MarketplaceID: "olxbg",
-		ItemID:        fmt.Sprintf("olxbg_%s", payload.Data.ID.String()),
-		CanonicalID:   fmt.Sprintf("olxbg:%s", payload.Data.ID.String()),
-		Title:         strings.TrimSpace(payload.Data.Title),
-		Description:   strings.TrimSpace(payload.Data.Description),
-		Price:         eurCents,
-		PriceType:     priceType,
-		URL:           payload.Data.URL,
-		ImageURLs:     imageURLs,
+		MarketplaceID:  "olxbg",
+		ItemID:         fmt.Sprintf("olxbg_%s", payload.Data.ID.String()),
+		CanonicalID:    fmt.Sprintf("olxbg:%s", payload.Data.ID.String()),
+		Title:          strings.TrimSpace(payload.Data.Title),
+		Description:    strings.TrimSpace(payload.Data.Description),
+		Price:          eurCents,
+		PriceType:      priceType,
+		URL:            payload.Data.URL,
+		ImageURLs:      imageURLs,
+		CurrencyStatus: currencyStatus,
 		Attributes: map[string]string{
 			"currency":        "EUR",
 			"price_local":     fmt.Sprintf("%.2f", rawPrice),

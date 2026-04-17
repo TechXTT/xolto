@@ -189,15 +189,16 @@ func mapListing(offer apiOffer) models.Listing {
 	city := offer.Location.City.Name
 
 	return models.Listing{
-		ItemID:        fmt.Sprintf("olxbg_%s", offerID),
-		CanonicalID:   fmt.Sprintf("olxbg:%s", offerID),
-		MarketplaceID: "olxbg",
-		Title:         offer.Title,
-		Price:         eurCents,
-		PriceType:     priceType,
-		Condition:     condition,
-		URL:           offer.URL,
-		ImageURLs:     imageURLs,
+		ItemID:         fmt.Sprintf("olxbg_%s", offerID),
+		CanonicalID:    fmt.Sprintf("olxbg:%s", offerID),
+		MarketplaceID:  "olxbg",
+		Title:          offer.Title,
+		Price:          eurCents,
+		PriceType:      priceType,
+		Condition:      condition,
+		URL:            offer.URL,
+		ImageURLs:      imageURLs,
+		CurrencyStatus: status,
 		Seller: models.Seller{
 			Name: offer.Contact.Name,
 		},
