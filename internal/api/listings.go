@@ -433,6 +433,7 @@ func (s *Server) handleAnalyzeListing(w http.ResponseWriter, r *http.Request, us
 	enriched.Confidence = scored.Confidence
 	enriched.Reason = scored.Reason
 	enriched.RiskFlags = scored.RiskFlags
+	enriched.RecommendedAction = scored.RecommendedAction
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"listing":          enriched,

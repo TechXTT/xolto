@@ -461,6 +461,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN reasoning_source TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN risk_flags TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN recommended_action TEXT NOT NULL DEFAULT 'ask_seller'`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback_at DATETIME NULL`)
@@ -1476,6 +1477,7 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       COALESCE(recommended_action, 'ask_seller'),
 		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id LIKE ?
@@ -1497,7 +1499,8 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &lastSeen, &listing.Feedback,
+			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+			&lastSeen, &listing.Feedback,
 		); err != nil {
 			return nil, err
 		}
@@ -1574,6 +1577,7 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       COALESCE(recommended_action, 'ask_seller'),
 		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id LIKE ?
@@ -1596,7 +1600,8 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
 			&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-			&listing.Reason, &riskFlagsJSON, &lastSeen, &listing.Feedback,
+			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+			&lastSeen, &listing.Feedback,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1639,6 +1644,7 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		SELECT item_id, profile_id, title, price, price_type, image_urls,
 		       url, condition, marketplace_id,
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
+		       COALESCE(recommended_action, 'ask_seller'),
 		       last_seen, COALESCE(feedback, '')
 		FROM listings
 		WHERE item_id = ?
@@ -1650,7 +1656,8 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 		&listing.URL, &listing.Condition, &listing.MarketplaceID,
 		&listing.Score, &listing.FairPrice, &listing.OfferPrice, &listing.Confidence,
-		&listing.Reason, &riskFlagsJSON, &lastSeen, &listing.Feedback,
+		&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
+		&lastSeen, &listing.Feedback,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1899,27 +1906,30 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 			item_id, title, price, price_type, score, query, profile_id, image_urls,
 			url, condition, marketplace_id,
 			fair_price, offer_price, confidence, reasoning, reasoning_source, risk_flags,
+			recommended_action,
 			first_seen, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(item_id) DO UPDATE SET
-			price          = excluded.price,
-			score          = excluded.score,
-			profile_id     = excluded.profile_id,
-			image_urls     = excluded.image_urls,
-			url            = excluded.url,
-			condition      = excluded.condition,
-			marketplace_id = excluded.marketplace_id,
-			fair_price     = excluded.fair_price,
-			offer_price    = excluded.offer_price,
-			confidence     = excluded.confidence,
-			reasoning      = excluded.reasoning,
-			reasoning_source = excluded.reasoning_source,
-			risk_flags     = excluded.risk_flags,
-			last_seen      = CURRENT_TIMESTAMP
+			price              = excluded.price,
+			score              = excluded.score,
+			profile_id         = excluded.profile_id,
+			image_urls         = excluded.image_urls,
+			url                = excluded.url,
+			condition          = excluded.condition,
+			marketplace_id     = excluded.marketplace_id,
+			fair_price         = excluded.fair_price,
+			offer_price        = excluded.offer_price,
+			confidence         = excluded.confidence,
+			reasoning          = excluded.reasoning,
+			reasoning_source   = excluded.reasoning_source,
+			risk_flags         = excluded.risk_flags,
+			recommended_action = excluded.recommended_action,
+			last_seen          = CURRENT_TIMESTAMP
 	`,
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
+		scored.RecommendedAction,
 	)
 	return err
 }

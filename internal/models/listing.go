@@ -21,13 +21,14 @@ type Listing struct {
 	Attributes    map[string]string // condition, brand, etc.
 	// Analysis fields: zero-value when listing comes from a marketplace search;
 	// populated when loaded from the store (ListRecentListings).
-	Score      float64
-	FairPrice  int // cents
-	OfferPrice int // cents
-	Confidence float64
-	Reason     string
-	RiskFlags  []string
-	Feedback   string // "", "approved", "dismissed"
+	Score             float64
+	FairPrice         int // cents
+	OfferPrice        int // cents
+	Confidence        float64
+	Reason            string
+	RiskFlags         []string
+	RecommendedAction string // one of: buy | negotiate | ask_seller | skip
+	Feedback          string // "", "approved", "dismissed"
 }
 
 type Seller struct {
@@ -40,18 +41,42 @@ type Location struct {
 	Distance int // meters from configured zip code
 }
 
+// ScoredListing is the output of the scorer for a single listing.
+//
+// RecommendedAction is one of the four action-verdict enum values:
+//
+//	"buy"        — strong signal to purchase at asking price or below
+//	"negotiate"  — asking price is above fair but within negotiable range
+//	"ask_seller" — evidence is thin or signals are missing; seek clarification
+//	"skip"       — clear disqualifier (overpriced, red flags, or condition issue)
+//
+// RiskFlags is an orthogonal set of stable snake_case trust-signal keys.
+// Keys are sourced from computeRiskFlags and may be empty. Dash renders these
+// as small chips alongside the action verdict; they do not affect the verdict
+// itself.
+//
+// Valid RiskFlags keys (non-exhaustive; stable contract):
+//
+//	"anomaly_price"         — asking price is suspiciously low vs fair value
+//	"vague_condition"       — listing contains "as-is", "untested", etc.
+//	"unclear_bundle"        — bundle/lot listing with unclear item scope
+//	"no_model_id"           — electronics listing with no model number in title
+//	"missing_key_photos"    — electronics listing with fewer than 3 photos
+//	"no_battery_health"     — phone/laptop listing with no battery health signal
+//	"refurbished_ambiguity" — refurb listing without grading or warranty signal
 type ScoredListing struct {
-	Listing         Listing
-	Score           float64
-	OfferPrice      int // cents
-	FairPrice       int // cents
-	MarketAverage   int // cents
-	Confidence      float64
-	Reason          string
-	ReasoningSource string
-	SearchAdvice    string
-	ComparableDeals []ComparableDeal
-	RiskFlags       []string
+	Listing           Listing
+	Score             float64
+	OfferPrice        int // cents
+	FairPrice         int // cents
+	MarketAverage     int // cents
+	Confidence        float64
+	Reason            string
+	ReasoningSource   string
+	SearchAdvice      string
+	ComparableDeals   []ComparableDeal
+	RiskFlags         []string
+	RecommendedAction string // one of: buy | negotiate | ask_seller | skip
 }
 
 type PricePoint struct {

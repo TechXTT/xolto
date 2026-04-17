@@ -245,23 +245,44 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	riskFlags := computeRiskFlags(listing, analysis.FairPrice)
 	offerPrice := calculateOffer(listing.Price, analysis.FairPrice, marketAvg, hasMarket, search.OfferPercentage)
 
+	// Compute price_ratio for the verdict mapper. Use the same reference price
+	// hierarchy as the scoring formula above: AI fair price > market average.
+	// When no reference price is available, priceRatio = 0 (unknown) — the
+	// mapper will not fire SKIP/NEGOTIATE/BUY price rules and will fall through
+	// to ASK SELLER (appropriate for evidence-thin listings).
+	priceRatio := 0.0
+	if referencePrice > 0 && listing.Price > 0 {
+		priceRatio = float64(listing.Price) / float64(referencePrice)
+	}
+
+	recommendedAction := ComputeVerdict(
+		score,
+		analysis.Confidence,
+		comparables,
+		search.Query,
+		priceRatio,
+		listing.Condition,
+		riskFlags,
+	)
+
 	if analysis.Reason != "" {
 		reason.WriteString(" | ")
 		reason.WriteString(analysis.Reason)
 	}
 
 	return models.ScoredListing{
-		Listing:         listing,
-		Score:           score,
-		OfferPrice:      offerPrice,
-		FairPrice:       analysis.FairPrice,
-		MarketAverage:   marketAvg,
-		Confidence:      analysis.Confidence,
-		Reason:          reason.String(),
-		ReasoningSource: analysis.Source,
-		SearchAdvice:    analysis.SearchAdvice,
-		ComparableDeals: analysis.ComparableDeals,
-		RiskFlags:       riskFlags,
+		Listing:           listing,
+		Score:             score,
+		OfferPrice:        offerPrice,
+		FairPrice:         analysis.FairPrice,
+		MarketAverage:     marketAvg,
+		Confidence:        analysis.Confidence,
+		Reason:            reason.String(),
+		ReasoningSource:   analysis.Source,
+		SearchAdvice:      analysis.SearchAdvice,
+		ComparableDeals:   analysis.ComparableDeals,
+		RiskFlags:         riskFlags,
+		RecommendedAction: recommendedAction,
 	}
 }
 
