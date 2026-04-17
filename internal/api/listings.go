@@ -403,14 +403,16 @@ var validDraftNoteVerdicts = map[string]bool{
 //	{
 //	  "text":  "<plain-text seller note>",
 //	  "shape": "buy" | "negotiate" | "ask_seller" | "generic",
-//	  "lang":  "nl" | "en"
+//	  "lang":  "bg" | "nl" | "en"
 //	}
 //
 // Shape is derived from the verdict: buy→buy, negotiate→negotiate,
 // ask_seller→ask_seller, skip→generic.
 //
-// Lang defaults to "nl". Falls back to "en" when the listing title/description
-// contains no Dutch stop-word hits.
+// Lang defaults to "bg" (OLX.bg is the primary wedge as of 2026-04-17).
+// Returns "bg" when the listing title/description contains Bulgarian
+// Cyrillic stop-words, "nl" for legacy Marktplaats Dutch listings, and
+// "en" when neither language is detected.
 //
 // Input validation errors return 400 with {"ok":false,"error":"<message>"}.
 func (s *Server) handleDraftNote(w http.ResponseWriter, r *http.Request, user *models.User) {
