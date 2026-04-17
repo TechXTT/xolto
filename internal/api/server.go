@@ -85,6 +85,8 @@ func (s *Server) Handler() http.Handler {
 	handler = s.corsMiddleware(handler)
 	handler = s.requestLoggingMiddleware(handler)
 	handler = s.requestIDMiddleware(handler)
+	// sentryMiddleware is outermost so it catches panics from every inner layer.
+	handler = s.sentryMiddleware(handler)
 	return handler
 }
 

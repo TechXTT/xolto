@@ -21,6 +21,7 @@ import (
 	"github.com/TechXTT/xolto/internal/marketplace/vinted"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/notify"
+	"github.com/TechXTT/xolto/internal/observability"
 	"github.com/TechXTT/xolto/internal/reasoner"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
@@ -28,10 +29,22 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// release is injected at build time via:
+//
+//	go build -ldflags "-X github.com/TechXTT/xolto/cmd/server/main.release=$(git rev-parse --short HEAD)"
+//
+// When not injected (local / CI without ldflags), Init falls back to the
+// SENTRY_RELEASE environment variable, which Railway can set without a rebuild.
+var release string
+
 func main() {
 	_ = godotenv.Load()
 	logger := logging.New(os.Getenv("APP_ENV"))
 	slog.SetDefault(logger)
+
+	// Initialise Sentry error tracking. No-op when SENTRY_DSN is unset.
+	observability.Init(release)
+	defer observability.Flush(2 * time.Second)
 
 	cfg, err := config.LoadServerConfigFromEnv()
 	if err != nil {
