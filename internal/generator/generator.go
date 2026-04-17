@@ -84,7 +84,7 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		Messages: []chatMessage{
 			{
 				Role: "system",
-				Content: "You generate search presets for European second-hand marketplaces (Marktplaats, Vinted, OLX). Return strict JSON only. " +
+				Content: "You generate search presets for European second-hand marketplaces (OLX.bg, Marktplaats, Vinted). Return strict JSON only. " +
 					"Optimize for bargain hunting of used electronics: cameras, lenses, laptops, phones, gaming gear, audio equipment. Use euro budgets as whole euros. " +
 					"For camera bodies use category_id 487, for lenses use 495, and only use 356 for gaming-related items. " +
 					"Use canonical English conditions (new, like_new, good, fair) and keep auto_message false.",
@@ -152,7 +152,7 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 
 func buildPrompt(topic string) string {
 	return strings.Join([]string{
-		fmt.Sprintf("Create 3 to 5 Marktplaats search presets for this topic: %q.", topic),
+		fmt.Sprintf("Create 3 to 5 second-hand marketplace search presets for this topic: %q.", topic),
 		"Return JSON with this exact shape only:",
 		`{"searches":[{"name":"Sony A7 IV","query":"sony a7 iv","category_id":487,"max_price":1800,"min_price":900,"condition":["good","like_new"],"offer_percentage":78,"auto_message":false,"message_template":"Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"},{"name":"Sony FE 24-70mm","query":"sony fe 24-70","category_id":495,"max_price":900,"min_price":200,"condition":["good","like_new"],"offer_percentage":72,"auto_message":false,"message_template":"Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"}]}`,
 		"Rules:",
