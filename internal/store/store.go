@@ -467,6 +467,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN profile_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN feedback_at DATETIME NULL`)
+	// XOL-33 (M2-D): currency_status tracks how the listing price was normalised.
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN currency_status TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_listings_feedback ON listings(profile_id, feedback)`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN urgency TEXT NOT NULL DEFAULT 'flexible'`)
@@ -1481,7 +1483,8 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, '')
+		       last_seen, COALESCE(feedback, ''),
+		       COALESCE(currency_status, '')
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
@@ -1505,6 +1508,7 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
 			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 			&lastSeen, &listing.Feedback,
+			&listing.CurrencyStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -1583,7 +1587,8 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, '')
+		       last_seen, COALESCE(feedback, ''),
+		       COALESCE(currency_status, '')
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
@@ -1608,6 +1613,7 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 			&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
 			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 			&lastSeen, &listing.Feedback,
+			&listing.CurrencyStatus,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1652,7 +1658,8 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, '')
+		       last_seen, COALESCE(feedback, ''),
+		       COALESCE(currency_status, '')
 		FROM listings
 		WHERE item_id = ?
 	`, scopedItemID(userID, itemID))
@@ -1666,6 +1673,7 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		&listing.Reason, &riskFlagsJSON, &listing.RecommendedAction,
 		&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 		&lastSeen, &listing.Feedback,
+		&listing.CurrencyStatus,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1916,8 +1924,9 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 			fair_price, offer_price, confidence, reasoning, reasoning_source, risk_flags,
 			recommended_action,
 			comparables_count, comparables_median_age_days,
+			currency_status,
 			first_seen, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(item_id) DO UPDATE SET
 			price                       = excluded.price,
 			score                       = excluded.score,
@@ -1935,6 +1944,7 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 			recommended_action          = excluded.recommended_action,
 			comparables_count           = excluded.comparables_count,
 			comparables_median_age_days = excluded.comparables_median_age_days,
+			currency_status             = excluded.currency_status,
 			last_seen                   = CURRENT_TIMESTAMP
 	`,
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
@@ -1942,6 +1952,7 @@ func (s *SQLiteStore) SaveListing(userID string, l models.Listing, query string,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
 		scored.RecommendedAction,
 		scored.ComparablesCount, scored.ComparablesMedianAgeDays,
+		l.CurrencyStatus,
 	)
 	return err
 }

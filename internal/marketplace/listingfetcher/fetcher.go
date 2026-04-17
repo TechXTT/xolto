@@ -175,8 +175,11 @@ func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listi
 			Params []struct {
 				Key   string `json:"key"`
 				Value struct {
-					Value float64 `json:"value"`
-					Label string  `json:"label"`
+					Value      float64 `json:"value"`
+					Currency   string  `json:"currency"` // "EUR" | "BGN" | ""
+					Negotiable bool    `json:"negotiable"`
+					Type       string  `json:"type"` // "price" | "free" | "exchange"
+					Label      string  `json:"label"`
 				} `json:"value"`
 			} `json:"params"`
 			Photos []struct {
@@ -189,15 +192,28 @@ func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listi
 		return models.Listing{}, err
 	}
 
-	bgnStotinki := 0
+	var rawPrice float64
+	var apiCurrency string
+	priceType := "fixed"
 	for _, p := range payload.Data.Params {
 		if p.Key == "price" {
-			bgnStotinki = int(p.Value.Value * 100)
+			rawPrice = p.Value.Value
+			apiCurrency = p.Value.Currency
+			switch {
+			case p.Value.Negotiable:
+				priceType = "negotiable"
+			case p.Value.Type == "free":
+				priceType = "free"
+			case p.Value.Type == "exchange":
+				priceType = "negotiable"
+			}
 			break
 		}
 	}
-	// OLX BG quotes prices in BGN; the rest of the system works in EUR cents.
-	eurCents := olxbg.BGNStotinkiToEURCents(bgnStotinki)
+	// Apply currency-aware conversion matching mapper.go (XOL-31).
+	// The JSON-LD fallback (fetchJSONLD) already handles this correctly; this
+	// path is the direct API path and must mirror that logic.
+	eurCents, currencyStatus := olxbg.CurrencyStatusFromAPI(rawPrice, apiCurrency, payload.Data.ID.String())
 	var imageURLs []string
 	for _, photo := range payload.Data.Photos {
 		if photo.Link != "" {
@@ -206,19 +222,21 @@ func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listi
 	}
 
 	listing := models.Listing{
-		MarketplaceID: "olxbg",
-		ItemID:        fmt.Sprintf("olxbg_%s", payload.Data.ID.String()),
-		CanonicalID:   fmt.Sprintf("olxbg:%s", payload.Data.ID.String()),
-		Title:         strings.TrimSpace(payload.Data.Title),
-		Description:   strings.TrimSpace(payload.Data.Description),
-		Price:         eurCents,
-		PriceType:     "fixed",
-		URL:           payload.Data.URL,
-		ImageURLs:     imageURLs,
+		MarketplaceID:  "olxbg",
+		ItemID:         fmt.Sprintf("olxbg_%s", payload.Data.ID.String()),
+		CanonicalID:    fmt.Sprintf("olxbg:%s", payload.Data.ID.String()),
+		Title:          strings.TrimSpace(payload.Data.Title),
+		Description:    strings.TrimSpace(payload.Data.Description),
+		Price:          eurCents,
+		PriceType:      priceType,
+		URL:            payload.Data.URL,
+		ImageURLs:      imageURLs,
+		CurrencyStatus: currencyStatus,
 		Attributes: map[string]string{
 			"currency":        "EUR",
-			"price_local":     fmt.Sprintf("%d", bgnStotinki),
-			"price_local_ccy": "BGN",
+			"price_local":     fmt.Sprintf("%.2f", rawPrice),
+			"price_local_ccy": strings.ToUpper(strings.TrimSpace(apiCurrency)),
+			"currency_status": currencyStatus,
 		},
 	}
 	if listing.URL == "" {
