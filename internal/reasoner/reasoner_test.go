@@ -194,3 +194,61 @@ func TestNormalizeFairPriceCentsKeepsReasonableValues(t *testing.T) {
 		t.Fatalf("expected fair price to remain unchanged, got %d", got)
 	}
 }
+
+// TestTokenSetCyrillicTitle verifies that Cyrillic characters in OLX BG titles
+// are tokenised correctly after switching the regex to [\p{L}\p{N}]{2,}.
+// Before this fix, a BG-only string returned an empty set (XOL-32 AC).
+func TestTokenSetCyrillicTitle(t *testing.T) {
+	// A representative OLX BG camera title — Latin model number + Cyrillic words.
+	title := "Canon 6D Mark II с 24-70 f/2.8"
+	tokens := tokenSet(title)
+
+	// Must contain Cyrillic token "с" — but it is only 1 rune so it's excluded
+	// by the {2,} minimum. Use a multi-char Cyrillic word instead.
+	cyrillicTitle := "Фотоапарат Canon EOS R10 употребяван"
+	tokens = tokenSet(cyrillicTitle)
+
+	// XOL-32 AC: tokenSet on a Cyrillic-only string returns a non-empty set.
+	if len(tokens) == 0 {
+		t.Fatal("tokenSet on Cyrillic title returned empty set — Cyrillic tokenizer broken")
+	}
+
+	// Specific Cyrillic tokens that must appear.
+	for _, want := range []string{"фотоапарат", "употребяван"} {
+		if _, ok := tokens[want]; !ok {
+			t.Errorf("expected Cyrillic token %q in set, got %v", want, tokens)
+		}
+	}
+
+	// Latin tokens must still appear (regression guard).
+	for _, want := range []string{"canon", "eos", "r10"} {
+		if _, ok := tokens[want]; !ok {
+			t.Errorf("expected Latin token %q in set, got %v", want, tokens)
+		}
+	}
+}
+
+// TestTokenSetCyrillicOnly verifies the AC from XOL-32: tokenSet on a
+// Cyrillic-only string must return a non-empty set.
+func TestTokenSetCyrillicOnly(t *testing.T) {
+	tokens := tokenSet("слушалки батерия фотоапарат")
+	if len(tokens) == 0 {
+		t.Fatal("tokenSet on Cyrillic-only string returned empty set")
+	}
+	for _, want := range []string{"слушалки", "батерия", "фотоапарат"} {
+		if _, ok := tokens[want]; !ok {
+			t.Errorf("expected token %q, not found in %v", want, tokens)
+		}
+	}
+}
+
+// TestTokenSetLatinUnchanged verifies that Latin-only titles tokenise exactly
+// as before (regression guard for the Cyrillic fix).
+func TestTokenSetLatinUnchanged(t *testing.T) {
+	tokens := tokenSet("Sony A7 III body mirrorless")
+	for _, want := range []string{"sony", "a7", "iii", "body", "mirrorless"} {
+		if _, ok := tokens[want]; !ok {
+			t.Errorf("expected Latin token %q, not found in %v", want, tokens)
+		}
+	}
+}

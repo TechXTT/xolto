@@ -449,9 +449,16 @@ func averageSimilarity(comparables []models.ComparableDeal) float64 {
 	return total / float64(len(comparables))
 }
 
+// tokenRe matches any run of Unicode letters or numbers (≥2 codepoints).
+// Using \p{L}\p{N} instead of [a-zA-Z0-9] ensures Cyrillic (and any other
+// non-Latin script) characters are included. This mirrors the pattern used
+// in internal/worker/worker.go:wordTokenRe which was already BG-aware.
+// Without this, every OLX BG title/description in Bulgarian is tokenised to
+// a tiny Latin-only subset, breaking must-have matching and reasoner grounding.
+var tokenRe = regexp.MustCompile(`[\p{L}\p{N}]{2,}`)
+
 func tokenSet(value string) map[string]struct{} {
-	re := regexp.MustCompile(`[a-zA-Z0-9]{2,}`)
-	matches := re.FindAllString(strings.ToLower(value), -1)
+	matches := tokenRe.FindAllString(strings.ToLower(value), -1)
 	out := make(map[string]struct{}, len(matches))
 	for _, match := range matches {
 		if stopWords[match] {
