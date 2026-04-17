@@ -31,4 +31,9 @@ type SearchSpec struct {
 	LastResultCount      int
 	ConsecutiveEmptyRuns int
 	ConsecutiveFailures  int
+	// MustHaves holds the mission's must-have requirement strings in source
+	// order. When non-empty, the scorer derives a MustHaveMatch per entry for
+	// each scored listing. Populated by callers that have fetched the mission
+	// (e.g. API handler, worker). Zero value means "no must-have evaluation".
+	MustHaves []string
 }

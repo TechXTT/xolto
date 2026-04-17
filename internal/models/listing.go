@@ -43,6 +43,24 @@ type Location struct {
 	Distance int // meters from configured zip code
 }
 
+// MustHaveMatch records how well a single mission must-have is satisfied by a
+// specific listing.
+//
+// Status enum (exhaustive — only these three values are emitted):
+//
+//	"met"     — listing demonstrably satisfies the must-have.
+//	"missed"  — listing demonstrably violates the must-have.
+//	"unknown" — listing description/metadata is silent on the must-have.
+//
+// When in doubt, "unknown" is the safe default. Over-claiming "met" is the
+// primary failure mode (false trust); false "missed" is the secondary failure
+// mode (false exclusion). Only emit "met" or "missed" when there is clear
+// textual evidence in the listing.
+type MustHaveMatch struct {
+	Text   string `json:"Text"`
+	Status string `json:"Status"` // "met" | "missed" | "unknown"
+}
+
 // ScoredListing is the output of the scorer for a single listing.
 //
 // RecommendedAction is one of the four action-verdict enum values:
@@ -66,6 +84,10 @@ type Location struct {
 //	"missing_key_photos"    — electronics listing with fewer than 3 photos
 //	"no_battery_health"     — phone/laptop listing with no battery health signal
 //	"refurbished_ambiguity" — refurb listing without grading or warranty signal
+//
+// MustHaves holds one MustHaveMatch per must-have defined in the associated
+// mission, in source order (never alphabetised). An empty must-have mission
+// yields an empty slice (never nil) so callers can iterate without nil guards.
 type ScoredListing struct {
 	Listing           Listing
 	Score             float64
@@ -81,6 +103,7 @@ type ScoredListing struct {
 	RecommendedAction        string // one of: buy | negotiate | ask_seller | skip
 	ComparablesCount         int    // number of comparable deals used by the scorer
 	ComparablesMedianAgeDays int    // median age of comparables in days; 0 if none
+	MustHaves                []MustHaveMatch
 }
 
 type PricePoint struct {

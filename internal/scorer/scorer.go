@@ -102,6 +102,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 			RecommendedAction:        ActionAskSeller,
 			ComparablesCount:         0,
 			ComparablesMedianAgeDays: 0,
+			MustHaves:                ScoreMustHaves(listing, search.MustHaves),
 		}
 	}
 
@@ -247,6 +248,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 			RecommendedAction:        ActionSkip,
 			ComparablesCount:         compCount,
 			ComparablesMedianAgeDays: compMedian,
+			MustHaves:                ScoreMustHaves(listing, search.MustHaves),
 		}
 	}
 
@@ -294,6 +296,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		RecommendedAction:        recommendedAction,
 		ComparablesCount:         compCount,
 		ComparablesMedianAgeDays: compMedian,
+		MustHaves:                ScoreMustHaves(listing, search.MustHaves),
 	}
 }
 

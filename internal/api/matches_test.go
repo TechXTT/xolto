@@ -464,6 +464,130 @@ func TestMatchesOrderingTieBreaker(t *testing.T) {
 	}
 }
 
+// TestMatchesMustHaves verifies the XOL-18 contract:
+//   - Each item in the matches array carries a MustHaves field.
+//   - When mission has no RequiredFeatures, MustHaves is an empty slice (not null).
+//   - When mission has RequiredFeatures and the listing matches, status is "met".
+//   - When mission has RequiredFeatures and the listing does not match, status is "unknown".
+//   - Backward compat: the "items" key is still present and contains raw listings.
+func TestMatchesMustHaves(t *testing.T) {
+	st, srv, userID, token := newMatchesTestServer(t)
+	defer st.Close()
+
+	// Create a mission with two RequiredFeatures.
+	missionID, err := st.UpsertMission(models.Mission{
+		UserID:           userID,
+		Name:             "XOL-18 test mission",
+		TargetQuery:      "sony camera",
+		Status:           "active",
+		RequiredFeatures: []string{"NL seller", "battery health"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission() error = %v", err)
+	}
+
+	// Insert one listing that mentions "NL seller" but not "battery health".
+	listing := models.Listing{
+		ItemID:        "xol18-item-1",
+		Title:         "Sony A6000, NL seller",
+		Description:   "Great camera body.",
+		Price:         50000,
+		PriceType:     "fixed",
+		MarketplaceID: "marktplaats",
+		ProfileID:     missionID,
+	}
+	if err := st.SaveListing(userID, listing, "sony camera", models.ScoredListing{Score: 7.5}); err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	// --- Test 1: mission with must-haves, request with mission_id ---
+	res := doMatchesRequest(t, srv, token, "mission_id="+itoa(int(missionID)))
+	if res.Code != http.StatusOK {
+		t.Fatalf("MustHaves test: expected 200, got %d body=%s", res.Code, res.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("MustHaves test: decode error: %v", err)
+	}
+
+	// Verify "matches" key exists.
+	rawMatches, ok := body["matches"].([]any)
+	if !ok {
+		t.Fatalf("MustHaves test: expected 'matches' array in response, got %T: %#v", body["matches"], body["matches"])
+	}
+	// Verify backward-compat "items" key also exists.
+	if _, ok := body["items"]; !ok {
+		t.Fatal("MustHaves test: expected backward-compat 'items' key in response")
+	}
+
+	if len(rawMatches) != 1 {
+		t.Fatalf("MustHaves test: expected 1 match, got %d", len(rawMatches))
+	}
+
+	item, _ := rawMatches[0].(map[string]any)
+	rawMH, ok := item["MustHaves"]
+	if !ok {
+		t.Fatal("MustHaves test: item is missing 'MustHaves' field")
+	}
+	mhSlice, ok := rawMH.([]any)
+	if !ok {
+		t.Fatalf("MustHaves test: 'MustHaves' is %T, want []any", rawMH)
+	}
+	if len(mhSlice) != 2 {
+		t.Fatalf("MustHaves test: expected 2 MustHaveMatch entries (one per RequiredFeature), got %d", len(mhSlice))
+	}
+
+	// First must-have: "NL seller" → listing title contains "NL seller" → "met".
+	mh0, _ := mhSlice[0].(map[string]any)
+	if mh0["Text"] != "NL seller" {
+		t.Errorf("MustHaves[0].Text = %q, want %q", mh0["Text"], "NL seller")
+	}
+	if mh0["Status"] != "met" {
+		t.Errorf("MustHaves[0].Status = %q, want %q (NL seller is in title)", mh0["Status"], "met")
+	}
+
+	// Second must-have: "battery health" → not in listing → "unknown".
+	mh1, _ := mhSlice[1].(map[string]any)
+	if mh1["Text"] != "battery health" {
+		t.Errorf("MustHaves[1].Text = %q, want %q", mh1["Text"], "battery health")
+	}
+	if mh1["Status"] != "unknown" {
+		t.Errorf("MustHaves[1].Status = %q, want %q (battery health absent from listing)", mh1["Status"], "unknown")
+	}
+
+	// --- Test 2: no mission_id → MustHaves must be empty slice (not null) ---
+	res2 := doMatchesRequest(t, srv, token, "")
+	if res2.Code != http.StatusOK {
+		t.Fatalf("no-mission test: expected 200, got %d", res2.Code)
+	}
+	var body2 map[string]any
+	if err := json.NewDecoder(res2.Body).Decode(&body2); err != nil {
+		t.Fatalf("no-mission test: decode error: %v", err)
+	}
+	rawMatches2, ok := body2["matches"].([]any)
+	if !ok {
+		t.Fatalf("no-mission test: expected 'matches' array, got %T", body2["matches"])
+	}
+	for i, m := range rawMatches2 {
+		item2, _ := m.(map[string]any)
+		rawMH2, hasMH := item2["MustHaves"]
+		if !hasMH {
+			t.Errorf("no-mission test: match[%d] missing MustHaves field", i)
+			continue
+		}
+		// Must be a non-null empty slice in JSON → decoded as []any{} or nil in Go.
+		// Crucially, the JSON must not omit the field and must not be null.
+		mhSlice2, isSlice := rawMH2.([]any)
+		if !isSlice {
+			t.Errorf("no-mission test: match[%d].MustHaves is %T, want []any (empty slice)", i, rawMH2)
+			continue
+		}
+		if len(mhSlice2) != 0 {
+			t.Errorf("no-mission test: match[%d].MustHaves len=%d, want 0 (no mission must-haves)", i, len(mhSlice2))
+		}
+	}
+}
+
 // itoa is a small helper to avoid importing strconv in test helpers.
 func itoa(n int) string {
 	if n == 0 {

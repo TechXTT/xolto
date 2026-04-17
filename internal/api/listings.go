@@ -9,7 +9,16 @@ import (
 
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/scorer"
 )
+
+// matchItem wraps a Listing with its mission must-have match results for the
+// /matches response envelope. MustHaves is always a non-nil slice so that
+// callers can iterate without nil guards.
+type matchItem struct {
+	models.Listing
+	MustHaves []models.MustHaveMatch `json:"MustHaves"`
+}
 
 // matchesSortValues is the set of allowed values for the sort parameter.
 // "newest" is the default (last_seen DESC, item_id ASC) and matches the
@@ -294,11 +303,36 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 	if listings == nil {
 		listings = []models.Listing{}
 	}
+
+	// Resolve mission must-haves when a specific mission is requested.
+	// Uses the mission's RequiredFeatures as the must-have source list.
+	var missionMustHaves []string
+	if missionID > 0 {
+		mission, mErr := s.db.GetMission(missionID)
+		if mErr == nil && mission != nil && mission.UserID == user.ID {
+			missionMustHaves = mission.RequiredFeatures
+		}
+		// If the mission fetch fails or the mission doesn't belong to the user,
+		// missionMustHaves stays nil — ScoreMustHaves will return an empty slice.
+	}
+
+	// Build the enriched matches slice. Each item carries MustHaves derived
+	// in-memory from the mission's required features checked against the
+	// listing's title and description (no extra DB call per listing).
+	matches := make([]matchItem, len(listings))
+	for i, l := range listings {
+		matches[i] = matchItem{
+			Listing:   l,
+			MustHaves: scorer.ScoreMustHaves(l, missionMustHaves),
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":  listings,
-		"limit":  limit,
-		"offset": offset,
-		"total":  total,
+		"matches": matches,
+		"items":   listings, // kept for backward compatibility with pre-XOL-18 clients
+		"limit":   limit,
+		"offset":  offset,
+		"total":   total,
 	})
 }
 
