@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TechXTT/xolto/internal/billing"
+	"github.com/TechXTT/xolto/internal/draftnote"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/scorer"
 )
@@ -87,6 +88,7 @@ func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/matches/analyze", s.requireAuth(s.handleAnalyzeListing))
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
 	mux.HandleFunc("/shortlist/", s.requireAuth(s.handleShortlistItem))
+	mux.HandleFunc("/draft-note", s.requireAuth(s.handleDraftNote))
 	mux.HandleFunc("/assistant/converse", s.requireAuth(s.handleConverse))
 	mux.HandleFunc("/assistant/session", s.requireAuth(s.handleAssistantSession))
 	mux.HandleFunc("/actions", s.requireAuth(s.handleActions))
@@ -375,6 +377,82 @@ func (s *Server) handleMatchFeedback(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "feedback": feedback})
+}
+
+// validDraftNoteVerdicts is the exhaustive allowlist of accepted verdict values
+// for POST /draft-note. Exactly four values — any other input returns 400.
+var validDraftNoteVerdicts = map[string]bool{
+	"buy":        true,
+	"negotiate":  true,
+	"ask_seller": true,
+	"skip":       true,
+}
+
+// handleDraftNote serves POST /draft-note.
+//
+// Request body:
+//
+//	{
+//	  "verdict":    "buy" | "negotiate" | "ask_seller" | "skip"   (required)
+//	  "listing_id": "<item_id>"                                    (required)
+//	  "mission_id": <int64>                                        (optional)
+//	}
+//
+// Response (single object, not an envelope):
+//
+//	{
+//	  "text":  "<plain-text seller note>",
+//	  "shape": "buy" | "negotiate" | "ask_seller" | "generic",
+//	  "lang":  "nl" | "en"
+//	}
+//
+// Shape is derived from the verdict: buy→buy, negotiate→negotiate,
+// ask_seller→ask_seller, skip→generic.
+//
+// Lang defaults to "nl". Falls back to "en" when the listing title/description
+// contains no Dutch stop-word hits.
+//
+// Input validation errors return 400 with {"ok":false,"error":"<message>"}.
+func (s *Server) handleDraftNote(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var body struct {
+		Verdict   string `json:"verdict"`
+		ListingID string `json:"listing_id"`
+		MissionID int64  `json:"mission_id"`
+	}
+	if err := Decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	verdict := strings.TrimSpace(body.Verdict)
+	if !validDraftNoteVerdicts[verdict] {
+		writeError(w, http.StatusBadRequest, "verdict must be one of: buy, negotiate, ask_seller, skip")
+		return
+	}
+
+	listingID := strings.TrimSpace(body.ListingID)
+	if listingID == "" {
+		writeError(w, http.StatusBadRequest, "listing_id is required")
+		return
+	}
+
+	listing, err := s.db.GetListing(user.ID, listingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load listing")
+		return
+	}
+	if listing == nil {
+		writeError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+
+	note := draftnote.Draft(verdict, *listing)
+	writeJSON(w, http.StatusOK, note)
 }
 
 // handleAnalyzeListing accepts a marketplace URL, fetches the listing
