@@ -2594,7 +2594,15 @@ func (s *PostgresStore) GetAIScoreCache(cacheKey string, promptVersion int) (sco
 
 func (s *PostgresStore) SaveListing(userID string, l models.Listing, query string, scored models.ScoredListing) error {
 	imageURLsJSON, _ := json.Marshal(l.ImageURLs)
-	riskFlagsJSON, _ := json.Marshal(scored.RiskFlags)
+	riskFlags := scored.RiskFlags
+	if riskFlags == nil {
+		riskFlags = []string{}
+	}
+	riskFlagsJSON, _ := json.Marshal(riskFlags)
+	recommendedAction := scored.RecommendedAction
+	if recommendedAction == "" {
+		recommendedAction = "ask_seller"
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO listings (
 			item_id, title, price, price_type, score, query, profile_id, image_urls,
@@ -2623,7 +2631,7 @@ func (s *PostgresStore) SaveListing(userID string, l models.Listing, query strin
 		scopedItemID(userID, l.ItemID), l.Title, l.Price, l.PriceType, scored.Score, query, l.ProfileID, string(imageURLsJSON),
 		l.URL, l.Condition, l.MarketplaceID,
 		scored.FairPrice, scored.OfferPrice, scored.Confidence, scored.Reason, scored.ReasoningSource, string(riskFlagsJSON),
-		scored.RecommendedAction,
+		recommendedAction,
 	)
 	return err
 }
