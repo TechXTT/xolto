@@ -1,6 +1,6 @@
 // Package draftnote generates verdict-shaped seller note drafts for the
-// outreach flow. Output is plain text (no markdown), NL-first with EN
-// fallback. No external calls, no persistence — callers own both.
+// outreach flow. Output is plain text (no markdown), BG/NL/EN per listing
+// language detection. No external calls, no persistence — callers own both.
 package draftnote
 
 import (
@@ -24,10 +24,12 @@ const (
 )
 
 // Lang is the language of the drafted text.
-// Exactly two values are emitted — nl (default) or en (fallback).
+// Three values are emitted: bg (Bulgarian), nl (Dutch), or en (English).
+// Default when no language is detected: bg (OLX.bg is the primary wedge).
 type Lang string
 
 const (
+	LangBG Lang = "bg"
 	LangNL Lang = "nl"
 	LangEN Lang = "en"
 )
@@ -63,6 +65,18 @@ var flagToQuestionEN = map[string]string{
 	"refurbished_ambiguity": "Was this refurbished by the manufacturer or a third party, and is there a warranty?",
 }
 
+// flagToQuestionBG maps the priority-ordered risk flags to a Bulgarian
+// clarifying question for OLX.bg listings (XOL-38 M3-D).
+var flagToQuestionBG = map[string]string{
+	"anomaly_price":         "Цената изглежда много ниска — можете ли да потвърдите, че продуктът е оригинален и не е откраднат?",
+	"vague_condition":       "Обявата казва 'така е' или подобно — можете ли да опишете точното състояние и наличието на дефекти?",
+	"no_battery_health":     "Можете ли да споделите процента на батерията (от настройките)?",
+	"missing_key_photos":    "Можете ли да изпратите допълнителни снимки от всички страни, включително екрана и гърба?",
+	"no_model_id":           "Можете ли да потвърдите точния модел, за да съм сигурен/а, че е правилното устройство?",
+	"unclear_bundle":        "Можете ли да уточните какво точно се включва (зарядно, кабели, оригинална кутия)?",
+	"refurbished_ambiguity": "Устройството рециклирано ли е от производителя или трета страна и има ли гаранция?",
+}
+
 // flagPriority defines the tiebreak order when multiple risk flags are
 // present. Lower index = higher priority.
 var flagPriority = []string{
@@ -83,8 +97,27 @@ var dutchStopWords = []string{
 	"naar", "dan", "niet", "dit", "ze", "aan", "heeft", "worden",
 }
 
-// detectLang returns LangNL when the listing title or first 100 chars of
-// description contain at least one Dutch stop-word, otherwise LangEN.
+// bgStopWords is a minimal Cyrillic set used to detect Bulgarian-language
+// listings. A title or description that contains at least one of these is
+// treated as BG. Single-character words (е, и, с) are excluded because they
+// are too short to tokenise reliably; two-char minimum Cyrillic words are used
+// instead. OLX.bg is the primary wedge, so BG detection takes precedence over
+// the EN fallback (XOL-38 M3-D).
+var bgStopWords = []string{
+	"на", "от", "за", "се", "ще", "или", "при", "без", "но", "по",
+	"до", "те", "го", "ги", "им", "ни", "да", "не",
+	"добро", "ново", "добра", "нова", "продавам", "купувам",
+	"работи", "перфектно", "состояние", "включва", "батерия",
+	"употребяван", "употребявана", "използван", "използвана",
+}
+
+// detectLang returns LangBG when the listing contains Bulgarian Cyrillic
+// stop-words, LangNL when it contains Dutch stop-words, and LangEN otherwise.
+//
+// Detection order: BG (Cyrillic) → NL (Dutch stop-words) → EN (default).
+// This order reflects the OLX.bg primary wedge: a listing with Cyrillic text
+// should always produce Bulgarian output, and EN is the fallback when neither
+// BG nor NL is detected (XOL-38 M3-D).
 func detectLang(l models.Listing) Lang {
 	sample := strings.ToLower(l.Title)
 	desc := l.Description
@@ -102,11 +135,22 @@ func detectLang(l models.Listing) Lang {
 	for _, t := range tokens {
 		tokenSet[t] = struct{}{}
 	}
+
+	// BG detection first: any Cyrillic stop-word → Bulgarian.
+	for _, w := range bgStopWords {
+		if _, ok := tokenSet[w]; ok {
+			return LangBG
+		}
+	}
+
+	// NL detection: any Dutch stop-word → Dutch.
 	for _, w := range dutchStopWords {
 		if _, ok := tokenSet[w]; ok {
 			return LangNL
 		}
 	}
+
+	// Default: English.
 	return LangEN
 }
 
@@ -128,8 +172,9 @@ func topPriorityFlag(flags []string, listing models.Listing) string {
 		// Deduplicate: skip if the listing already addresses this concern.
 		if candidate == "no_battery_health" {
 			if strings.Contains(lowerTitle, "battery") || strings.Contains(lowerTitle, "batterij") ||
+				strings.Contains(lowerTitle, "батерия") || strings.Contains(lowerTitle, "акумулатор") ||
 				strings.Contains(lowerDesc, "battery health") || strings.Contains(lowerDesc, "batterijgezondheid") ||
-				strings.Contains(lowerDesc, "%") {
+				strings.Contains(lowerDesc, "батерия") || strings.Contains(lowerDesc, "%") {
 				continue
 			}
 		}
@@ -223,6 +268,11 @@ func buildText(shape Shape, lang Lang, listing models.Listing) string {
 func buildBuyText(lang Lang, listing models.Listing) string {
 	// Buy draft: confirm intent + pickup logistics. No price — buyer accepts asking price.
 	switch lang {
+	case LangBG:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Интересувам се от %s и бих искал/а да го купя. Можете ли да потвърдите, че е все още налично и кога мога да го взема?",
+			listing.Title,
+		))
 	case LangNL:
 		return strings.TrimSpace(fmt.Sprintf(
 			"Hoi! Ik ben geïnteresseerd in je %s en wil hem graag kopen. Kun je bevestigen dat hij nog beschikbaar is en wanneer ik hem kan ophalen?",
@@ -245,6 +295,11 @@ func buildNegotiateText(lang Lang, listing models.Listing) string {
 		// Structural emission gap: when FairPrice=0 the draft omits the price
 		// anchor. Callers can detect this via listing.FairPrice == 0.
 		switch lang {
+		case LangBG:
+			return strings.TrimSpace(fmt.Sprintf(
+				"Здравейте! Интересувам се от %s. Въз основа на сравними обяви се питам дали има гъвкавост в цената. Можете ли да ми кажете повече?",
+				listing.Title,
+			))
 		case LangNL:
 			return strings.TrimSpace(fmt.Sprintf(
 				"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare aanbiedingen vraag ik me af of er iets mogelijk is aan de prijs. Kun je me meer vertellen?",
@@ -266,6 +321,13 @@ func buildNegotiateText(lang Lang, listing models.Listing) string {
 	}
 
 	switch lang {
+	case LangBG:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Интересувам се от %s. Въз основа на сравними обяви пазарната цена е около %s. Бихте ли се съгласили на %s? Ако всичко е наред, мога да взема бързо.",
+			listing.Title,
+			format.Euro(fairPrice),
+			format.Euro(suggestedOffer),
+		))
 	case LangNL:
 		return strings.TrimSpace(fmt.Sprintf(
 			"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare advertenties zie ik een marktprijs rond %s. Zou je %s overwegen? Als alles in orde is, kan ik snel ophalen.",
@@ -289,15 +351,20 @@ func buildAskSellerText(lang Lang, listing models.Listing) string {
 
 	var question string
 	if flag != "" {
-		if lang == LangNL {
+		switch lang {
+		case LangBG:
+			question = flagToQuestionBG[flag]
+		case LangNL:
 			question = flagToQuestionNL[flag]
-		} else {
+		default:
 			question = flagToQuestionEN[flag]
 		}
 	}
 
 	if question == "" {
 		switch lang {
+		case LangBG:
+			question = "Можете ли да разкажете повече за състоянието и включените аксесоари?"
 		case LangNL:
 			question = "Kun je meer vertellen over de conditie en meegeleverde accessoires?"
 		default:
@@ -306,6 +373,12 @@ func buildAskSellerText(lang Lang, listing models.Listing) string {
 	}
 
 	switch lang {
+	case LangBG:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Интересувам се от %s. %s",
+			listing.Title,
+			question,
+		))
 	case LangNL:
 		return strings.TrimSpace(fmt.Sprintf(
 			"Hoi! Ik heb interesse in je %s. %s",
@@ -325,6 +398,11 @@ func buildGenericText(lang Lang, listing models.Listing) string {
 	// Generic / skip: polite no-commitment opener — user asked for a draft
 	// despite a skip verdict, so emit a soft enquiry rather than a refusal.
 	switch lang {
+	case LangBG:
+		return strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Видях обявата ви за %s. Можете ли да ми кажете малко повече за състоянието и дали има гъвкавост в цената?",
+			listing.Title,
+		))
 	case LangNL:
 		return strings.TrimSpace(fmt.Sprintf(
 			"Hoi! Ik zag je advertentie voor de %s. Kun je me iets meer vertellen over de staat en of er nog onderhandelingsruimte is?",
