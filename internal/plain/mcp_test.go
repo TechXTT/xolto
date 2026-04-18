@@ -3,6 +3,7 @@ package plain_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,5 +192,140 @@ func TestPlainMCPClient_HTTP_Non200(t *testing.T) {
 	_, err := c.GetThread(context.Background(), "th_abc")
 	if err == nil {
 		t.Fatal("expected error on 401, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Preflight
+// ---------------------------------------------------------------------------
+
+// TestPreflight_2xx verifies that a 200 response marks the preflight as
+// successful, with Configured=true and StatusCode=200.
+func TestPreflight_2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Minimal valid JSON-RPC 2.0 response.
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer srv.Close()
+
+	c := plain.NewPlainMCPClient("test-token-ok")
+	c.Endpoint = srv.URL
+	c.HTTPClient = srv.Client()
+
+	pf := c.Preflight(context.Background())
+
+	if !pf.Configured {
+		t.Error("expected Configured=true for non-empty token")
+	}
+	if pf.StatusCode != http.StatusOK {
+		t.Errorf("expected StatusCode=200, got %d", pf.StatusCode)
+	}
+	if pf.Err != nil {
+		t.Errorf("expected no error, got %v", pf.Err)
+	}
+	if pf.Endpoint == "" {
+		t.Error("expected Endpoint to be populated")
+	}
+}
+
+// TestPreflight_401 verifies that a 401 response is captured with the correct
+// status code and a non-empty body snippet.
+func TestPreflight_401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token","message":"Token is not valid"}`))
+	}))
+	defer srv.Close()
+
+	c := plain.NewPlainMCPClient("clearly-not-a-real-token")
+	c.Endpoint = srv.URL
+	c.HTTPClient = srv.Client()
+
+	pf := c.Preflight(context.Background())
+
+	if !pf.Configured {
+		t.Error("expected Configured=true for non-empty token")
+	}
+	if pf.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected StatusCode=401, got %d", pf.StatusCode)
+	}
+	if pf.Err == nil {
+		t.Error("expected an error for 401 response")
+	}
+	if pf.BodySnippet == "" {
+		t.Error("expected BodySnippet to be populated on 401")
+	}
+	if !strings.Contains(pf.BodySnippet, "invalid_token") {
+		t.Errorf("expected BodySnippet to contain response body, got %q", pf.BodySnippet)
+	}
+}
+
+// TestPreflight_EmptyToken verifies that an empty token skips the HTTP call
+// entirely and returns Configured=false.
+func TestPreflight_EmptyToken(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := plain.NewPlainMCPClient("") // empty token
+	c.Endpoint = srv.URL
+	c.HTTPClient = srv.Client()
+
+	pf := c.Preflight(context.Background())
+
+	if pf.Configured {
+		t.Error("expected Configured=false for empty token")
+	}
+	if called {
+		t.Error("expected no HTTP call when token is empty")
+	}
+	if pf.StatusCode != 0 {
+		t.Errorf("expected StatusCode=0 when no call made, got %d", pf.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MCPCallError — errors.As accessor
+// ---------------------------------------------------------------------------
+
+// TestMCPCallError_ErrorsAs verifies that a 401 response from GetThread
+// produces an error that exposes status=401 and a body snippet via errors.As.
+func TestMCPCallError_ErrorsAs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("token rejected by server"))
+	}))
+	defer srv.Close()
+
+	c := plain.NewPlainMCPClient("bad-token-for-errors-as-test")
+	c.Endpoint = srv.URL
+	c.HTTPClient = srv.Client()
+
+	_, err := c.GetThread(context.Background(), "th_test")
+	if err == nil {
+		t.Fatal("expected error from 401 response, got nil")
+	}
+
+	var mcpErr *plain.MCPCallError
+	if !errors.As(err, &mcpErr) {
+		t.Fatalf("expected *plain.MCPCallError via errors.As, got %T: %v", err, err)
+	}
+	if mcpErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected StatusCode=401, got %d", mcpErr.StatusCode)
+	}
+	if !strings.Contains(mcpErr.BodySnippet, "token rejected") {
+		t.Errorf("expected BodySnippet to contain body, got %q", mcpErr.BodySnippet)
+	}
+	if mcpErr.Endpoint == "" {
+		t.Error("expected Endpoint to be populated in MCPCallError")
+	}
+	// errors.Is(err, ErrPlainMCPUnavailable) must still work via Unwrap.
+	if !errors.Is(err, plain.ErrPlainMCPUnavailable) {
+		t.Error("expected errors.Is(err, ErrPlainMCPUnavailable) to be true via Unwrap")
 	}
 }
