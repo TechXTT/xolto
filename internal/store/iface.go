@@ -113,4 +113,5 @@ type Writer interface {
 type Store interface {
 	Reader
 	Writer
+	OutreachStore
 }

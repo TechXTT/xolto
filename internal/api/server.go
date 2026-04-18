@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 		s.registerListingRoutes(s.mux)
 		s.registerBillingRoutes(s.mux)
 		s.registerAdminRoutes(s.mux)
+		s.registerOutreachRoutes(s.mux)
 	})
 
 	handler := http.Handler(s.mux)

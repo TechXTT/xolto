@@ -11,14 +11,27 @@ import (
 	"github.com/TechXTT/xolto/internal/draftnote"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/scorer"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
-// matchItem wraps a Listing with its mission must-have match results for the
-// /matches response envelope. MustHaves is always a non-nil slice so that
-// callers can iterate without nil guards.
+// OutreachStateEnvelope carries the outreach thread state for a listing in the
+// /matches envelope. It is null (pointer) when the user has no thread for the
+// listing, so the JSON field is omitted or null — not a default-value object.
+type OutreachStateEnvelope struct {
+	State              string  `json:"state"`
+	SentAt             string  `json:"sent_at"`
+	RepliedAt          *string `json:"replied_at,omitempty"`
+	LastTransitionAgoS int64   `json:"last_transition_ago_seconds"`
+}
+
+// matchItem wraps a Listing with its mission must-have match results and
+// optional outreach thread state for the /matches response envelope.
+// MustHaves is always a non-nil slice so that callers can iterate without nil
+// guards. OutreachState is a pointer — null when no thread exists.
 type matchItem struct {
 	models.Listing
-	MustHaves []models.MustHaveMatch `json:"MustHaves"`
+	MustHaves     []models.MustHaveMatch `json:"MustHaves"`
+	OutreachState *OutreachStateEnvelope `json:"OutreachState"`
 }
 
 // matchesSortValues is the set of allowed values for the sort parameter.
@@ -318,14 +331,48 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 		// missionMustHaves stays nil — ScoreMustHaves will return an empty slice.
 	}
 
+	// Batch-load outreach thread states for all visible listings in one query.
+	// This avoids N+1 queries on the matches enrichment path.
+	listingKeys := make([]store.ListingKey, len(listings))
+	for i, l := range listings {
+		listingKeys[i] = store.ListingKey{
+			ListingID:     l.ItemID,
+			MarketplaceID: l.MarketplaceID,
+		}
+	}
+	threadStates, err := s.db.ListThreadStatesForListings(r.Context(), user.ID, listingKeys)
+	if err != nil {
+		// Non-fatal: log and proceed without outreach state rather than
+		// failing the entire /matches request.
+		threadStates = map[store.ListingKey]store.OutreachThread{}
+	}
+
+	now := time.Now()
+
 	// Build the enriched matches slice. Each item carries MustHaves derived
 	// in-memory from the mission's required features checked against the
-	// listing's title and description (no extra DB call per listing).
+	// listing's title and description (no extra DB call per listing), plus
+	// an optional OutreachState when the user has sent an outreach for the
+	// listing.
 	matches := make([]matchItem, len(listings))
 	for i, l := range listings {
+		var outreachState *OutreachStateEnvelope
+		if t, ok := threadStates[store.ListingKey{ListingID: l.ItemID, MarketplaceID: l.MarketplaceID}]; ok {
+			env := &OutreachStateEnvelope{
+				State:              t.State,
+				SentAt:             t.SentAt.UTC().Format(time.RFC3339),
+				LastTransitionAgoS: int64(now.Sub(t.LastStateTransitionAt).Seconds()),
+			}
+			if t.RepliedAt != nil {
+				s := t.RepliedAt.UTC().Format(time.RFC3339)
+				env.RepliedAt = &s
+			}
+			outreachState = env
+		}
 		matches[i] = matchItem{
-			Listing:   l,
-			MustHaves: scorer.ScoreMustHaves(l, missionMustHaves),
+			Listing:       l,
+			MustHaves:     scorer.ScoreMustHaves(l, missionMustHaves),
+			OutreachState: outreachState,
 		}
 	}
 

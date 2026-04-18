@@ -22,6 +22,7 @@ import (
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/notify"
 	"github.com/TechXTT/xolto/internal/observability"
+	"github.com/TechXTT/xolto/internal/outreach"
 	"github.com/TechXTT/xolto/internal/reasoner"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
@@ -109,6 +110,12 @@ func main() {
 	pool.SetEmailNotifier(emailNotifier)
 	pool.Start(context.Background())
 	defer pool.Stop()
+
+	// Start the outreach stale-transition goroutine. Wakes every hour and
+	// transitions awaiting_reply threads older than 7 days to stale.
+	outreachCtx, outreachCancel := context.WithCancel(context.Background())
+	defer outreachCancel()
+	outreach.StartStaleTransitionScheduler(outreachCtx, db, time.Hour, 7*24*time.Hour)
 
 	// Backfill marketplace coverage for missions created before all-marketplace
 	// auto-deploy was enabled. AutoDeployHunts is idempotent (skips dupes).
