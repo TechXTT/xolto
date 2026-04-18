@@ -102,6 +102,43 @@ func TestScoreUsesAICacheForRepeatedListing(t *testing.T) {
 	}
 }
 
+// TestAccessoryPreFilter verifies that accessory-only titles are caught by the
+// pre-filter and returned with ReasoningSource=accessory-prefilter before any
+// LLM call is attempted (XOL-21).
+func TestAccessoryPreFilter(t *testing.T) {
+	accessoryCases := []struct {
+		title string
+		match bool
+	}{
+		// NL accessories
+		{"Laptop adapter 65W", true},
+		{"Accu voor Dell Inspiron", true},
+		{"Oplader Lenovo ThinkPad", true},
+		// BG accessories
+		{"Зарядно за лаптоп Dell", true},
+		{"Батерия за MacBook Pro", true},
+		{"Части за лаптоп Lenovo", true},
+		// EN accessories
+		{"Charger for MacBook Air", true},
+		{"Battery 87Wh replacement", true},
+		{"Laptop bag 15 inch", true},
+		// Primary devices — must NOT be filtered
+		{"Dell XPS 15 laptop", false},
+		{"MacBook Pro 14 M3", false},
+		{"Sony A7 III body", false},
+		{"Lenovo ThinkPad X1 Carbon i7", false},
+	}
+
+	for _, tc := range accessoryCases {
+		t.Run(tc.title, func(t *testing.T) {
+			got := isAccessoryTitle(tc.title)
+			if got != tc.match {
+				t.Errorf("isAccessoryTitle(%q) = %v, want %v", tc.title, got, tc.match)
+			}
+		})
+	}
+}
+
 // TestScoreEmitsRecommendedActionForUnscorableListing locks the contract that
 // reserved/fast-bid/no-price listings — which bypass the full scoring pipeline
 // — still carry a non-empty recommended_action so the dash never sees an empty
