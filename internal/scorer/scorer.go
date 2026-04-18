@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,30 @@ import (
 )
 
 const minOfferCents = 1000 // EUR10 minimum offer
+
+// accessoryTitleRe matches ASCII/Latin accessory terms using \b word boundaries.
+// Covers EN and NL terms (XOL-21).
+var accessoryTitleRe = regexp.MustCompile(
+	`(?i)\b(adapter|charger|battery|accu|oplader|netvoeding|onderdelen|` +
+		`bag|sleeve|strap|holster|tripod|monopod)\b`,
+)
+
+// accessoryTitleCyrillicRe matches BG Cyrillic accessory terms. RE2 \b does not
+// recognise Unicode word characters, and (?i) does not fold Cyrillic case, so we
+// enumerate both lowercase and title-case forms and use a leading non-Cyrillic-
+// letter assertion as a pseudo-boundary (XOL-21).
+var accessoryTitleCyrillicRe = regexp.MustCompile(
+	`(?:^|[^а-яА-ЯёЁ])(зарядно|Зарядно|батерия|Батерия|зарядното|Зарядното|` +
+		`части|Части|аксесоар|Аксесоар|аксесоари|Аксесоари)`,
+)
+
+// isAccessoryTitle returns true when the listing title is dominated by accessory
+// terms. Only filters obvious accessory-only listings; items with "charger
+// included" alongside a primary device name are not filtered (word boundary match
+// does not check position, so keep the pattern conservative).
+func isAccessoryTitle(title string) bool {
+	return accessoryTitleRe.MatchString(title) || accessoryTitleCyrillicRe.MatchString(title)
+}
 
 type aiScoreCachePayload struct {
 	Relevant     bool    `json:"relevant"`
@@ -103,6 +128,20 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 			ComparablesCount:         0,
 			ComparablesMedianAgeDays: 0,
 			MustHaves:                ScoreMustHaves(listing, search.MustHaves),
+		}
+	}
+
+	// Accessory pre-filter: skip listings whose title indicates they are standalone
+	// accessories (charger, battery, adapter, etc.) — saves an LLM call and keeps
+	// the feed focused on primary devices (XOL-21).
+	if isAccessoryTitle(listing.Title) {
+		return models.ScoredListing{
+			Listing:           listing,
+			Score:             1.0,
+			Reason:            "accessory pre-filtered",
+			ReasoningSource:   "accessory-prefilter",
+			RecommendedAction: ActionSkip,
+			MustHaves:         ScoreMustHaves(listing, search.MustHaves),
 		}
 	}
 
