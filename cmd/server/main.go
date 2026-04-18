@@ -14,6 +14,7 @@ import (
 	"github.com/TechXTT/xolto/internal/api"
 	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/linear"
 	"github.com/TechXTT/xolto/internal/logging"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	marktplaatsmp "github.com/TechXTT/xolto/internal/marketplace/marktplaats"
@@ -23,6 +24,7 @@ import (
 	"github.com/TechXTT/xolto/internal/notify"
 	"github.com/TechXTT/xolto/internal/observability"
 	"github.com/TechXTT/xolto/internal/outreach"
+	"github.com/TechXTT/xolto/internal/plain"
 	"github.com/TechXTT/xolto/internal/reasoner"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
@@ -119,7 +121,7 @@ func main() {
 	if cfg.TwilioAccountSID != "" {
 		twilioSender = support.NewTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, nil)
 	}
-	_ = support.NewSMSEscalator(support.SMSEscalatorConfig{
+	smsEscalator := support.NewSMSEscalator(support.SMSEscalatorConfig{
 		Sender:     twilioSender,
 		FromNumber: cfg.TwilioFromNumber,
 		FounderNum: cfg.FounderSMSNumber,
@@ -137,6 +139,24 @@ func main() {
 	backfillMissionHunts(context.Background(), db, asst, logger)
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
+
+	// Start the Claude classifier worker pool (XOL-55 SUP-4).
+	// Workers consume from the Plain webhook channel, classify events, and
+	// attach Plain labels + Linear issues + draft notes.
+	classifierCtx, classifierCancel := context.WithCancel(context.Background())
+	defer classifierCancel()
+	plainMCPClient := plain.NewPlainMCPClient(cfg.PlainMCPToken)
+	linearMCPClient := linear.NewLinearMCPClient(cfg.LinearAPIKey)
+	anthropicClient := support.NewAnthropicClient(cfg.AnthropicAPIKey, "")
+	classifierWorker := support.NewClassifierWorker(support.ClassifierConfig{
+		Store:       db,
+		PlainMCP:    plainMCPClient,
+		LinearMCP:   linearMCPClient,
+		Anthropic:   anthropicClient,
+		SMSCallback: smsEscalator.NotifyIncident,
+		AppEnv:      cfg.AppEnv,
+	})
+	classifierWorker.Start(classifierCtx, srv.SupportEvents(), cfg.SupportClassifierWorkers)
 	reconcileCtx, reconcileCancel := context.WithCancel(context.Background())
 	defer reconcileCancel()
 	srv.StartBillingReconcileLoop(reconcileCtx, time.Hour)

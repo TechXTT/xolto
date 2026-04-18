@@ -48,6 +48,11 @@ type ServerConfig struct {
 	TwilioAuthToken   string
 	TwilioFromNumber  string
 	FounderSMSNumber  string
+	// Claude classifier (XOL-55 SUP-4).
+	PlainMCPToken            string
+	LinearAPIKey             string
+	AnthropicAPIKey          string
+	SupportClassifierWorkers int
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -95,6 +100,11 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
 		FounderSMSNumber: os.Getenv("FOUNDER_SMS_NUMBER"),
+		// Claude classifier (XOL-55 SUP-4).
+		PlainMCPToken:            os.Getenv("PLAIN_MCP_TOKEN"),
+		LinearAPIKey:             os.Getenv("LINEAR_API_KEY"),
+		AnthropicAPIKey:          os.Getenv("ANTHROPIC_API_KEY"),
+		SupportClassifierWorkers: parseIntDefault(os.Getenv("SUPPORT_CLASSIFIER_WORKERS"), 2),
 	}
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
@@ -136,6 +146,23 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		if cfg.FounderSMSNumber == "" {
 			return cfg, fmt.Errorf("FOUNDER_SMS_NUMBER is required in production")
 		}
+	}
+	// Fail-safe env gate: Claude classifier vars are required in production
+	// (XOL-55 SUP-4). Unset APP_ENV is treated as production (fail-safe default).
+	if isProductionEnv(cfg.AppEnv) {
+		if cfg.PlainMCPToken == "" {
+			return cfg, fmt.Errorf("PLAIN_MCP_TOKEN is required in production")
+		}
+		if cfg.LinearAPIKey == "" {
+			return cfg, fmt.Errorf("LINEAR_API_KEY is required in production")
+		}
+		if cfg.AnthropicAPIKey == "" {
+			return cfg, fmt.Errorf("ANTHROPIC_API_KEY is required in production")
+		}
+	}
+	// SUPPORT_CLASSIFIER_WORKERS must be a positive integer when set.
+	if cfg.SupportClassifierWorkers <= 0 {
+		cfg.SupportClassifierWorkers = 2
 	}
 	return cfg, nil
 }

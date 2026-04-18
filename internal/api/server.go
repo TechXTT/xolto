@@ -118,6 +118,14 @@ func (s *Server) Handler() http.Handler {
 	return handler
 }
 
+// SupportEvents returns the read-only channel of support events emitted by the
+// Plain webhook handler. The classifier worker (SUP-4) consumes from this
+// channel. The channel is never closed by the server; callers drain it until
+// their context is cancelled.
+func (s *Server) SupportEvents() <-chan store.SupportEvent {
+	return s.supportEvents
+}
+
 func (s *Server) StartBillingReconcileLoop(ctx context.Context, interval time.Duration) {
 	if strings.TrimSpace(s.cfg.StripeSecret) == "" {
 		return
