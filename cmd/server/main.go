@@ -80,8 +80,10 @@ func main() {
 	}
 	provider := marktplaatsmp.New(appCfg.Marktplaats)
 	rsn := reasoner.New(appCfg.AI)
+	rsn.SetModel(cfg.AIModelScorer) // XOL-60 SUP-9: per-call-site model override
 	sc := scorer.New(db, appCfg.Scoring, rsn)
 	asst := assistant.New(appCfg, db, provider, sc)
+	asst.SetModels(cfg.AIModelAssistantBrief, cfg.AIModelAssistantDraft, cfg.AIModelAssistantChat) // XOL-60 SUP-9
 
 	// Wire AI usage tracking: each module reports token counts via a callback,
 	// and we persist them to the ai_usage_log table.

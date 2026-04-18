@@ -24,6 +24,7 @@ type UsageCallback func(userID string, missionID int64, callType, model string, 
 
 type Reasoner struct {
 	cfg     config.AIConfig
+	model   string // per-call-site override (XOL-60 SUP-9); defaults to cfg.Model
 	client  *http.Client
 	limiter *rateLimiter
 	onUsage UsageCallback
@@ -32,11 +33,20 @@ type Reasoner struct {
 func New(cfg config.AIConfig) *Reasoner {
 	cfg = config.NormalizeAIConfig(cfg)
 	return &Reasoner{
-		cfg: cfg,
+		cfg:   cfg,
+		model: cfg.Model,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
 		limiter: newRateLimiter(cfg.MaxCallsPerUserPerHour, cfg.MaxCallsGlobalPerHour),
+	}
+}
+
+// SetModel sets the per-call-site model override (AI_MODEL_SCORER).
+// It falls through to cfg.Model when not explicitly set. Call after New().
+func (r *Reasoner) SetModel(model string) {
+	if model != "" {
+		r.model = model
 	}
 }
 
@@ -219,9 +229,33 @@ func (r *Reasoner) callLLM(
 		"prompt_version", r.PromptVersion(),
 	)
 
+	// Strict json_schema response_format for the scorer (XOL-60 SUP-9).
+	// Schema is derived from aiListingAnalysis struct fields.
+	scorerSchema := &jsonSchemaFormat{
+		Type: "json_schema",
+		JSONSchema: jsonSchemaSpec{
+			Name:   "deal_analysis",
+			Strict: true,
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"relevant":           map[string]any{"type": "boolean"},
+					"fair_price_cents":   map[string]any{"type": "integer"},
+					"confidence":         map[string]any{"type": "number"},
+					"reasoning":          map[string]any{"type": "string"},
+					"search_advice":      map[string]any{"type": "string"},
+					"comparable_indexes": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				},
+				"required":             []string{"relevant", "fair_price_cents", "confidence", "reasoning", "search_advice", "comparable_indexes"},
+				"additionalProperties": false,
+			},
+		},
+	}
+
 	payload := chatCompletionRequest{
-		Model:       r.cfg.Model,
-		Temperature: r.cfg.Temperature,
+		Model:          r.model,
+		Temperature:    r.cfg.Temperature,
+		ResponseFormat: scorerSchema,
 		Messages: []chatMessage{
 			{
 				Role: "system",
@@ -286,9 +320,10 @@ func (r *Reasoner) callLLM(
 		return models.DealAnalysis{}, fmt.Errorf("ai response contained no choices")
 	}
 
-	content := extractJSON(completion.Choices[0].Message.Content)
+	// With strict json_schema mode, the model returns valid JSON directly.
+	// No extractJSON fallback — surface parse failures as typed errors.
 	var parsed aiListingAnalysis
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(completion.Choices[0].Message.Content), &parsed); err != nil {
 		return models.DealAnalysis{}, fmt.Errorf("parse ai json: %w", err)
 	}
 
@@ -316,7 +351,7 @@ func (r *Reasoner) callLLM(
 
 func (r *Reasoner) reportUsage(userID string, missionID int64, callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if r.onUsage != nil {
-		r.onUsage(userID, missionID, callType, r.cfg.Model, prompt, completion, latencyMs, success, errMsg)
+		r.onUsage(userID, missionID, callType, r.model, prompt, completion, latencyMs, success, errMsg)
 	}
 }
 
@@ -619,10 +654,23 @@ var stopWords = map[string]bool{
 	"used": true, "good": true, "new": true, "like": true,
 }
 
+// jsonSchemaFormat is the strict json_schema response_format (XOL-60 SUP-9).
+type jsonSchemaFormat struct {
+	Type       string         `json:"type"`
+	JSONSchema jsonSchemaSpec `json:"json_schema"`
+}
+
+type jsonSchemaSpec struct {
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
+}
+
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Temperature float64       `json:"temperature"`
-	Messages    []chatMessage `json:"messages"`
+	Model          string            `json:"model"`
+	Temperature    float64           `json:"temperature"`
+	Messages       []chatMessage     `json:"messages"`
+	ResponseFormat *jsonSchemaFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {

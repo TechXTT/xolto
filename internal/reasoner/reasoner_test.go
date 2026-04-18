@@ -2,9 +2,11 @@ package reasoner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -250,5 +252,132 @@ func TestTokenSetLatinUnchanged(t *testing.T) {
 		if _, ok := tokens[want]; !ok {
 			t.Errorf("expected Latin token %q, not found in %v", want, tokens)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XOL-60 SUP-9: per-call-site model override + json_schema request shape tests
+// ---------------------------------------------------------------------------
+
+// validScorerResponse is an AI response body the test server returns to allow
+// the full callLLM path to complete.
+const validScorerResponse = `{"choices":[{"message":{"role":"assistant","content":"{\"relevant\":true,\"fair_price_cents\":10000,\"confidence\":0.80,\"reasoning\":\"ok\",\"search_advice\":\"\",\"comparable_indexes\":[]}"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+
+// TestScorerRequestShape_ModelOverride verifies that:
+//   - When SetModel is called with a non-empty string, the outgoing request body
+//     carries that overridden model (not cfg.Model).
+//   - The request body has response_format.type=="json_schema".
+//   - The request body has response_format.json_schema.strict==true.
+//   - The schema object inside json_schema is non-empty.
+//
+// (XOL-60 SUP-9 AC)
+func TestScorerRequestShape_ModelOverride(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validScorerResponse))
+	}))
+	defer srv.Close()
+
+	r := New(config.AIConfig{
+		Enabled:               true,
+		APIKey:                "test-key",
+		Model:                 "gpt-4o-mini",
+		BaseURL:               srv.URL,
+		SkipLLMConfidence:     0.99, // ensure LLM is always called
+		MaxCallsPerUserPerHour: 100,
+		MaxCallsGlobalPerHour:  1000,
+	})
+	r.SetModel("gpt-5-mini") // per-call-site override
+	r.client = srv.Client()
+
+	listing := models.Listing{
+		Title:     "Sony A7 III body",
+		Price:     10000,
+		PriceType: "fixed",
+	}
+	search := models.SearchSpec{
+		UserID: "u1",
+		Query:  "sony a7 iii",
+	}
+	_, err := r.Analyze(context.Background(), listing, search, 10000, nil)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+
+	// Assert model override propagated.
+	if got, _ := captured["model"].(string); got != "gpt-5-mini" {
+		t.Errorf("expected model=gpt-5-mini in request, got %q", got)
+	}
+
+	// Assert response_format.type == "json_schema".
+	rf, ok := captured["response_format"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format missing or wrong type: %#v", captured["response_format"])
+	}
+	if got := rf["type"]; got != "json_schema" {
+		t.Errorf("expected response_format.type=json_schema, got %q", got)
+	}
+
+	// Assert response_format.json_schema.strict == true.
+	js, ok := rf["json_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format.json_schema missing or wrong type: %#v", rf["json_schema"])
+	}
+	if got := js["strict"]; got != true {
+		t.Errorf("expected response_format.json_schema.strict=true, got %v", got)
+	}
+
+	// Assert schema is non-empty.
+	schema, ok := js["schema"].(map[string]any)
+	if !ok || len(schema) == 0 {
+		t.Errorf("expected non-empty schema, got %#v", js["schema"])
+	}
+}
+
+// TestScorerRequestShape_ModelFallthrough verifies that when SetModel is NOT
+// called, the outgoing request uses the cfg.Model value (XOL-60 SUP-9 AC).
+func TestScorerRequestShape_ModelFallthrough(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validScorerResponse))
+	}))
+	defer srv.Close()
+
+	r := New(config.AIConfig{
+		Enabled:               true,
+		APIKey:                "test-key",
+		Model:                 "gpt-4o-mini",
+		BaseURL:               srv.URL,
+		SkipLLMConfidence:     0.99,
+		MaxCallsPerUserPerHour: 100,
+		MaxCallsGlobalPerHour:  1000,
+	})
+	// No SetModel call — should fall through to cfg.Model.
+	r.client = srv.Client()
+
+	listing := models.Listing{
+		Title:     "Sony A7 III body",
+		Price:     10000,
+		PriceType: "fixed",
+	}
+	search := models.SearchSpec{
+		UserID: "u1",
+		Query:  "sony a7 iii",
+	}
+	_, err := r.Analyze(context.Background(), listing, search, 10000, nil)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+
+	if got, _ := captured["model"].(string); got != "gpt-4o-mini" {
+		t.Errorf("expected model=gpt-4o-mini (fallthrough), got %q", got)
 	}
 }

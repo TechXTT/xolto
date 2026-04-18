@@ -1,8 +1,14 @@
 package assistant
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/models"
 )
 
@@ -127,5 +133,199 @@ func TestPriceWordPatternBGN(t *testing.T) {
 				t.Errorf("priceWordPattern.MatchString(%q): expected %v, got %v", tc.input, tc.match, got)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XOL-60 SUP-9: per-call-site model override + request shape tests
+// ---------------------------------------------------------------------------
+
+// newMinimalAssistant builds an Assistant with the minimum config required for
+// the LLM HTTP call paths. Store, searcher, and scorer are nil — only the AI
+// HTTP path is exercised by these tests.
+func newMinimalAssistant(baseURL string) *Assistant {
+	cfg := &config.Config{
+		AI: config.NormalizeAIConfig(config.AIConfig{
+			Enabled: true,
+			APIKey:  "test-key",
+			Model:   "gpt-4o-mini",
+			BaseURL: baseURL,
+		}),
+	}
+	a := &Assistant{
+		cfg:        cfg,
+		modelBrief: cfg.AI.Model,
+		modelDraft: cfg.AI.Model,
+		modelChat:  cfg.AI.Model,
+		client: &http.Client{},
+	}
+	return a
+}
+
+// validBriefResponse is a minimal AI response for parseBriefWithAI.
+const validBriefResponse = `{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"Sony A7 III\",\"target_query\":\"sony a7 iii\",\"category_id\":487,\"category\":\"camera\",\"budget_max\":1000,\"budget_stretch\":1100,\"preferred_condition\":[\"good\",\"like_new\"],\"required_features\":[],\"nice_to_have\":[],\"risk_tolerance\":\"balanced\",\"search_queries\":[\"sony a7 iii\"]}"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
+
+// validProseResponse is a minimal AI response for prose paths (no schema).
+const validProseResponse = `{"choices":[{"message":{"role":"assistant","content":"Hi, would you accept EUR 450?"}}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}`
+
+// TestAssistantBriefParserRequestShape_ModelOverride verifies parseBriefWithAI:
+//   - Sends the overridden model (AI_MODEL_ASSISTANT_BRIEF).
+//   - Sends response_format.type=="json_schema" with strict==true and non-empty schema.
+//
+// (XOL-60 SUP-9 AC)
+func TestAssistantBriefParserRequestShape_ModelOverride(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validBriefResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+	a.SetModels("gpt-5-mini", "", "") // override brief model only
+
+	_, err := a.parseBriefWithAI(context.Background(), "u1", "sony a7 iii under 1000")
+	if err != nil {
+		t.Fatalf("parseBriefWithAI() error = %v", err)
+	}
+
+	// Assert model override propagated.
+	if got, _ := captured["model"].(string); got != "gpt-5-mini" {
+		t.Errorf("expected model=gpt-5-mini in request, got %q", got)
+	}
+
+	// Assert response_format.type == "json_schema".
+	rf, ok := captured["response_format"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format missing or wrong type: %#v", captured["response_format"])
+	}
+	if got := rf["type"]; got != "json_schema" {
+		t.Errorf("expected response_format.type=json_schema, got %q", got)
+	}
+
+	// Assert response_format.json_schema.strict == true.
+	js, ok := rf["json_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format.json_schema missing or wrong type: %#v", rf["json_schema"])
+	}
+	if got := js["strict"]; got != true {
+		t.Errorf("expected response_format.json_schema.strict=true, got %v", got)
+	}
+
+	// Assert schema is non-empty.
+	schema, ok := js["schema"].(map[string]any)
+	if !ok || len(schema) == 0 {
+		t.Errorf("expected non-empty schema, got %#v", js["schema"])
+	}
+}
+
+// TestAssistantBriefParserRequestShape_ModelFallthrough verifies that when
+// SetModels is NOT called, parseBriefWithAI uses cfg.AI.Model (XOL-60 SUP-9 AC).
+func TestAssistantBriefParserRequestShape_ModelFallthrough(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validBriefResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+	// No SetModels call.
+
+	_, err := a.parseBriefWithAI(context.Background(), "u1", "sony a7 iii under 1000")
+	if err != nil {
+		t.Fatalf("parseBriefWithAI() error = %v", err)
+	}
+
+	if got, _ := captured["model"].(string); got != "gpt-4o-mini" {
+		t.Errorf("expected model=gpt-4o-mini (fallthrough), got %q", got)
+	}
+}
+
+// TestAssistantDraftRequestShape_NoResponseFormat verifies draftWithAI sends
+// NO response_format key (prose path — no schema change) (XOL-60 SUP-9 AC).
+func TestAssistantDraftRequestShape_NoResponseFormat(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validProseResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+	a.SetModels("", "gpt-5-mini", "") // override draft model
+
+	entry := models.ShortlistEntry{
+		MissionID: 1,
+		ItemID:    "item-1",
+		Title:     "Sony A7 III body",
+		AskPrice:  85000,
+	}
+	_, err := a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeEN)
+	if err != nil {
+		t.Fatalf("draftWithAI() error = %v", err)
+	}
+
+	// Assert model override propagated.
+	if got, _ := captured["model"].(string); got != "gpt-5-mini" {
+		t.Errorf("expected model=gpt-5-mini in draft request, got %q", got)
+	}
+
+	// Prose path: response_format must NOT be present.
+	if _, present := captured["response_format"]; present {
+		t.Errorf("draftWithAI must not send response_format, but it was present: %#v", captured["response_format"])
+	}
+}
+
+// TestAssistantChatRequestShape_NoResponseFormat verifies compareWithAI
+// (chatText) sends NO response_format key (XOL-60 SUP-9 AC).
+func TestAssistantChatRequestShape_NoResponseFormat(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validProseResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+	a.SetModels("", "", "gpt-5-mini") // override chat model
+
+	entries := []models.ShortlistEntry{
+		{
+			MissionID: 1,
+			ItemID:    "item-1",
+			Title:     "Sony A7 III body",
+			AskPrice:  85000,
+		},
+	}
+	_, err := a.compareWithAI(context.Background(), "u1", entries)
+	if err != nil {
+		t.Fatalf("compareWithAI() error = %v", err)
+	}
+
+	// Assert model override propagated.
+	if got, _ := captured["model"].(string); got != "gpt-5-mini" {
+		t.Errorf("expected model=gpt-5-mini in chat request, got %q", got)
+	}
+
+	// Prose path: response_format must NOT be present.
+	if _, present := captured["response_format"]; present {
+		t.Errorf("compareWithAI must not send response_format, but it was present: %#v", captured["response_format"])
 	}
 }
