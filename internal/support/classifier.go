@@ -1,18 +1,19 @@
 // Package support — classifier.go
 //
-// ClassifierWorker consumes the SUP-2 webhook channel, calls Claude to
-// classify the support thread, applies the SUP-3 taxonomy, attaches Plain
-// labels + Linear issue via MCP clients, posts a draft note, and persists
-// results (XOL-55 SUP-4).
+// ClassifierWorker consumes the SUP-2 webhook channel, calls an
+// OpenAI-compatible LLM to classify the support thread, applies the SUP-3
+// taxonomy, attaches Plain labels + Linear issue via MCP clients, posts a
+// draft note, and persists results (XOL-55 SUP-4, migrated to OpenAI-compat
+// path by XOL-59 SUP-8).
 //
 // Per-event flow (mirroring the spec):
 //  1. GetThread from Plain MCP (body + customer metadata).
-//  2. Build prompt + call Claude (claude-opus-4-7, temperature 0.1).
+//  2. Build prompt + call LLM (model from AI_MODEL_CLASSIFIER, temperature 0).
 //  3. Run taxonomy.Classify (incident-keyword override + enum validation).
 //  4. Apply Plain labels via MCP addLabels.
 //  5. If severity == incident: bump priority to urgent + fire SMS callback.
 //  6. If action_needed maps to a Linear project: create Linear issue.
-//  7. Generate draft reply via Claude; post as Plain note (not sent message).
+//  7. Generate draft reply via LLM; post as Plain note (not sent message).
 //  8. Persist via AttachClassification + AttachLinearIssue.
 //  9. Log structured events with latency.
 package support
@@ -39,136 +40,136 @@ import (
 // Sentinel errors
 // ---------------------------------------------------------------------------
 
-// ErrClassifierLLMTimeout is returned when the Claude API call exceeds the
+// ErrClassifierLLMTimeout is returned when the LLM API call exceeds the
 // deadline. Callers use errors.Is to detect and log separately.
 var ErrClassifierLLMTimeout = errors.New("support/classifier: LLM call timed out")
 
-// ErrClassifierLLMBadJSON is returned when Claude's response cannot be parsed
+// ErrClassifierLLMBadJSON is returned when the LLM response cannot be parsed
 // as a valid LLMClassification JSON object.
 var ErrClassifierLLMBadJSON = errors.New("support/classifier: LLM returned invalid JSON")
 
 // ---------------------------------------------------------------------------
-// AnthropicClient interface
+// LLMClient interface
 // ---------------------------------------------------------------------------
 
-// AnthropicClient is the interface used to call Claude. Tests inject a mock;
-// production uses the minimal HTTP implementation in this file.
-type AnthropicClient interface {
-	// Complete sends a prompt to Claude and returns the text response.
-	Complete(ctx context.Context, req AnthropicRequest) (string, error)
+// LLMClient is the interface used to call the OpenAI-compatible LLM.
+// Tests inject a mock; production uses the minimal HTTP implementation below.
+type LLMClient interface {
+	// Complete sends a prompt to the LLM and returns the text response.
+	Complete(ctx context.Context, req LLMRequest) (string, error)
 }
 
-// AnthropicRequest holds the parameters for a single Claude call.
-type AnthropicRequest struct {
-	// Model is the Claude model to use (e.g., "claude-opus-4-7").
+// LLMRequest holds the parameters for a single LLM chat-completions call.
+type LLMRequest struct {
+	// Model is the model to use (e.g., "gpt-5-nano").
 	Model string
 	// MaxTokens caps the response length.
 	MaxTokens int
-	// Temperature controls randomness (0.0–1.0).
+	// Temperature controls randomness (0.0–1.0). Classifier uses 0.
 	Temperature float64
-	// System is the system prompt.
+	// System is the system prompt (mapped to a "system" role message).
 	System string
 	// UserMessage is the user turn.
 	UserMessage string
+	// JSONMode instructs the model to emit a JSON object via
+	// response_format: {"type":"json_object"}. Used for the classifier call.
+	JSONMode bool
 }
 
 // ---------------------------------------------------------------------------
-// Minimal Anthropic HTTP client (no SDK required)
+// Minimal OpenAI-compatible HTTP client
 // ---------------------------------------------------------------------------
 
-const anthropicMessagesEndpoint = "https://api.anthropic.com/v1/messages"
-const anthropicVersion = "2023-06-01"
-
-// httpAnthropicClient is the production implementation of AnthropicClient.
-type httpAnthropicClient struct {
+// openAICompatClient is the production implementation of LLMClient.
+// It posts to <baseURL>/chat/completions using Bearer token auth — the same
+// path used by the reasoner and generator (XOL-59 SUP-8).
+type openAICompatClient struct {
 	apiKey     string
-	endpoint   string
+	baseURL    string
 	httpClient *http.Client
 }
 
-// NewAnthropicClient returns the production AnthropicClient backed by the
-// Anthropic Messages API. endpoint may be empty (uses the default URL).
-func NewAnthropicClient(apiKey, endpoint string) AnthropicClient {
-	ep := anthropicMessagesEndpoint
-	if strings.TrimSpace(endpoint) != "" {
-		ep = endpoint
-	}
-	return &httpAnthropicClient{
+// NewOpenAICompatClient returns the production LLMClient backed by the
+// OpenAI-compatible Chat Completions API at baseURL.
+// baseURL must not end with a trailing slash (e.g. "https://api.openai.com/v1").
+func NewOpenAICompatClient(apiKey, baseURL string) LLMClient {
+	return &openAICompatClient{
 		apiKey:     apiKey,
-		endpoint:   ep,
+		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
-// NewAnthropicClientWithHTTP is used in tests to inject a custom http.Client.
-func NewAnthropicClientWithHTTP(apiKey, endpoint string, httpClient *http.Client) AnthropicClient {
-	ep := anthropicMessagesEndpoint
-	if strings.TrimSpace(endpoint) != "" {
-		ep = endpoint
-	}
-	return &httpAnthropicClient{
+// NewOpenAICompatClientWithHTTP is used in tests to inject a custom http.Client.
+func NewOpenAICompatClientWithHTTP(apiKey, baseURL string, httpClient *http.Client) LLMClient {
+	return &openAICompatClient{
 		apiKey:     apiKey,
-		endpoint:   ep,
+		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: httpClient,
 	}
 }
 
-func (c *httpAnthropicClient) Complete(ctx context.Context, req AnthropicRequest) (string, error) {
+func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (string, error) {
 	body := map[string]any{
 		"model":       req.Model,
-		"max_tokens":  req.MaxTokens,
 		"temperature": req.Temperature,
-		"system":      req.System,
 		"messages": []map[string]any{
+			{"role": "system", "content": req.System},
 			{"role": "user", "content": req.UserMessage},
 		},
 	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("anthropic: marshal request: %w", err)
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
+	if req.JSONMode {
+		body["response_format"] = map[string]string{"type": "json_object"}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(data))
+	data, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("anthropic: build request: %w", err)
+		return "", fmt.Errorf("openai-compat: marshal request: %w", err)
+	}
+
+	endpoint := c.baseURL + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("openai-compat: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", c.apiKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: %w", ErrClassifierLLMTimeout, ctx.Err())
 		}
-		return "", fmt.Errorf("anthropic: request failed: %w", err)
+		return "", fmt.Errorf("openai-compat: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("anthropic: read response: %w", err)
+		return "", fmt.Errorf("openai-compat: read response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return "", fmt.Errorf("openai-compat: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var parsed struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("anthropic: unmarshal response: %w", err)
+		return "", fmt.Errorf("openai-compat: unmarshal response: %w", err)
 	}
-	for _, block := range parsed.Content {
-		if block.Type == "text" {
-			return block.Text, nil
-		}
+	if len(parsed.Choices) == 0 {
+		return "", fmt.Errorf("openai-compat: no choices in response")
 	}
-	return "", fmt.Errorf("anthropic: no text block in response")
+	return parsed.Choices[0].Message.Content, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -183,8 +184,13 @@ type ClassifierConfig struct {
 	PlainMCP plain.MCPClient
 	// LinearMCP is the Linear MCP client (createIssue).
 	LinearMCP linear.MCPClient
-	// Anthropic is the LLM client.
-	Anthropic AnthropicClient
+	// LLM is the OpenAI-compatible LLM client (XOL-59 SUP-8).
+	// The caller is responsible for injecting the resolved classifier model
+	// via LLMModel; all call sites read through config, not hardcoded strings.
+	LLM LLMClient
+	// LLMModel is the model string passed to the LLM (e.g. "gpt-5-nano").
+	// Resolved from AI_MODEL_CLASSIFIER → AI_MODEL → default by the caller.
+	LLMModel string
 	// SMSCallback is invoked on severity=incident events. It is the
 	// SMSEscalator.NotifyIncident method (injected as func to avoid import cycle).
 	SMSCallback func(ctx context.Context, event store.SupportEvent) error
@@ -299,16 +305,25 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	customerEmail := threadInfo.CustomerEmail
 
 	// -------------------------------------------------------------------------
-	// Step 2: Build prompt + call Claude.
+	// Step 2: Build prompt + call LLM (OpenAI-compatible path, XOL-59 SUP-8).
+	//
+	// Incident-keyword hard-floor precedence note:
+	// The keyword override in taxonomy.Classify() (Step 3 below) runs BEFORE
+	// this LLM output is trusted for severity. Even if the LLM returns
+	// severity="low", the keyword matcher will override it to "incident" when
+	// the body/subject contains an incident keyword. The LLM call is therefore
+	// on the non-safety path; latency/quality degrading to "normal priority" is
+	// acceptable because the keyword floor remains active regardless.
 	// -------------------------------------------------------------------------
 	userMsg := BuildClassifierUserPrompt(body, subject, customerEmail)
 	llmStart := time.Now()
-	rawText, err := w.cfg.Anthropic.Complete(ctx, AnthropicRequest{
-		Model:       "claude-opus-4-7",
+	rawText, err := w.cfg.LLM.Complete(ctx, LLMRequest{
+		Model:       w.cfg.LLMModel,
 		MaxTokens:   256,
-		Temperature: 0.1,
+		Temperature: 0,
 		System:      ClassifierSystemPrompt(),
 		UserMessage: userMsg,
+		JSONMode:    true,
 	})
 	llmLatency := time.Since(llmStart)
 	if err != nil {
@@ -317,8 +332,9 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 
 	w.logger.Info(
 		"support_event_classified",
-		"op", "classifier.llm.complete",
+		"op", "support.classifier.openai",
 		"plain_thread_id", event.PlainThreadID,
+		"model", w.cfg.LLMModel,
 		"llm_latency_ms", llmLatency.Milliseconds(),
 	)
 
@@ -454,8 +470,8 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 		body, subject, customerEmail, langHint,
 		string(classification.Category), string(classification.Action),
 	)
-	draftText, err := w.cfg.Anthropic.Complete(ctx, AnthropicRequest{
-		Model:       "claude-opus-4-7",
+	draftText, err := w.cfg.LLM.Complete(ctx, LLMRequest{
+		Model:       w.cfg.LLMModel,
 		MaxTokens:   512,
 		Temperature: 0.3,
 		System:      "You are a helpful, empathetic support agent for xolto.",
@@ -466,6 +482,7 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 			"classifier: draft generation failed (non-fatal)",
 			"op", "classifier.draft.warn",
 			"plain_thread_id", event.PlainThreadID,
+			"model", w.cfg.LLMModel,
 			"error", err,
 		)
 		draftText = "[Draft generation failed — human reply required]"

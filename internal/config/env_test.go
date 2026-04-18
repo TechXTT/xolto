@@ -125,13 +125,13 @@ func setTwilioEnvVars(t *testing.T) {
 	t.Setenv("FOUNDER_SMS_NUMBER", "+15550002222")
 }
 
-// setClassifierEnvVars is a helper that sets all three classifier env vars
-// required in production (XOL-55 SUP-4).
+// setClassifierEnvVars is a helper that sets all classifier env vars
+// required in production (XOL-59 SUP-8: uses shared AI_API_KEY path,
+// no longer requires ANTHROPIC_API_KEY).
 func setClassifierEnvVars(t *testing.T) {
 	t.Helper()
 	t.Setenv("PLAIN_MCP_TOKEN", "mcp-token")
 	t.Setenv("LINEAR_API_KEY", "lin_key")
-	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-key")
 }
 
 // TestTwilioVarsRequiredInProduction verifies all four vars are required in prod.
@@ -215,8 +215,10 @@ func TestTwilioVarsAllPresentInProduction(t *testing.T) {
 // Classifier env-gate tests (XOL-55 SUP-4)
 // ---------------------------------------------------------------------------
 
-// TestClassifierVarsRequiredInProduction verifies that each of the three
-// required classifier vars causes a startup failure when absent in production.
+// TestClassifierVarsRequiredInProduction verifies that each required classifier
+// infra var causes a startup failure when absent in production (XOL-59 SUP-8).
+// ANTHROPIC_API_KEY is no longer required; the classifier uses the shared
+// AI_API_KEY OpenAI-compatible path.
 func TestClassifierVarsRequiredInProduction(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -225,7 +227,6 @@ func TestClassifierVarsRequiredInProduction(t *testing.T) {
 	}{
 		{"missing_plain_mcp_token", "PLAIN_MCP_TOKEN", "PLAIN_MCP_TOKEN"},
 		{"missing_linear_api_key", "LINEAR_API_KEY", "LINEAR_API_KEY"},
-		{"missing_anthropic_api_key", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,16 +248,16 @@ func TestClassifierVarsRequiredInProduction(t *testing.T) {
 	}
 }
 
-// TestClassifierVarsOptionalInDev verifies that the classifier vars are not
-// required when APP_ENV is a recognised non-production value.
+// TestClassifierVarsOptionalInDev verifies that the classifier infra vars are
+// not required when APP_ENV is a recognised non-production value.
+// ANTHROPIC_API_KEY is no longer read at all (XOL-59 SUP-8).
 func TestClassifierVarsOptionalInDev(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("PLAIN_API_KEY", "")
-	// Classifier vars deliberately unset.
+	// Classifier infra vars deliberately unset.
 	t.Setenv("PLAIN_MCP_TOKEN", "")
 	t.Setenv("LINEAR_API_KEY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
 
 	_, err := LoadServerConfigFromEnv()
 	if err != nil {
@@ -295,5 +296,41 @@ func TestSupportClassifierWorkersInvalidInt(t *testing.T) {
 	// parseIntDefault returns the default when the value is not a valid integer.
 	if cfg.SupportClassifierWorkers != 2 {
 		t.Errorf("expected SupportClassifierWorkers=2 (fallback on invalid), got %d", cfg.SupportClassifierWorkers)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AIModelClassifier env tests (XOL-59 SUP-8)
+// ---------------------------------------------------------------------------
+
+// TestAIModelClassifierDefault verifies that AI_MODEL_CLASSIFIER defaults to
+// "gpt-5-nano" when the env var is not set.
+func TestAIModelClassifierDefault(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("AI_MODEL_CLASSIFIER", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelClassifier != "gpt-5-nano" {
+		t.Errorf("expected AIModelClassifier=gpt-5-nano (default), got %q", cfg.AIModelClassifier)
+	}
+}
+
+// TestAIModelClassifierOverride verifies that AI_MODEL_CLASSIFIER is
+// respected when explicitly set, allowing per-call-site model selection.
+func TestAIModelClassifierOverride(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("AI_MODEL_CLASSIFIER", "gpt-4o-mini")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelClassifier != "gpt-4o-mini" {
+		t.Errorf("expected AIModelClassifier=gpt-4o-mini, got %q", cfg.AIModelClassifier)
 	}
 }
