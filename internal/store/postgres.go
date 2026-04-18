@@ -669,6 +669,9 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC)`)
 
+	// XOL-24: outreach thread reply-time tracking.
+	migrateOutreachThreadsPostgres(ctx, db)
+
 	return nil
 }
 

@@ -717,6 +717,9 @@ func migrate(db *sql.DB) error {
 	`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_billing_reconcile_runs_started ON billing_reconcile_runs(started_at DESC)`)
 
+	// XOL-24: outreach thread reply-time tracking.
+	migrateOutreachThreadsSQLite(db)
+
 	return nil
 }
 
