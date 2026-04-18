@@ -1,16 +1,18 @@
 // Package plain provides a minimal GraphQL client for the Plain.com API.
 //
-// Only the five methods needed in Phase 1 (SUP-2) are implemented:
+// Methods implemented:
 //   - UpsertCustomer — ensures a customer record exists for an email address.
 //   - CreateThread   — opens a new support thread under a customer.
 //   - AddLabel       — attaches a label to a thread.
 //   - AddNote        — posts an internal note on a thread.
 //   - SetPriority    — updates the priority of a thread.
+//   - GetThread      — fetches thread metadata (id, title, customer) by thread ID.
+//   - Preflight      — probes the GraphQL endpoint to verify API key health at boot.
 //
 // Authentication uses the PLAIN_API_KEY environment variable. The HTTP client
 // is injected via Client.HTTPClient so tests can substitute an httptest.Server.
 //
-// All five methods call the Plain GraphQL endpoint at
+// All methods call the Plain GraphQL endpoint at
 // https://core-api.uk.plain.com/graphql/v1.
 package plain
 
@@ -44,6 +46,185 @@ func New(apiKey string) *Client {
 		APIKey:   apiKey,
 		Endpoint: defaultEndpoint,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ThreadInfo — normalised view of a Plain thread
+// ---------------------------------------------------------------------------
+
+// ThreadInfo is the normalised view of a Plain thread returned by GetThread.
+type ThreadInfo struct {
+	// ThreadID is the Plain thread identifier (e.g. "th_01ABC").
+	ThreadID string
+	// CustomerEmail is the email of the customer who opened the thread.
+	CustomerEmail string
+	// CustomerName is the display name of the customer (may be empty).
+	CustomerName string
+	// Subject is the thread title / subject line.
+	Subject string
+	// Body is the plain-text body of the thread.
+	// Note: Plain's GraphQL API requires a separate paginated query
+	// (threadTimelineEntries) to retrieve message content. To keep this
+	// implementation within the ~60 LOC budget, Body is left empty here.
+	// The classifier degrades gracefully when Body is empty.
+	Body string
+}
+
+// ---------------------------------------------------------------------------
+// PreflightResult — diagnostic snapshot from Preflight
+// ---------------------------------------------------------------------------
+
+// PreflightResult holds the outcome of a single Preflight probe call.
+type PreflightResult struct {
+	// Configured is true when the API key is non-empty after strings.TrimSpace.
+	Configured bool
+	// Endpoint is the URL that was called (empty when Configured is false).
+	Endpoint string
+	// KeyLen is len(strings.TrimSpace(apiKey)) — length of the trimmed credential.
+	KeyLen int
+	// RawKeyLen is len(apiKey) — includes any surrounding whitespace/newlines.
+	// When RawKeyLen != KeyLen the value contains whitespace padding.
+	RawKeyLen int
+	// StatusCode is the HTTP status returned by the preflight probe.
+	// Zero when no HTTP call was made (e.g. empty key).
+	StatusCode int
+	// BodySnippet is the first 256 characters of the response body, newlines
+	// replaced with spaces, for single-line log safety.
+	BodySnippet string
+	// Err is any wire-level or application-level error from the probe.
+	Err error
+}
+
+// bodySnippet returns the first 256 characters of b with newlines replaced
+// by spaces, safe for single-line structured log fields.
+func bodySnippet(b []byte) string {
+	s := strings.ReplaceAll(string(b), "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	return strings.TrimSpace(s)
+}
+
+// ---------------------------------------------------------------------------
+// Preflight
+// ---------------------------------------------------------------------------
+
+// Preflight probes the GraphQL endpoint with a cheap auth-gated query to
+// verify the configured API key is accepted. It uses { __typename } which
+// requires valid authentication and returns in a single round-trip.
+//
+// Preflight never panics and never crashes the caller — any error is captured
+// in PreflightResult.Err. The caller is responsible for logging.
+//
+// The API key value is never included in PreflightResult or any error message.
+func (c *Client) Preflight(ctx context.Context) PreflightResult {
+	trimmed := strings.TrimSpace(c.APIKey)
+	result := PreflightResult{
+		Configured: trimmed != "",
+		KeyLen:     len(trimmed),
+		RawKeyLen:  len(c.APIKey),
+		Endpoint:   c.endpoint(),
+	}
+
+	if !result.Configured {
+		// No key — skip HTTP call entirely.
+		return result
+	}
+
+	// Issue a minimal auth-gated query. { __typename } is the cheapest possible
+	// introspection query; Plain's GraphQL endpoint returns 200 with
+	// {"data":{"__typename":"Query"}} on success, or 401 on auth failure.
+	query := `{ __typename }`
+	reqBody, _ := json.Marshal(graphQLRequest{Query: query})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(reqBody))
+	if err != nil {
+		result.Err = fmt.Errorf("plain preflight: build request: %w", err)
+		return result
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		result.Err = fmt.Errorf("plain preflight: %w", err)
+		return result
+	}
+	defer resp.Body.Close()
+
+	rawBody, _ := io.ReadAll(resp.Body)
+	result.StatusCode = resp.StatusCode
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.BodySnippet = bodySnippet(rawBody)
+		result.Err = fmt.Errorf("plain preflight: HTTP %d", resp.StatusCode)
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// GetThread
+// ---------------------------------------------------------------------------
+
+// GetThread fetches thread metadata (id, title, customer) from Plain's
+// GraphQL API. The Body field is left empty — retrieving message content
+// requires a separate paginated threadTimelineEntries query which is
+// outside the scope of this method (see ThreadInfo.Body doc comment).
+func (c *Client) GetThread(ctx context.Context, threadID string) (ThreadInfo, error) {
+	query := `
+query GetThread($threadId: ID!) {
+  thread(threadId: $threadId) {
+    id
+    title
+    customer {
+      fullName
+      primaryEmailAddress {
+        email
+      }
+    }
+  }
+}`
+	variables := map[string]any{
+		"threadId": threadID,
+	}
+
+	var resp struct {
+		Data struct {
+			Thread *struct {
+				ID       string `json:"id"`
+				Title    string `json:"title"`
+				Customer struct {
+					FullName            string `json:"fullName"`
+					PrimaryEmailAddress struct {
+						Email string `json:"email"`
+					} `json:"primaryEmailAddress"`
+				} `json:"customer"`
+			} `json:"thread"`
+		} `json:"data"`
+		Errors []graphQLError `json:"errors"`
+	}
+
+	if err := c.do(ctx, query, variables, &resp); err != nil {
+		return ThreadInfo{}, err
+	}
+	if err := firstGraphQLError(resp.Errors); err != nil {
+		return ThreadInfo{}, err
+	}
+	if resp.Data.Thread == nil {
+		return ThreadInfo{}, fmt.Errorf("plain getThread: thread %q not found", threadID)
+	}
+
+	t := resp.Data.Thread
+	info := ThreadInfo{
+		ThreadID:      t.ID,
+		Subject:       t.Title,
+		CustomerName:  t.Customer.FullName,
+		CustomerEmail: t.Customer.PrimaryEmailAddress.Email,
+	}
+	if info.ThreadID == "" {
+		info.ThreadID = threadID
+	}
+	return info, nil
 }
 
 // ---------------------------------------------------------------------------

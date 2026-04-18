@@ -126,11 +126,10 @@ func setTwilioEnvVars(t *testing.T) {
 }
 
 // setClassifierEnvVars is a helper that sets all classifier env vars
-// required in production (XOL-59 SUP-8: uses shared AI_API_KEY path,
-// no longer requires ANTHROPIC_API_KEY).
+// required in production (SUP-10: PLAIN_MCP_TOKEN retired; Plain calls now
+// route through PLAIN_API_KEY via GraphQL).
 func setClassifierEnvVars(t *testing.T) {
 	t.Helper()
-	t.Setenv("PLAIN_MCP_TOKEN", "mcp-token")
 	t.Setenv("LINEAR_API_KEY", "lin_key")
 }
 
@@ -217,15 +216,13 @@ func TestTwilioVarsAllPresentInProduction(t *testing.T) {
 
 // TestClassifierVarsRequiredInProduction verifies that each required classifier
 // infra var causes a startup failure when absent in production (XOL-59 SUP-8).
-// ANTHROPIC_API_KEY is no longer required; the classifier uses the shared
-// AI_API_KEY OpenAI-compatible path.
+// PLAIN_MCP_TOKEN is retired (SUP-10); the classifier uses PLAIN_API_KEY (GraphQL).
 func TestClassifierVarsRequiredInProduction(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		skip    string
 		wantMsg string
 	}{
-		{"missing_plain_mcp_token", "PLAIN_MCP_TOKEN", "PLAIN_MCP_TOKEN"},
 		{"missing_linear_api_key", "LINEAR_API_KEY", "LINEAR_API_KEY"},
 	} {
 		tc := tc
@@ -250,13 +247,12 @@ func TestClassifierVarsRequiredInProduction(t *testing.T) {
 
 // TestClassifierVarsOptionalInDev verifies that the classifier infra vars are
 // not required when APP_ENV is a recognised non-production value.
-// ANTHROPIC_API_KEY is no longer read at all (XOL-59 SUP-8).
+// PLAIN_MCP_TOKEN is retired (SUP-10).
 func TestClassifierVarsOptionalInDev(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("PLAIN_API_KEY", "")
 	// Classifier infra vars deliberately unset.
-	t.Setenv("PLAIN_MCP_TOKEN", "")
 	t.Setenv("LINEAR_API_KEY", "")
 
 	_, err := LoadServerConfigFromEnv()

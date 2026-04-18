@@ -2,15 +2,15 @@
 //
 // ClassifierWorker consumes the SUP-2 webhook channel, calls an
 // OpenAI-compatible LLM to classify the support thread, applies the SUP-3
-// taxonomy, attaches Plain labels + Linear issue via MCP clients, posts a
-// draft note, and persists results (XOL-55 SUP-4, migrated to OpenAI-compat
-// path by XOL-59 SUP-8).
+// taxonomy, attaches Plain labels + Linear issue via the Plain GraphQL API,
+// posts a draft note, and persists results (XOL-55 SUP-4, migrated to
+// OpenAI-compat path by XOL-59 SUP-8, MCP retired by XOL-? SUP-10).
 //
 // Per-event flow (mirroring the spec):
-//  1. GetThread from Plain MCP (body + customer metadata).
+//  1. GetThread from Plain GraphQL API (metadata + subject).
 //  2. Build prompt + call LLM (model from AI_MODEL_CLASSIFIER, temperature 0).
 //  3. Run taxonomy.Classify (incident-keyword override + enum validation).
-//  4. Apply Plain labels via MCP addLabels.
+//  4. Apply Plain labels via GraphQL addLabels.
 //  5. If severity == incident: bump priority to urgent + fire SMS callback.
 //  6. If action_needed maps to a Linear project: create Linear issue.
 //  7. Generate draft reply via LLM; post as Plain note (not sent message).
@@ -173,6 +173,25 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 }
 
 // ---------------------------------------------------------------------------
+// plainSupportAPI — minimal Plain interface for the classifier
+// ---------------------------------------------------------------------------
+
+// plainSupportAPI is the interface the classifier depends on for Plain calls.
+// Tests inject a mock; production uses plain.SupportAdapter.
+// Method signatures are kept identical to the former plain.MCPClient so the
+// classifier business logic (processEvent) needs no changes beyond field rename.
+type plainSupportAPI interface {
+	// GetThread fetches thread metadata (subject, customer) by thread ID.
+	GetThread(ctx context.Context, threadID string) (plain.ThreadInfo, error)
+	// AddLabels attaches label type IDs to the thread.
+	AddLabels(ctx context.Context, threadID string, labelTypeIDs []string) error
+	// AddNote posts an internal note (draft reply) on the thread.
+	AddNote(ctx context.Context, threadID, body string) error
+	// SetPriority sets the thread priority. Pass "urgent" for incidents.
+	SetPriority(ctx context.Context, threadID, priority string) error
+}
+
+// ---------------------------------------------------------------------------
 // ClassifierConfig
 // ---------------------------------------------------------------------------
 
@@ -180,8 +199,9 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 type ClassifierConfig struct {
 	// Store is used to persist classification and linear issue.
 	Store store.SupportEventStore
-	// PlainMCP is the Plain MCP client (addLabels, addNote, setPriority, getThread).
-	PlainMCP plain.MCPClient
+	// PlainAPI is the Plain GraphQL API client (addLabels, addNote, setPriority, getThread).
+	// Production uses plain.NewSupportAdapter(plain.New(apiKey)).
+	PlainAPI plainSupportAPI
 	// LinearMCP is the Linear MCP client (createIssue).
 	LinearMCP linear.MCPClient
 	// LLM is the OpenAI-compatible LLM client (XOL-59 SUP-8).
@@ -282,25 +302,15 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	start := time.Now()
 
 	// -------------------------------------------------------------------------
-	// Step 1: Load full thread from Plain MCP.
+	// Step 1: Load full thread from Plain GraphQL API.
 	// -------------------------------------------------------------------------
-	threadInfo, err := w.cfg.PlainMCP.GetThread(ctx, event.PlainThreadID)
+	threadInfo, err := w.cfg.PlainAPI.GetThread(ctx, event.PlainThreadID)
 	if err != nil {
-		// Enrich the warn log with HTTP diagnostics when available (SUP-60).
-		warnAttrs := []any{
+		w.logger.Warn("classifier: getThread failed, proceeding with stored data",
 			"op", "classifier.get_thread.warn",
 			"plain_thread_id", event.PlainThreadID,
 			"error", err,
-		}
-		var mcpErr *plain.MCPCallError
-		if errors.As(err, &mcpErr) {
-			warnAttrs = append(warnAttrs,
-				"endpoint", mcpErr.Endpoint,
-				"status_code", mcpErr.StatusCode,
-				"body_snippet", mcpErr.BodySnippet,
-			)
-		}
-		w.logger.Warn("classifier: getThread failed, proceeding with stored data", warnAttrs...)
+		)
 		// Degrade gracefully: use the thread ID as body fallback so we can
 		// still classify with minimal context.
 		threadInfo = plain.ThreadInfo{
@@ -379,7 +389,7 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	// -------------------------------------------------------------------------
 	labelTypeIDs := classificationToLabelTypeIDs(classification)
 	if len(labelTypeIDs) > 0 {
-		if err := w.cfg.PlainMCP.AddLabels(ctx, event.PlainThreadID, labelTypeIDs); err != nil {
+		if err := w.cfg.PlainAPI.AddLabels(ctx, event.PlainThreadID, labelTypeIDs); err != nil {
 			w.logger.Warn(
 				"classifier: addLabels failed (non-fatal)",
 				"op", "classifier.add_labels.warn",
@@ -393,7 +403,7 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	// Step 5: Incident path — bump priority + fire SMS callback.
 	// -------------------------------------------------------------------------
 	if classification.Severity == SeverityIncident {
-		if err := w.cfg.PlainMCP.SetPriority(ctx, event.PlainThreadID, "urgent"); err != nil {
+		if err := w.cfg.PlainAPI.SetPriority(ctx, event.PlainThreadID, "urgent"); err != nil {
 			w.logger.Warn(
 				"classifier: setPriority urgent failed (non-fatal)",
 				"op", "classifier.set_priority.warn",
@@ -498,7 +508,7 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	}
 
 	noteBody := buildNoteBody(draftText, classification, linearIssueURL)
-	if err := w.cfg.PlainMCP.AddNote(ctx, event.PlainThreadID, noteBody); err != nil {
+	if err := w.cfg.PlainAPI.AddNote(ctx, event.PlainThreadID, noteBody); err != nil {
 		w.logger.Warn(
 			"classifier: addNote failed (non-fatal)",
 			"op", "classifier.add_note.warn",
