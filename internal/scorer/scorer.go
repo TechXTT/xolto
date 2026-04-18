@@ -266,6 +266,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	}
 
 	recommendedAction := ComputeVerdict(
+		listing.MarketplaceID,
 		score,
 		analysis.Confidence,
 		comparables,
