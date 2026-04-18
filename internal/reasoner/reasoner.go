@@ -231,12 +231,12 @@ func (r *Reasoner) callLLM(
 
 	// Strict json_schema response_format for the scorer (XOL-60 SUP-9).
 	// Schema is derived from aiListingAnalysis struct fields.
-	scorerSchema := &jsonSchemaFormat{
-		Type: "json_schema",
-		JSONSchema: jsonSchemaSpec{
-			Name:   "deal_analysis",
-			Strict: true,
-			Schema: map[string]any{
+	scorerSchema := map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "deal_analysis",
+			"strict": true,
+			"schema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"relevant":           map[string]any{"type": "boolean"},
@@ -252,19 +252,23 @@ func (r *Reasoner) callLLM(
 		},
 	}
 
-	payload := chatCompletionRequest{
-		Model:          r.model,
-		Temperature:    r.cfg.Temperature,
-		ResponseFormat: scorerSchema,
-		Messages: []chatMessage{
+	// gpt-5 reasoning models (nano/mini/full) reject temperature != 1 and consume
+	// hidden reasoning tokens before visible output. Build the payload as a plain
+	// map — omitting temperature entirely — and set max_completion_tokens to give
+	// the reasoning budget enough room. Mirrors the pattern in musthave.go (XOL-65).
+	payload := map[string]any{
+		"model": r.model,
+		// 2048 covers reasoning + the deal_analysis JSON payload.
+		"max_completion_tokens": 2048,
+		"messages": []map[string]any{
 			{
-				Role: "system",
+				"role": "system",
 				// Wedge context: primary market is BG/OLX.bg; user is a Bulgarian buyer.
 				// BGN pricing correctness is trust-critical: prices in input are always
 				// integer EUR cents (e.g. 16361 = EUR 163.61 ≈ BGN 320 at peg 1.95583).
 				// Legacy Marktplaats (NL) listings may appear as comparables — treat equally.
 				// Do NOT present NL as the design center; BG/OLX.bg is primary (XOL-37 M3-C).
-				Content: "You analyze secondhand marketplace listings for a Bulgarian buyer on OLX.bg (primary market) " +
+				"content": "You analyze secondhand marketplace listings for a Bulgarian buyer on OLX.bg (primary market) " +
 					"and other used-electronics marketplaces. " +
 					"All numeric prices in the input are integer euro cents (e.g. 16361 means EUR 163.61, " +
 					"approximately BGN 320 at the fixed peg of 1 EUR = 1.95583 BGN). " +
@@ -275,10 +279,11 @@ func (r *Reasoner) callLLM(
 					"Reply with strict JSON only.",
 			},
 			{
-				Role:    "user",
-				Content: buildPrompt(listing, search, marketAvg, comparables, r.cfg.SearchAdvice),
+				"role":    "user",
+				"content": buildPrompt(listing, search, marketAvg, comparables, r.cfg.SearchAdvice),
 			},
 		},
+		"response_format": scorerSchema,
 	}
 
 	body, err := json.Marshal(payload)
@@ -614,21 +619,6 @@ func absInt(v int) int {
 	return v
 }
 
-func extractJSON(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "{") {
-		return value
-	}
-
-	start := strings.IndexByte(value, '{')
-	end := strings.LastIndexByte(value, '}')
-	if start >= 0 && end > start {
-		return value[start : end+1]
-	}
-
-	return value
-}
-
 func clamp(v, min, max float64) float64 {
 	if v < min {
 		return min
@@ -652,25 +642,6 @@ var stopWords = map[string]bool{
 	"this": true, "that": true, "are": true, "has": true, "have": true,
 	"in": true, "is": true, "it": true, "on": true, "at": true,
 	"used": true, "good": true, "new": true, "like": true,
-}
-
-// jsonSchemaFormat is the strict json_schema response_format (XOL-60 SUP-9).
-type jsonSchemaFormat struct {
-	Type       string         `json:"type"`
-	JSONSchema jsonSchemaSpec `json:"json_schema"`
-}
-
-type jsonSchemaSpec struct {
-	Name   string         `json:"name"`
-	Strict bool           `json:"strict"`
-	Schema map[string]any `json:"schema"`
-}
-
-type chatCompletionRequest struct {
-	Model          string            `json:"model"`
-	Temperature    float64           `json:"temperature"`
-	Messages       []chatMessage     `json:"messages"`
-	ResponseFormat *jsonSchemaFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
