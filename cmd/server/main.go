@@ -140,19 +140,23 @@ func main() {
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
 
-	// Start the Claude classifier worker pool (XOL-55 SUP-4).
+	// Start the support classifier worker pool (XOL-59 SUP-8).
 	// Workers consume from the Plain webhook channel, classify events, and
 	// attach Plain labels + Linear issues + draft notes.
+	// The classifier now uses the shared OpenAI-compatible AI_API_KEY path
+	// instead of a dedicated Anthropic key. Model is resolved from
+	// AI_MODEL_CLASSIFIER → AI_MODEL → default (gpt-4o-mini).
 	classifierCtx, classifierCancel := context.WithCancel(context.Background())
 	defer classifierCancel()
 	plainMCPClient := plain.NewPlainMCPClient(cfg.PlainMCPToken)
 	linearMCPClient := linear.NewLinearMCPClient(cfg.LinearAPIKey)
-	anthropicClient := support.NewAnthropicClient(cfg.AnthropicAPIKey, "")
+	classifierLLMClient := support.NewOpenAICompatClient(cfg.AIAPIKey, cfg.AIBaseURL)
 	classifierWorker := support.NewClassifierWorker(support.ClassifierConfig{
 		Store:       db,
 		PlainMCP:    plainMCPClient,
 		LinearMCP:   linearMCPClient,
-		Anthropic:   anthropicClient,
+		LLM:         classifierLLMClient,
+		LLMModel:    cfg.AIModelClassifier,
 		SMSCallback: smsEscalator.NotifyIncident,
 		AppEnv:      cfg.AppEnv,
 	})

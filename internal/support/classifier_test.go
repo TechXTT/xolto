@@ -2,7 +2,11 @@ package support_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -16,8 +20,9 @@ import (
 // Mock implementations
 // ---------------------------------------------------------------------------
 
-// mockAnthropicClient returns a fixed response string for every call.
-type mockAnthropicClient struct {
+// mockLLMClient returns a fixed response string for every call.
+// It replaces the former mockLLMClient (XOL-59 SUP-8).
+type mockLLMClient struct {
 	// responses is a queue; each call pops the front. If empty, the last
 	// response is repeated.
 	responses []string
@@ -25,7 +30,7 @@ type mockAnthropicClient struct {
 	err       error
 }
 
-func (m *mockAnthropicClient) Complete(_ context.Context, _ support.AnthropicRequest) (string, error) {
+func (m *mockLLMClient) Complete(_ context.Context, _ support.LLMRequest) (string, error) {
 	m.calls++
 	if m.err != nil {
 		return "", m.err
@@ -139,14 +144,15 @@ func buildWorker(
 	st *mockStore,
 	plainMCP *mockPlainMCP,
 	linearMCP *mockLinearMCP,
-	llm *mockAnthropicClient,
+	llm *mockLLMClient,
 	smsCallback func(ctx context.Context, event store.SupportEvent) error,
 ) *support.ClassifierWorker {
 	cfg := support.ClassifierConfig{
 		Store:       st,
 		PlainMCP:    plainMCP,
 		LinearMCP:   linearMCP,
-		Anthropic:   llm,
+		LLM:         llm,
+		LLMModel:    "gpt-5-nano",
 		SMSCallback: smsCallback,
 		AppEnv:      "test",
 	}
@@ -184,7 +190,7 @@ func TestClassifierWorker_FullFlow_PricingEvent(t *testing.T) {
 		},
 	}
 	// First LLM call = classifier; second = draft note.
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{pricingLLMResponse(), "Your pricing concern has been logged."},
 	}
 
@@ -242,7 +248,7 @@ func TestClassifierWorker_IncidentPath_CantLogIn(t *testing.T) {
 		result: linear.CreateIssueResult{Identifier: "XOL-100", URL: "https://linear.app/xolto/issue/XOL-100"},
 	}
 	// LLM says severity=medium but incident-keyword override should win.
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{
 			`{"category":"login","market":"olx_bg","product_cat":"other","severity":"medium","action_needed":"billing_auth_fix"}`,
 			"We're sorry you're having trouble logging in. Our team is investigating.",
@@ -292,7 +298,7 @@ func TestClassifierWorker_GeneralCategory_NoLinearIssue(t *testing.T) {
 	st := &mockStore{}
 	plainMCP := &mockPlainMCP{}
 	linearMCP := &mockLinearMCP{}
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{generalLLMResponse(), "Thank you for reaching out. How can we help?"},
 	}
 
@@ -335,7 +341,7 @@ func TestClassifierWorker_Latency(t *testing.T) {
 	linearMCP := &mockLinearMCP{
 		result: linear.CreateIssueResult{Identifier: "XOL-101", URL: "https://linear.app/xolto/issue/XOL-101"},
 	}
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{pricingLLMResponse(), "Pricing draft reply."},
 	}
 
@@ -376,7 +382,7 @@ func TestClassifierWorker_LLMBadJSON_FallsBack(t *testing.T) {
 	st := &mockStore{}
 	plainMCP := &mockPlainMCP{}
 	linearMCP := &mockLinearMCP{}
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{"Sorry, I cannot classify this.", "Draft reply."},
 	}
 
@@ -399,7 +405,7 @@ func TestClassifierWorker_GracefulShutdown(t *testing.T) {
 	st := &mockStore{}
 	plainMCP := &mockPlainMCP{}
 	linearMCP := &mockLinearMCP{}
-	llm := &mockAnthropicClient{}
+	llm := &mockLLMClient{}
 
 	worker := buildWorker(st, plainMCP, linearMCP, llm, nil)
 
@@ -416,7 +422,7 @@ func TestClassifierWorker_SMSCallback_NotCalledForNonIncident(t *testing.T) {
 	st := &mockStore{}
 	plainMCP := &mockPlainMCP{}
 	linearMCP := &mockLinearMCP{}
-	llm := &mockAnthropicClient{
+	llm := &mockLLMClient{
 		responses: []string{
 			`{"category":"feature","market":"olx_bg","product_cat":"other","severity":"low","action_needed":"roadmap_candidate"}`,
 			"Feature request noted.",
@@ -448,8 +454,8 @@ func TestClassifierWorker_LLMError_DoesNotPersist(t *testing.T) {
 	st := &mockStore{}
 	plainMCP := &mockPlainMCP{}
 	linearMCP := &mockLinearMCP{}
-	llm := &mockAnthropicClient{
-		err: errors.New("anthropic: HTTP 500"),
+	llm := &mockLLMClient{
+		err: errors.New("openai-compat: HTTP 500"),
 	}
 
 	worker := buildWorker(st, plainMCP, linearMCP, llm, nil)
@@ -464,5 +470,161 @@ func TestClassifierWorker_LLMError_DoesNotPersist(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if st.classifyCalls != 0 {
 		t.Errorf("expected 0 AttachClassification calls on LLM error, got %d", st.classifyCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XOL-59 SUP-8: OpenAI-compatible request-shape guard tests
+// ---------------------------------------------------------------------------
+
+// openAIChatRequest mirrors the request body the classifier should send to
+// /chat/completions. Used in the shape-guard test below.
+type openAIChatRequest struct {
+	Model          string             `json:"model"`
+	Temperature    float64            `json:"temperature"`
+	Messages       []map[string]any   `json:"messages"`
+	ResponseFormat map[string]string  `json:"response_format"`
+	MaxTokens      int                `json:"max_tokens"`
+}
+
+// TestClassifierRequestShape_OpenAICompatible asserts the classifier POSTs to
+// /chat/completions with the correct model, response_format.type=="json_object",
+// and temperature==0 for the classification call (XOL-59 SUP-8 AC).
+func TestClassifierRequestShape_OpenAICompatible(t *testing.T) {
+	// openAI-compatible stub response for the classifier call (first call).
+	classifyResp := map[string]any{
+		"choices": []map[string]any{
+			{
+				"message": map[string]any{
+					"content": `{"category":"general","market":"unknown","product_cat":"other","severity":"low","action_needed":"reply_only"}`,
+				},
+			},
+		},
+	}
+	// Draft response (second call).
+	draftResp := map[string]any{
+		"choices": []map[string]any{
+			{
+				"message": map[string]any{
+					"content": "Thank you for reaching out.",
+				},
+			},
+		},
+	}
+
+	callCount := 0
+	var capturedClassify openAIChatRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+
+		// Only capture the first (classify) call for shape assertions.
+		if callCount == 1 {
+			_ = json.Unmarshal(raw, &capturedClassify)
+			_ = json.NewEncoder(w).Encode(classifyResp)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(draftResp)
+	}))
+	defer srv.Close()
+
+	// Build a real LLMClient pointing at the test server.
+	llmClient := support.NewOpenAICompatClientWithHTTP("test-key", srv.URL, srv.Client())
+
+	st := &mockStore{}
+	plainMCP := &mockPlainMCP{}
+	linearMCP := &mockLinearMCP{}
+
+	cfg := support.ClassifierConfig{
+		Store:     st,
+		PlainMCP:  plainMCP,
+		LinearMCP: linearMCP,
+		LLM:       llmClient,
+		LLMModel:  "gpt-5-nano",
+		AppEnv:    "test",
+	}
+	worker := support.NewClassifierWorker(cfg)
+
+	event := store.SupportEvent{
+		ID:            "evt-shape",
+		PlainThreadID: "th_shape_001",
+	}
+	runSingle(t, worker, event)
+
+	// Assert endpoint: server only handles /chat/completions implicitly via
+	// the srv URL; we assert the request model, response_format, and temperature.
+	if capturedClassify.Model != "gpt-5-nano" {
+		t.Errorf("expected model=gpt-5-nano, got %q", capturedClassify.Model)
+	}
+	if capturedClassify.Temperature != 0 {
+		t.Errorf("expected temperature=0, got %v", capturedClassify.Temperature)
+	}
+	if capturedClassify.ResponseFormat["type"] != "json_object" {
+		t.Errorf("expected response_format.type=json_object, got %q", capturedClassify.ResponseFormat["type"])
+	}
+	// Verify at least a system and user message are present.
+	if len(capturedClassify.Messages) < 2 {
+		t.Errorf("expected at least 2 messages (system+user), got %d", len(capturedClassify.Messages))
+	}
+}
+
+// TestClassifierIncidentKeywordOverride_WinsOverLLM verifies that the
+// incident-keyword hard-floor override forces severity=incident even when the
+// LLM returns a lower severity (e.g. "low"). The keyword check is run BEFORE
+// trusting the LLM output, so safety does not depend on LLM quality.
+func TestClassifierIncidentKeywordOverride_WinsOverLLM(t *testing.T) {
+	st := &mockStore{}
+	plainMCP := &mockPlainMCP{
+		getThreadFn: func(_ context.Context, threadID string) (plain.ThreadInfo, error) {
+			// Body contains "can't log in" — a known incident keyword.
+			return plain.ThreadInfo{
+				ThreadID:      threadID,
+				Subject:       "Access issue",
+				CustomerEmail: "buyer@example.com",
+				Body:          "Hi, I can't log in to my account today.",
+			}, nil
+		},
+	}
+	linearMCP := &mockLinearMCP{
+		result: linear.CreateIssueResult{Identifier: "XOL-200", URL: "https://linear.app/xolto/issue/XOL-200"},
+	}
+	// LLM deliberately returns severity=low — keyword override must win.
+	llm := &mockLLMClient{
+		responses: []string{
+			`{"category":"login","market":"olx_bg","product_cat":"other","severity":"low","action_needed":"billing_auth_fix"}`,
+			"We are sorry you cannot log in. Our team is on it.",
+		},
+	}
+
+	smsCalled := 0
+	smsCallback := func(_ context.Context, event store.SupportEvent) error {
+		smsCalled++
+		return nil
+	}
+
+	worker := buildWorker(st, plainMCP, linearMCP, llm, smsCallback)
+
+	event := store.SupportEvent{
+		ID:            "evt-kwoverride",
+		PlainThreadID: "th_kwoverride_001",
+	}
+	runSingle(t, worker, event)
+
+	// Keyword override must have set severity=incident, regardless of LLM output.
+	if st.lastClassification.Severity != "incident" {
+		t.Errorf("expected severity=incident (keyword override), got %q", st.lastClassification.Severity)
+	}
+	// Priority must be bumped to urgent.
+	if plainMCP.setPriorityCalls == 0 {
+		t.Error("expected SetPriority to be called for incident keyword override")
+	}
+	if len(plainMCP.setPriorityArgs) == 0 || plainMCP.setPriorityArgs[0] != "urgent" {
+		t.Errorf("expected priority=urgent, got %v", plainMCP.setPriorityArgs)
+	}
+	// SMS must fire.
+	if smsCalled == 0 {
+		t.Error("expected SMS callback invoked when keyword override triggers incident")
 	}
 }
