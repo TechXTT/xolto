@@ -243,7 +243,6 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 
 	payload := map[string]any{
 		"model":                 e.cfg.Model,
-		"temperature":           0,
 		"max_completion_tokens": 512,
 		"messages": []map[string]any{
 			{"role": "system", "content": systemPrompt},

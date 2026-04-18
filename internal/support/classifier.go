@@ -110,9 +110,11 @@ func NewOpenAICompatClientWithHTTP(apiKey, baseURL string, httpClient *http.Clie
 }
 
 func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (string, error) {
+	// gpt-5 reasoning models (nano/mini/full) only support temperature=1 (default),
+	// so we omit the field entirely and rely on response_format + json_schema for
+	// determinism. Older chat-completions models use 1 by default too.
 	body := map[string]any{
-		"model":       req.Model,
-		"temperature": req.Temperature,
+		"model": req.Model,
 		"messages": []map[string]any{
 			{"role": "system", "content": req.System},
 			{"role": "user", "content": req.UserMessage},
