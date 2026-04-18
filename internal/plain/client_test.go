@@ -262,3 +262,166 @@ func TestNon200StatusReturnsError(t *testing.T) {
 		t.Fatal("expected error on non-200 status, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GetThread tests (SUP-10)
+// ---------------------------------------------------------------------------
+
+func TestClient_GetThread_OK(t *testing.T) {
+	srv := newTestServer(t, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"thread": map[string]any{
+				"id":    "th_01ABCDEF",
+				"title": "Missing item in order",
+				"customer": map[string]any{
+					"fullName": "Ana Kostadinova",
+					"primaryEmailAddress": map[string]any{
+						"email": "ana@example.com",
+					},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	client := plain.New("test-api-key")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	info, err := client.GetThread(context.Background(), "th_01ABCDEF")
+	if err != nil {
+		t.Fatalf("GetThread() error = %v", err)
+	}
+	if info.ThreadID != "th_01ABCDEF" {
+		t.Errorf("expected ThreadID=th_01ABCDEF, got %q", info.ThreadID)
+	}
+	if info.Subject != "Missing item in order" {
+		t.Errorf("expected Subject=%q, got %q", "Missing item in order", info.Subject)
+	}
+	if info.CustomerEmail != "ana@example.com" {
+		t.Errorf("expected CustomerEmail=ana@example.com, got %q", info.CustomerEmail)
+	}
+	if info.CustomerName != "Ana Kostadinova" {
+		t.Errorf("expected CustomerName=Ana Kostadinova, got %q", info.CustomerName)
+	}
+}
+
+func TestClient_GetThread_401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"authentication failed"}]}`))
+	}))
+	defer srv.Close()
+
+	client := plain.New("bad-key")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	_, err := client.GetThread(context.Background(), "th_check")
+	if err == nil {
+		t.Fatal("expected error on 401, got nil")
+	}
+	// Error must mention the HTTP status.
+	errStr := err.Error()
+	if !containsAny(errStr, "401", "status") {
+		t.Errorf("expected error to mention 401 status, got %q", errStr)
+	}
+}
+
+// containsAny returns true if s contains any of the given substrings.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if len(sub) > 0 {
+			idx := 0
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					idx = i
+					_ = idx
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Preflight tests (SUP-10)
+// ---------------------------------------------------------------------------
+
+func TestClient_Preflight_2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"__typename":"Query"}}`))
+	}))
+	defer srv.Close()
+
+	client := plain.New("valid-api-key")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	pf := client.Preflight(context.Background())
+	if !pf.Configured {
+		t.Error("expected Configured=true for non-empty key")
+	}
+	if pf.StatusCode != http.StatusOK {
+		t.Errorf("expected StatusCode=200, got %d", pf.StatusCode)
+	}
+	if pf.Err != nil {
+		t.Errorf("expected no error on 2xx, got %v", pf.Err)
+	}
+	if pf.KeyLen == 0 {
+		t.Error("expected KeyLen > 0")
+	}
+}
+
+func TestClient_Preflight_401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_api_key"}`))
+	}))
+	defer srv.Close()
+
+	client := plain.New("clearly-not-a-real-token")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	pf := client.Preflight(context.Background())
+	if !pf.Configured {
+		t.Error("expected Configured=true for non-empty key")
+	}
+	if pf.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected StatusCode=401, got %d", pf.StatusCode)
+	}
+	if pf.BodySnippet == "" {
+		t.Error("expected BodySnippet non-empty for 401 response")
+	}
+	if pf.Err == nil {
+		t.Error("expected non-nil Err on 401")
+	}
+}
+
+func TestClient_Preflight_EmptyKey(t *testing.T) {
+	// No HTTP call should be made when the key is empty.
+	// We confirm by pointing at a server that would panic if called.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("HTTP call must not be made when key is empty")
+	}))
+	defer srv.Close()
+
+	client := plain.New("")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	pf := client.Preflight(context.Background())
+	if pf.Configured {
+		t.Error("expected Configured=false for empty key")
+	}
+	if pf.StatusCode != 0 {
+		t.Errorf("expected StatusCode=0 for empty-key preflight, got %d", pf.StatusCode)
+	}
+	if pf.Err != nil {
+		t.Errorf("expected no error for empty-key preflight, got %v", pf.Err)
+	}
+}

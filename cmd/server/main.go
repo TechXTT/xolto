@@ -142,29 +142,28 @@ func main() {
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
 
-	// Start the support classifier worker pool (XOL-59 SUP-8).
+	// Start the support classifier worker pool (XOL-59 SUP-8, MCP retired SUP-10).
 	// Workers consume from the Plain webhook channel, classify events, and
 	// attach Plain labels + Linear issues + draft notes.
-	// The classifier now uses the shared OpenAI-compatible AI_API_KEY path
-	// instead of a dedicated Anthropic key. Model is resolved from
-	// AI_MODEL_CLASSIFIER → AI_MODEL → default (gpt-4o-mini).
+	// All Plain calls route through the GraphQL client (PLAIN_API_KEY).
+	// Model is resolved from AI_MODEL_CLASSIFIER → AI_MODEL → default (gpt-4o-mini).
 	classifierCtx, classifierCancel := context.WithCancel(context.Background())
 	defer classifierCancel()
-	plainMCPClient := plain.NewPlainMCPClient(cfg.PlainMCPToken)
+	plainGQLClient := plain.New(cfg.PlainAPIKey)
 
-	// SUP-60: boot preflight — log credential health without logging the value.
+	// Boot preflight — probe the GraphQL endpoint to verify API key health.
 	// Server must continue to boot even when preflight fails.
 	{
 		pfCtx, pfCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		pf := plainMCPClient.Preflight(pfCtx)
+		pf := plainGQLClient.Preflight(pfCtx)
 		pfCancel()
 
 		pfAttrs := []any{
-			"op", "plain_mcp.preflight",
+			"op", "plain.preflight",
 			"configured", pf.Configured,
 			"endpoint", pf.Endpoint,
-			"token_len", pf.TokenLen,
-			"raw_token_len", pf.RawTokenLen,
+			"key_len", pf.KeyLen,
+			"raw_key_len", pf.RawKeyLen,
 			"status_code", pf.StatusCode,
 			"body_snippet", pf.BodySnippet,
 		}
@@ -172,26 +171,27 @@ func main() {
 			pfAttrs = append(pfAttrs, "error", pf.Err)
 		}
 		if pf.Configured && pf.StatusCode >= 200 && pf.StatusCode < 300 {
-			logger.Info("plain MCP preflight OK", pfAttrs...)
+			logger.Info("plain API preflight OK", pfAttrs...)
 		} else {
-			logger.Warn("plain MCP preflight failed", pfAttrs...)
+			logger.Warn("plain API preflight failed", pfAttrs...)
 		}
 
-		if pf.RawTokenLen != pf.TokenLen {
+		if pf.RawKeyLen != pf.KeyLen {
 			logger.Warn(
-				"plain MCP token has surrounding whitespace — trim before setting env var",
-				"op", "plain_mcp.token_whitespace_detected",
-				"token_len", pf.TokenLen,
-				"raw_token_len", pf.RawTokenLen,
+				"PLAIN_API_KEY has surrounding whitespace — trim before setting env var",
+				"op", "plain.key_whitespace_detected",
+				"key_len", pf.KeyLen,
+				"raw_key_len", pf.RawKeyLen,
 			)
 		}
 	}
 
+	plainSupportAdapter := plain.NewSupportAdapter(plainGQLClient)
 	linearMCPClient := linear.NewLinearMCPClient(cfg.LinearAPIKey)
 	classifierLLMClient := support.NewOpenAICompatClient(cfg.AIAPIKey, cfg.AIBaseURL)
 	classifierWorker := support.NewClassifierWorker(support.ClassifierConfig{
 		Store:       db,
-		PlainMCP:    plainMCPClient,
+		PlainAPI:    plainSupportAdapter,
 		LinearMCP:   linearMCPClient,
 		LLM:         classifierLLMClient,
 		LLMModel:    cfg.AIModelClassifier,

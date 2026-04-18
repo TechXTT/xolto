@@ -48,16 +48,12 @@ type ServerConfig struct {
 	TwilioAuthToken   string
 	TwilioFromNumber  string
 	FounderSMSNumber  string
-	// Support classifier (XOL-59 SUP-8).
-	// PlainMCPToken and LinearAPIKey are required in production.
+	// Support classifier (XOL-59 SUP-8, MCP retired SUP-10).
+	// LinearAPIKey is required in production.
 	// AIModelClassifier is the per-call-site model override for the classifier
 	// worker; it falls through to AIModel if unset.
-	//
-	// PLAIN_API_KEY and PLAIN_MCP_TOKEN are separate env vars by convention
-	// even when a single Plain credential is used for both. Do not collapse
-	// them — they target different endpoints (GraphQL vs MCP) and may diverge
-	// if Plain introduces MCP-scoped tokens.
-	PlainMCPToken            string
+	// The classifier now routes all Plain calls through the GraphQL client
+	// using PLAIN_API_KEY (same credential as SUP-2).
 	LinearAPIKey             string
 	AIModelClassifier        string
 	SupportClassifierWorkers int
@@ -116,10 +112,10 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
 		FounderSMSNumber: os.Getenv("FOUNDER_SMS_NUMBER"),
-		// Support classifier (XOL-59 SUP-8): uses the shared OpenAI-compatible
-		// AI_API_KEY + AI_BASE_URL path. AI_MODEL_CLASSIFIER is the per-call-site
-		// model override; falls through to AIModel (gpt-4o-mini) if unset.
-		PlainMCPToken:            os.Getenv("PLAIN_MCP_TOKEN"),
+		// Support classifier (XOL-59 SUP-8, MCP retired SUP-10): uses the shared
+		// OpenAI-compatible AI_API_KEY + AI_BASE_URL path. AI_MODEL_CLASSIFIER is
+		// the per-call-site model override; falls through to AIModel if unset.
+		// Plain calls route through PLAIN_API_KEY (GraphQL) — PLAIN_MCP_TOKEN removed.
 		LinearAPIKey:             os.Getenv("LINEAR_API_KEY"),
 		AIModelClassifier:        getenvDefault("AI_MODEL_CLASSIFIER", "gpt-5-nano"),
 		SupportClassifierWorkers: parseIntDefault(os.Getenv("SUPPORT_CLASSIFIER_WORKERS"), 2),
@@ -173,13 +169,10 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		}
 	}
 	// Fail-safe env gate: classifier infra vars are required in production
-	// (XOL-59 SUP-8). Unset APP_ENV is treated as production (fail-safe default).
-	// Note: the classifier now uses the shared AI_API_KEY / AI_BASE_URL path
-	// (OpenAI-compatible) instead of a dedicated ANTHROPIC_API_KEY.
+	// (XOL-59 SUP-8, MCP retired SUP-10). Unset APP_ENV is treated as production.
+	// Plain calls now use PLAIN_API_KEY (already validated above); only LINEAR_API_KEY
+	// needs its own gate here.
 	if isProductionEnv(cfg.AppEnv) {
-		if cfg.PlainMCPToken == "" {
-			return cfg, fmt.Errorf("PLAIN_MCP_TOKEN is required in production")
-		}
 		if cfg.LinearAPIKey == "" {
 			return cfg, fmt.Errorf("LINEAR_API_KEY is required in production")
 		}

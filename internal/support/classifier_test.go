@@ -45,20 +45,20 @@ func (m *mockLLMClient) Complete(_ context.Context, _ support.LLMRequest) (strin
 	return m.responses[idx], nil
 }
 
-// mockPlainMCP records calls and returns configurable errors.
-type mockPlainMCP struct {
-	getThreadFn   func(ctx context.Context, threadID string) (plain.ThreadInfo, error)
-	addLabelsCalls int
-	addNoteCalls   int
+// mockPlainAPI records calls and returns configurable errors.
+type mockPlainAPI struct {
+	getThreadFn      func(ctx context.Context, threadID string) (plain.ThreadInfo, error)
+	addLabelsCalls   int
+	addNoteCalls     int
 	setPriorityCalls int
-	setPriorityArgs []string // captures priority values
-	lastNoteBody   string
-	addLabelsErr   error
-	addNoteErr     error
-	setPriorityErr error
+	setPriorityArgs  []string // captures priority values
+	lastNoteBody     string
+	addLabelsErr     error
+	addNoteErr       error
+	setPriorityErr   error
 }
 
-func (m *mockPlainMCP) GetThread(ctx context.Context, threadID string) (plain.ThreadInfo, error) {
+func (m *mockPlainAPI) GetThread(ctx context.Context, threadID string) (plain.ThreadInfo, error) {
 	if m.getThreadFn != nil {
 		return m.getThreadFn(ctx, threadID)
 	}
@@ -69,16 +69,16 @@ func (m *mockPlainMCP) GetThread(ctx context.Context, threadID string) (plain.Th
 		Body:          "I have a question about pricing.",
 	}, nil
 }
-func (m *mockPlainMCP) AddLabels(_ context.Context, _ string, _ []string) error {
+func (m *mockPlainAPI) AddLabels(_ context.Context, _ string, _ []string) error {
 	m.addLabelsCalls++
 	return m.addLabelsErr
 }
-func (m *mockPlainMCP) AddNote(_ context.Context, _ string, body string) error {
+func (m *mockPlainAPI) AddNote(_ context.Context, _ string, body string) error {
 	m.addNoteCalls++
 	m.lastNoteBody = body
 	return m.addNoteErr
 }
-func (m *mockPlainMCP) SetPriority(_ context.Context, _ string, priority string) error {
+func (m *mockPlainAPI) SetPriority(_ context.Context, _ string, priority string) error {
 	m.setPriorityCalls++
 	m.setPriorityArgs = append(m.setPriorityArgs, priority)
 	return m.setPriorityErr
@@ -142,14 +142,14 @@ func incidentLLMResponse() string {
 // buildWorker constructs a ClassifierWorker with the given mocks.
 func buildWorker(
 	st *mockStore,
-	plainMCP *mockPlainMCP,
+	plainAPI *mockPlainAPI,
 	linearMCP *mockLinearMCP,
 	llm *mockLLMClient,
 	smsCallback func(ctx context.Context, event store.SupportEvent) error,
 ) *support.ClassifierWorker {
 	cfg := support.ClassifierConfig{
 		Store:       st,
-		PlainMCP:    plainMCP,
+		PlainAPI:    plainAPI,
 		LinearMCP:   linearMCP,
 		LLM:         llm,
 		LLMModel:    "gpt-5-nano",
@@ -181,7 +181,7 @@ func runSingle(t *testing.T, worker *support.ClassifierWorker, event store.Suppo
 
 func TestClassifierWorker_FullFlow_PricingEvent(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{
 		result: linear.CreateIssueResult{
 			IssueID:    "uuid-1",
@@ -234,7 +234,7 @@ func TestClassifierWorker_FullFlow_PricingEvent(t *testing.T) {
 
 func TestClassifierWorker_IncidentPath_CantLogIn(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{
+	plainMCP := &mockPlainAPI{
 		getThreadFn: func(_ context.Context, threadID string) (plain.ThreadInfo, error) {
 			return plain.ThreadInfo{
 				ThreadID:      threadID,
@@ -296,7 +296,7 @@ func TestClassifierWorker_IncidentPath_CantLogIn(t *testing.T) {
 
 func TestClassifierWorker_GeneralCategory_NoLinearIssue(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 	llm := &mockLLMClient{
 		responses: []string{generalLLMResponse(), "Thank you for reaching out. How can we help?"},
@@ -337,7 +337,7 @@ func TestClassifierWorker_GeneralCategory_NoLinearIssue(t *testing.T) {
 
 func TestClassifierWorker_Latency(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{
 		result: linear.CreateIssueResult{Identifier: "XOL-101", URL: "https://linear.app/xolto/issue/XOL-101"},
 	}
@@ -380,7 +380,7 @@ func TestClassifierWorker_Latency(t *testing.T) {
 // classification without crashing.
 func TestClassifierWorker_LLMBadJSON_FallsBack(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 	llm := &mockLLMClient{
 		responses: []string{"Sorry, I cannot classify this.", "Draft reply."},
@@ -403,7 +403,7 @@ func TestClassifierWorker_LLMBadJSON_FallsBack(t *testing.T) {
 // TestClassifierWorker_GracefulShutdown — worker stops on ctx cancel.
 func TestClassifierWorker_GracefulShutdown(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 	llm := &mockLLMClient{}
 
@@ -420,7 +420,7 @@ func TestClassifierWorker_GracefulShutdown(t *testing.T) {
 // SMS callback is NOT invoked when severity is below incident.
 func TestClassifierWorker_SMSCallback_NotCalledForNonIncident(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 	llm := &mockLLMClient{
 		responses: []string{
@@ -452,7 +452,7 @@ func TestClassifierWorker_SMSCallback_NotCalledForNonIncident(t *testing.T) {
 // processEvent to fail; store should not be called.
 func TestClassifierWorker_LLMError_DoesNotPersist(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 	llm := &mockLLMClient{
 		err: errors.New("openai-compat: HTTP 500"),
@@ -534,12 +534,12 @@ func TestClassifierRequestShape_OpenAICompatible(t *testing.T) {
 	llmClient := support.NewOpenAICompatClientWithHTTP("test-key", srv.URL, srv.Client())
 
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{}
+	plainMCP := &mockPlainAPI{}
 	linearMCP := &mockLinearMCP{}
 
 	cfg := support.ClassifierConfig{
 		Store:     st,
-		PlainMCP:  plainMCP,
+		PlainAPI:  plainMCP,
 		LinearMCP: linearMCP,
 		LLM:       llmClient,
 		LLMModel:  "gpt-5-nano",
@@ -571,54 +571,38 @@ func TestClassifierRequestShape_OpenAICompatible(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// SUP-60: Enriched getThread warn log — MCPCallError fields accessible
+// SUP-10 / SUP-60: getThread 401 error degrades gracefully
 // ---------------------------------------------------------------------------
 
-// TestClassifierWorker_GetThreadMCPError_EnrichedFields verifies that when
-// GetThread returns an *plain.MCPCallError (e.g. a real 401), the classifier
-// degrades gracefully AND the error is accessible via errors.As so that the
-// warn log can emit endpoint/status_code/body_snippet. The test does not hook
-// the logger (it would require a custom slog.Handler); instead it asserts
-// the error type reachable from the mock, validating the wire path used by
-// classifier.go's warn log.
-func TestClassifierWorker_GetThreadMCPError_EnrichedFields(t *testing.T) {
-	// Build a real httptest 401 server so we can produce a genuine *MCPCallError
-	// — the same path the production classifier's warn log uses.
+// TestClassifierWorker_GetThread401_DegradeGracefully verifies that when
+// plain.Client.GetThread returns a 401 error (e.g. bad PLAIN_API_KEY), the
+// classifier degrades gracefully: it does not panic, it classifies using the
+// thread-ID fallback body, and it persists a classification.
+// MCP-specific MCPCallError assertions are removed (MCP retired in SUP-10).
+func TestClassifierWorker_GetThread401_DegradeGracefully(t *testing.T) {
+	// Build a real httptest 401 server to produce a genuine error from the
+	// GraphQL client.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
 	}))
 	defer srv.Close()
 
-	realClient := plain.NewPlainMCPClient("bad-token")
+	realClient := plain.New("bad-api-key")
 	realClient.Endpoint = srv.URL
 	realClient.HTTPClient = srv.Client()
 
-	// Verify that GetThread on a 401 server returns *plain.MCPCallError.
+	// Verify that GetThread on a 401 server returns an error.
 	_, err := realClient.GetThread(context.Background(), "th_check")
 	if err == nil {
 		t.Fatal("expected 401 GetThread to return an error")
 	}
-	var mcpErr *plain.MCPCallError
-	if !errors.As(err, &mcpErr) {
-		t.Fatalf("expected *plain.MCPCallError via errors.As, got %T: %v", err, err)
-	}
-	if mcpErr.StatusCode != http.StatusUnauthorized {
-		t.Errorf("expected status_code=401, got %d", mcpErr.StatusCode)
-	}
-	if mcpErr.BodySnippet == "" {
-		t.Error("expected body_snippet non-empty for 401 response")
-	}
-	if mcpErr.Endpoint == "" {
-		t.Error("expected endpoint non-empty in MCPCallError")
-	}
 
-	// Now run the classifier with a mock that returns this MCPCallError.
-	// The worker must degrade gracefully (not panic, not return an error to the
-	// channel — it should classify with fallback body) and persist a classification.
+	// Run the classifier with a mock that returns this error.
+	// The worker must degrade gracefully and still persist a classification.
 	capturedErr := err
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{
+	plainAPI := &mockPlainAPI{
 		getThreadFn: func(_ context.Context, _ string) (plain.ThreadInfo, error) {
 			return plain.ThreadInfo{}, capturedErr
 		},
@@ -627,17 +611,17 @@ func TestClassifierWorker_GetThreadMCPError_EnrichedFields(t *testing.T) {
 	llm := &mockLLMClient{
 		responses: []string{generalLLMResponse(), "Thank you for reaching out."},
 	}
-	worker := buildWorker(st, plainMCP, linearMCP, llm, nil)
+	worker := buildWorker(st, plainAPI, linearMCP, llm, nil)
 
 	event := store.SupportEvent{
-		ID:            "evt-mcp401",
-		PlainThreadID: "th_mcp401_001",
+		ID:            "evt-gql401",
+		PlainThreadID: "th_gql401_001",
 	}
 	runSingle(t, worker, event)
 
 	// Classifier must have degraded gracefully and still persisted.
 	if st.classifyCalls != 1 {
-		t.Errorf("expected 1 AttachClassification call after getThread MCPCallError, got %d", st.classifyCalls)
+		t.Errorf("expected 1 AttachClassification call after getThread 401 error, got %d", st.classifyCalls)
 	}
 }
 
@@ -647,7 +631,7 @@ func TestClassifierWorker_GetThreadMCPError_EnrichedFields(t *testing.T) {
 // trusting the LLM output, so safety does not depend on LLM quality.
 func TestClassifierIncidentKeywordOverride_WinsOverLLM(t *testing.T) {
 	st := &mockStore{}
-	plainMCP := &mockPlainMCP{
+	plainMCP := &mockPlainAPI{
 		getThreadFn: func(_ context.Context, threadID string) (plain.ThreadInfo, error) {
 			// Body contains "can't log in" — a known incident keyword.
 			return plain.ThreadInfo{
