@@ -75,21 +75,21 @@ mutation UpsertCustomer($input: UpsertCustomerInput!) {
     error { message }
   }
 }`
+	onCreate := map[string]any{
+		"email": map[string]any{
+			"email":      input.Email,
+			"isVerified": true,
+		},
+	}
+	if strings.TrimSpace(input.FullName) != "" {
+		onCreate["fullName"] = input.FullName
+	}
 	variables := map[string]any{
 		"input": map[string]any{
 			"identifier": map[string]any{
 				"emailAddress": input.Email,
 			},
-			"onCreate": map[string]any{
-				"fullName": map[string]any{
-					"value": input.FullName,
-				},
-				"email": map[string]any{
-					"email":             input.Email,
-					"isVerified":        true,
-					"verifiedAt":        nil,
-				},
-			},
+			"onCreate": onCreate,
 			"onUpdate": map[string]any{},
 		},
 	}

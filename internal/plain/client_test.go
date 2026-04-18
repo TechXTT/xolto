@@ -3,6 +3,7 @@ package plain_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -47,6 +48,100 @@ func TestUpsertCustomer(t *testing.T) {
 	}
 	if result.CustomerID != "c_01234567" {
 		t.Errorf("expected customer id c_01234567, got %q", result.CustomerID)
+	}
+}
+
+// TestUpsertCustomerRequestShape asserts the exact GraphQL variables sent to
+// Plain. It guards against schema drift that caused the SUP-7 500 incident
+// (fullName wrapped in {value:...} and the non-existent verifiedAt field).
+func TestUpsertCustomerRequestShape(t *testing.T) {
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"upsertCustomer": map[string]any{
+					"customer": map[string]any{"id": "c_1"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := plain.New("test-api-key")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	_, err := client.UpsertCustomer(context.Background(), plain.UpsertCustomerInput{
+		Email:    "user@example.com",
+		FullName: "Marto Testov",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCustomer() error = %v", err)
+	}
+
+	vars, ok := captured["variables"].(map[string]any)
+	if !ok {
+		t.Fatalf("variables missing in request body: %#v", captured)
+	}
+	input, ok := vars["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("input missing: %#v", vars)
+	}
+	onCreate, ok := input["onCreate"].(map[string]any)
+	if !ok {
+		t.Fatalf("onCreate missing: %#v", input)
+	}
+	if got := onCreate["fullName"]; got != "Marto Testov" {
+		t.Errorf("fullName = %#v; want plain string \"Marto Testov\"", got)
+	}
+	email, ok := onCreate["email"].(map[string]any)
+	if !ok {
+		t.Fatalf("email missing: %#v", onCreate)
+	}
+	if _, present := email["verifiedAt"]; present {
+		t.Errorf("email.verifiedAt must not be sent — field does not exist on EmailAddressInput")
+	}
+	if email["email"] != "user@example.com" {
+		t.Errorf("email.email = %#v; want user@example.com", email["email"])
+	}
+	if email["isVerified"] != true {
+		t.Errorf("email.isVerified = %#v; want true", email["isVerified"])
+	}
+}
+
+// TestUpsertCustomerOmitsEmptyFullName ensures we don't send an empty string for
+// fullName when the user has no name — Plain may treat "" as invalid input.
+func TestUpsertCustomerOmitsEmptyFullName(t *testing.T) {
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"upsertCustomer": map[string]any{
+					"customer": map[string]any{"id": "c_1"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := plain.New("test-api-key")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	_, err := client.UpsertCustomer(context.Background(), plain.UpsertCustomerInput{Email: "anon@example.com"})
+	if err != nil {
+		t.Fatalf("UpsertCustomer() error = %v", err)
+	}
+
+	onCreate := captured["variables"].(map[string]any)["input"].(map[string]any)["onCreate"].(map[string]any)
+	if _, present := onCreate["fullName"]; present {
+		t.Errorf("fullName should be omitted when empty; got %#v", onCreate["fullName"])
 	}
 }
 
