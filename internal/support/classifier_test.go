@@ -476,11 +476,11 @@ func TestClassifierWorker_LLMError_DoesNotPersist(t *testing.T) {
 // openAIChatRequest mirrors the request body the classifier should send to
 // /chat/completions. Used in the shape-guard test below.
 type openAIChatRequest struct {
-	Model          string             `json:"model"`
-	Temperature    float64            `json:"temperature"`
-	Messages       []map[string]any   `json:"messages"`
-	ResponseFormat map[string]string  `json:"response_format"`
-	MaxTokens      int                `json:"max_tokens"`
+	Model               string            `json:"model"`
+	Temperature         float64           `json:"temperature"`
+	Messages            []map[string]any  `json:"messages"`
+	ResponseFormat      map[string]string `json:"response_format"`
+	MaxCompletionTokens int               `json:"max_completion_tokens"`
 }
 
 // TestClassifierRequestShape_OpenAICompatible asserts the classifier POSTs to

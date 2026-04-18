@@ -119,7 +119,7 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 		},
 	}
 	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
+		body["max_completion_tokens"] = req.MaxTokens
 	}
 	if req.JSONMode {
 		body["response_format"] = map[string]string{"type": "json_object"}

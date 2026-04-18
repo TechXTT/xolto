@@ -198,7 +198,7 @@ query GetThread($threadId: ID!, $first: Int!) {
     title
     customer {
       fullName
-      primaryEmailAddress {
+      email {
         email
       }
     }
@@ -207,9 +207,9 @@ query GetThread($threadId: ID!, $first: Int!) {
         node {
           entry {
             __typename
-            ... on ChatEntry { text }
+            ... on ChatEntry { chatText: text }
             ... on EmailEntry { textContent fullTextContent hasMoreTextContent }
-            ... on SlackMessageEntry { text }
+            ... on SlackMessageEntry { slackText: text }
           }
         }
       }
@@ -227,10 +227,10 @@ query GetThread($threadId: ID!, $first: Int!) {
 				ID       string `json:"id"`
 				Title    string `json:"title"`
 				Customer struct {
-					FullName            string `json:"fullName"`
-					PrimaryEmailAddress struct {
+					FullName string `json:"fullName"`
+					Email    struct {
 						Email string `json:"email"`
-					} `json:"primaryEmailAddress"`
+					} `json:"email"`
 				} `json:"customer"`
 				TimelineEntries struct {
 					Edges []struct {
@@ -259,7 +259,7 @@ query GetThread($threadId: ID!, $first: Int!) {
 		ThreadID:      t.ID,
 		Subject:       t.Title,
 		CustomerName:  t.Customer.FullName,
-		CustomerEmail: t.Customer.PrimaryEmailAddress.Email,
+		CustomerEmail: t.Customer.Email.Email,
 	}
 	if info.ThreadID == "" {
 		info.ThreadID = threadID
@@ -279,9 +279,13 @@ query GetThread($threadId: ID!, $first: Int!) {
 // timelineEntryPayload decodes the union-typed Entry field. Only the subset
 // of customer-content entry types is modelled; everything else is skipped
 // via an empty extractText result.
+// ChatText and SlackText are aliased because ChatEntry.text is nullable
+// (String) while SlackMessageEntry.text is non-null (String!); GraphQL
+// rejects the same field name returning conflicting types without aliases.
 type timelineEntryPayload struct {
 	Typename           string `json:"__typename"`
-	Text               string `json:"text"`
+	ChatText           string `json:"chatText"`
+	SlackText          string `json:"slackText"`
 	TextContent        string `json:"textContent"`
 	FullTextContent    string `json:"fullTextContent"`
 	HasMoreTextContent bool   `json:"hasMoreTextContent"`
@@ -291,8 +295,10 @@ type timelineEntryPayload struct {
 // the entry type carries no customer content we care about.
 func (p timelineEntryPayload) extractText() string {
 	switch p.Typename {
-	case "ChatEntry", "SlackMessageEntry":
-		return strings.TrimSpace(p.Text)
+	case "ChatEntry":
+		return strings.TrimSpace(p.ChatText)
+	case "SlackMessageEntry":
+		return strings.TrimSpace(p.SlackText)
 	case "EmailEntry":
 		if p.HasMoreTextContent && strings.TrimSpace(p.FullTextContent) != "" {
 			return strings.TrimSpace(p.FullTextContent)
