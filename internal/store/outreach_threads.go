@@ -542,7 +542,7 @@ func migrateOutreachThreadsPostgres(ctx context.Context, db *sql.DB) {
 	_, _ = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS outreach_threads (
 			id                          BIGSERIAL PRIMARY KEY,
-			user_id                     TEXT NOT NULL,
+			user_id                     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			listing_id                  TEXT NOT NULL,
 			marketplace_id              TEXT NOT NULL,
 			mission_id                  BIGINT,

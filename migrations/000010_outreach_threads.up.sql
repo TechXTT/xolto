@@ -3,7 +3,7 @@
 
 CREATE TABLE outreach_threads (
   id                          BIGSERIAL PRIMARY KEY,
-  user_id                     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id                     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   listing_id                  TEXT NOT NULL,
   marketplace_id              TEXT NOT NULL,
   mission_id                  BIGINT,
