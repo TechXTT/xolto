@@ -78,6 +78,15 @@ func TestGeneratorRequestShape_ModelOverride(t *testing.T) {
 	if !ok || len(schema) == 0 {
 		t.Errorf("expected non-empty schema, got %#v", js["schema"])
 	}
+
+	// gpt-5 compliance (XOL-66): temperature must be absent (gpt-5 rejects non-default),
+	// and max_completion_tokens must be present.
+	if _, hasTemp := captured["temperature"]; hasTemp {
+		t.Errorf("expected temperature absent from request (gpt-5 rejects non-default), got %v", captured["temperature"])
+	}
+	if got, _ := captured["max_completion_tokens"].(float64); got != 2048 {
+		t.Errorf("expected max_completion_tokens=2048, got %v", captured["max_completion_tokens"])
+	}
 }
 
 // TestGeneratorRequestShape_ModelFallthrough verifies that when SetModel is NOT
