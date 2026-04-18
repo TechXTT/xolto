@@ -672,6 +672,9 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	// XOL-24: outreach thread reply-time tracking.
 	migrateOutreachThreadsPostgres(ctx, db)
 
+	// XOL-53 SUP-2: support events intake table.
+	migratePostgresSupportEvents(ctx, db)
+
 	return nil
 }
 

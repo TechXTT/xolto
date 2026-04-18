@@ -114,4 +114,5 @@ type Store interface {
 	Reader
 	Writer
 	OutreachStore
+	SupportEventStore
 }
