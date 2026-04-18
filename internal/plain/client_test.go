@@ -276,7 +276,7 @@ func TestClient_GetThread_OK(t *testing.T) {
 				"title": "Missing item in order",
 				"customer": map[string]any{
 					"fullName": "Ana Kostadinova",
-					"primaryEmailAddress": map[string]any{
+					"email": map[string]any{
 						"email": "ana@example.com",
 					},
 				},
@@ -320,14 +320,14 @@ func TestClient_GetThread_WithBody(t *testing.T) {
 				"id":    "th_bg",
 				"title": "Battery issue",
 				"customer": map[string]any{
-					"fullName":            "Ivan Petrov",
-					"primaryEmailAddress": map[string]any{"email": "ivan@example.com"},
+					"fullName": "Ivan Petrov",
+					"email":    map[string]any{"email": "ivan@example.com"},
 				},
 				"timelineEntries": map[string]any{
 					"edges": []any{
 						map[string]any{"node": map[string]any{"entry": map[string]any{
 							"__typename": "ChatEntry",
-							"text":       chatText,
+							"chatText":   chatText,
 						}}},
 						map[string]any{"node": map[string]any{"entry": map[string]any{
 							"__typename":  "EmailEntry",
@@ -362,7 +362,7 @@ func TestClient_GetThread_EmailFullTextContent(t *testing.T) {
 			"thread": map[string]any{
 				"id":       "th_email",
 				"title":    "Long email",
-				"customer": map[string]any{"fullName": "x", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"customer": map[string]any{"fullName": "x", "email": map[string]any{"email": "x@x"}},
 				"timelineEntries": map[string]any{
 					"edges": []any{
 						map[string]any{"node": map[string]any{"entry": map[string]any{
@@ -399,12 +399,12 @@ func TestClient_GetThread_BodyTruncated(t *testing.T) {
 			"thread": map[string]any{
 				"id":       "th_big",
 				"title":    "Large thread",
-				"customer": map[string]any{"fullName": "", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"customer": map[string]any{"fullName": "", "email": map[string]any{"email": "x@x"}},
 				"timelineEntries": map[string]any{
 					"edges": []any{
 						map[string]any{"node": map[string]any{"entry": map[string]any{
 							"__typename": "ChatEntry",
-							"text":       big,
+							"chatText":   big,
 						}}},
 					},
 				},
@@ -435,7 +435,7 @@ func TestClient_GetThread_SkipNonCustomerEntries(t *testing.T) {
 			"thread": map[string]any{
 				"id":       "th_mix",
 				"title":    "Mixed",
-				"customer": map[string]any{"fullName": "", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"customer": map[string]any{"fullName": "", "email": map[string]any{"email": "x@x"}},
 				"timelineEntries": map[string]any{
 					"edges": []any{
 						map[string]any{"node": map[string]any{"entry": map[string]any{
@@ -447,7 +447,7 @@ func TestClient_GetThread_SkipNonCustomerEntries(t *testing.T) {
 						}}},
 						map[string]any{"node": map[string]any{"entry": map[string]any{
 							"__typename": "ChatEntry",
-							"text":       "actual customer message",
+							"chatText":   "actual customer message",
 						}}},
 					},
 				},
