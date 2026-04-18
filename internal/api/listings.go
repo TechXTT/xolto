@@ -371,7 +371,7 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 		}
 		matches[i] = matchItem{
 			Listing:       l,
-			MustHaves:     scorer.ScoreMustHaves(l, missionMustHaves),
+			MustHaves:     scorer.ScoreMustHavesSemantic(r.Context(), l, missionMustHaves, missionID, s.mustHaveEvaluator),
 			OutreachState: outreachState,
 		}
 	}

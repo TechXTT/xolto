@@ -65,6 +65,12 @@ type ServerConfig struct {
 	AIModelAssistantBrief  string // AI_MODEL_ASSISTANT_BRIEF
 	AIModelAssistantDraft  string // AI_MODEL_ASSISTANT_DRAFT
 	AIModelAssistantChat   string // AI_MODEL_ASSISTANT_CHAT
+	// Must-have semantic evaluator (XOL-22).
+	// AIModelMustHave falls through AI_MODEL_MUSTHAVE → AI_MODEL → "gpt-5-nano".
+	// AIMaxMustHaveCallsPerMissionPerHour caps per-mission LLM calls per hour;
+	// default 200. Both are optional — no Railway provisioning required.
+	AIModelMustHave                    string // AI_MODEL_MUSTHAVE
+	AIMaxMustHaveCallsPerMissionPerHour int    // AI_MAX_MUSTHAVE_CALLS_PER_MISSION_PER_HOUR
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -127,6 +133,10 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	cfg.AIModelAssistantBrief = getenvDefault("AI_MODEL_ASSISTANT_BRIEF", cfg.AIModel)
 	cfg.AIModelAssistantDraft = getenvDefault("AI_MODEL_ASSISTANT_DRAFT", cfg.AIModel)
 	cfg.AIModelAssistantChat = getenvDefault("AI_MODEL_ASSISTANT_CHAT", cfg.AIModel)
+	// Must-have semantic evaluator (XOL-22). Defaults to AI_MODEL then "gpt-5-nano";
+	// no Railway provisioning required for safe merge.
+	cfg.AIModelMustHave = getenvDefault("AI_MODEL_MUSTHAVE", getenvDefault("AI_MODEL", "gpt-5-nano"))
+	cfg.AIMaxMustHaveCallsPerMissionPerHour = parseIntDefault(os.Getenv("AI_MAX_MUSTHAVE_CALLS_PER_MISSION_PER_HOUR"), 200)
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
 	}

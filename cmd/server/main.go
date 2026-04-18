@@ -103,6 +103,22 @@ func main() {
 	}
 	rsn.SetUsageCallback(usageCB)
 	asst.SetUsageCallback(usageCB)
+
+	// Construct the must-have semantic evaluator (XOL-22). When AI_API_KEY is
+	// empty the evaluator is nil and the /matches handler falls back to the
+	// tokenizer-only path automatically.
+	mustHaveEvaluator := reasoner.NewMustHaveEvaluatorLLM(reasoner.MustHaveEvaluatorConfig{
+		APIKey:                    cfg.AIAPIKey,
+		BaseURL:                   cfg.AIBaseURL,
+		Model:                     cfg.AIModelMustHave,
+		MaxCallsPerMissionPerHour: cfg.AIMaxMustHaveCallsPerMissionPerHour,
+		Store:                     db,
+		UsageCallback:             usageCB,
+	})
+	logger.Info("musthave evaluator initialised",
+		"op", "musthave.evaluator.init",
+		"configured", mustHaveEvaluator != nil,
+	)
 	broker := api.NewSSEBroker()
 	dispatcher := notify.NewSSEDispatcher(broker)
 	registry := marketplace.NewRegistry()
@@ -141,6 +157,7 @@ func main() {
 	backfillMissionHunts(context.Background(), db, asst, logger)
 
 	srv := api.NewServer(cfg, db, asst, broker, pool, sc)
+	srv.SetMustHaveEvaluator(mustHaveEvaluator) // XOL-22: semantic must-have evaluator
 
 	// Start the support classifier worker pool (XOL-59 SUP-8, MCP retired SUP-10).
 	// Workers consume from the Plain webhook channel, classify events, and
