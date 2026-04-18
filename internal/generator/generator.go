@@ -90,12 +90,14 @@ func (g *Generator) aiEnabled() bool {
 func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.SearchConfig, error) {
 	// searchConfigSchema is derived from config.SearchConfig — the exact fields
 	// returned by the AI (XOL-60 SUP-9 strict json_schema).
-	searchConfigSchema := &jsonSchemaFormat{
-		Type: "json_schema",
-		JSONSchema: jsonSchemaSpec{
-			Name:   "search_config_list",
-			Strict: true,
-			Schema: map[string]any{
+	// Using map[string]any so that JSON serialization is field-order-stable and
+	// no typed struct inadvertently emits unexpected zero-value fields (XOL-66).
+	searchConfigSchema := map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "search_config_list",
+			"strict": true,
+			"schema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"searches": map[string]any{
@@ -124,26 +126,29 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		},
 	}
 
-	reqBody := chatCompletionRequest{
-		Model:          g.model,
-		Temperature:    g.aiCfg.Temperature,
-		ResponseFormat: searchConfigSchema,
-		Messages: []chatMessage{
+	// gpt-5 reasoning models reject temperature != 1 and consume hidden reasoning
+	// tokens before visible output. Omit temperature, set max_completion_tokens.
+	// Mirrors the pattern in internal/reasoner/reasoner.go (XOL-66).
+	reqPayload := map[string]any{
+		"model":                 g.model,
+		"max_completion_tokens": 2048,
+		"messages": []map[string]any{
 			{
-				Role: "system",
-				Content: "You generate search presets for European second-hand marketplaces (OLX.bg, Marktplaats, Vinted). Return strict JSON only. " +
+				"role": "system",
+				"content": "You generate search presets for European second-hand marketplaces (OLX.bg, Marktplaats, Vinted). Return strict JSON only. " +
 					"Optimize for bargain hunting of used electronics: cameras, lenses, laptops, phones, gaming gear, audio equipment. Use euro budgets as whole euros. " +
 					"For camera bodies use category_id 487, for lenses use 495, and only use 356 for gaming-related items. " +
 					"Use canonical English conditions (new, like_new, good, fair) and keep auto_message false.",
 			},
 			{
-				Role:    "user",
-				Content: buildPrompt(topic),
+				"role":    "user",
+				"content": buildPrompt(topic),
 			},
 		},
+		"response_format": searchConfigSchema,
 	}
 
-	body, err := json.Marshal(reqBody)
+	body, err := json.Marshal(reqPayload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal ai request: %w", err)
 	}
@@ -384,40 +389,6 @@ func containsAny(value string, needles ...string) bool {
 		}
 	}
 	return false
-}
-
-func extractJSON(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "{") {
-		return value
-	}
-
-	start := strings.IndexByte(value, '{')
-	end := strings.LastIndexByte(value, '}')
-	if start >= 0 && end > start {
-		return value[start : end+1]
-	}
-
-	return value
-}
-
-// jsonSchemaFormat is the strict json_schema response_format (XOL-60 SUP-9).
-type jsonSchemaFormat struct {
-	Type       string         `json:"type"`
-	JSONSchema jsonSchemaSpec `json:"json_schema"`
-}
-
-type jsonSchemaSpec struct {
-	Name   string         `json:"name"`
-	Strict bool           `json:"strict"`
-	Schema map[string]any `json:"schema"`
-}
-
-type chatCompletionRequest struct {
-	Model          string            `json:"model"`
-	Temperature    float64           `json:"temperature"`
-	Messages       []chatMessage     `json:"messages"`
-	ResponseFormat *jsonSchemaFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
