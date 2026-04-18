@@ -138,6 +138,7 @@ func maxComparableAgeDays(comparables []models.ComparableDeal) int {
 //
 // Inputs:
 //
+//	marketplaceID   — marketplace identifier (e.g. "olxbg"); selects threshold set
 //	score           — scored value 0–10
 //	confidence      — float64 0–1 (internally bucketed to low/medium/high)
 //	comparables     — slice used to derive count and freshness
@@ -146,6 +147,7 @@ func maxComparableAgeDays(comparables []models.ComparableDeal) int {
 //	condition       — listing condition string (new/like_new/good/fair/unknown/"")
 //	riskFlags       — trust-signal keys already computed by computeRiskFlags
 func ComputeVerdict(
+	marketplaceID string,
 	score float64,
 	confidence float64,
 	comparables []models.ComparableDeal,
@@ -154,6 +156,7 @@ func ComputeVerdict(
 	condition string,
 	riskFlags []string,
 ) string {
+	t := ThresholdsFor(marketplaceID)
 	confBucket := confidenceBucket(confidence)
 	comparableCount := len(comparables)
 	maxAgeDays := maxComparableAgeDays(comparables)
@@ -162,8 +165,8 @@ func ComputeVerdict(
 	// ----------------------------------------------------------------
 	// SKIP — evaluate first; highest precedence
 	// ----------------------------------------------------------------
-	// 1. price_ratio > 1.30
-	if priceRatio > 1.30 {
+	// 1. price_ratio > MaxPriceRatioSkip
+	if priceRatio > t.MaxPriceRatioSkip {
 		return ActionSkip
 	}
 	// 2. any HARD risk flag present (fraud/safety signals)
@@ -182,8 +185,8 @@ func ComputeVerdict(
 	if hasSoftRiskFlag(riskFlags) {
 		return ActionAskSeller
 	}
-	// 2. fewer than 6 comparables
-	if comparableCount < 6 {
+	// 2. fewer than MinComparables comparables
+	if comparableCount < t.MinComparables {
 		return ActionAskSeller
 	}
 	// 3. confidence is low
@@ -194,9 +197,9 @@ func ComputeVerdict(
 	// ----------------------------------------------------------------
 	// NEGOTIATE
 	// ----------------------------------------------------------------
-	// price_ratio > 1.00 AND <= 1.30 AND confidence medium/high AND
+	// price_ratio > 1.00 AND <= MaxPriceRatioNegotiate AND confidence medium/high AND
 	// no hard flag AND no soft flag
-	if priceRatio > 1.00 && priceRatio <= 1.30 &&
+	if priceRatio > 1.00 && priceRatio <= t.MaxPriceRatioNegotiate &&
 		(confBucket == "medium" || confBucket == "high") &&
 		!hasHardRiskFlag(riskFlags) && !hasSoftRiskFlag(riskFlags) {
 		return ActionNegotiate
@@ -205,20 +208,20 @@ func ComputeVerdict(
 	// ----------------------------------------------------------------
 	// BUY
 	// ----------------------------------------------------------------
-	// score >= 8 AND confidence medium/high AND comparable_count >= 6 AND
-	// freshness <= 60d (or <= 90d for low-liquidity niche) AND
+	// score >= MinScoreForBuy AND confidence medium/high AND comparable_count >= MinComparables AND
+	// freshness <= FreshnessDaysDefault (or <= FreshnessDaysLowLiquidity for low-liquidity niche) AND
 	// price_ratio <= 1.00 AND condition in {new, like_new, good} AND
 	// no risk flags of any kind (both hard and soft disqualify Buy)
-	if score >= 8 &&
+	if score >= t.MinScoreForBuy &&
 		(confBucket == "medium" || confBucket == "high") &&
-		comparableCount >= 6 &&
+		comparableCount >= t.MinComparables &&
 		priceRatio <= 1.00 &&
 		(condLower == "new" || condLower == "like_new" || condLower == "good") &&
 		len(riskFlags) == 0 {
 
-		freshnessLimit := 60
+		freshnessLimit := t.FreshnessDaysDefault
 		if isLowLiquidityNiche(query) {
-			freshnessLimit = 90
+			freshnessLimit = t.FreshnessDaysLowLiquidity
 		}
 		if maxAgeDays <= freshnessLimit {
 			return ActionBuy
