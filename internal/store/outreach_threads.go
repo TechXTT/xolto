@@ -233,7 +233,11 @@ func (s *PostgresStore) ListThreadStatesForListings(ctx context.Context, userID 
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT`+" "+outreachSelectColumns+`
+		SELECT
+			ot.id, ot.user_id, ot.listing_id, ot.marketplace_id, ot.mission_id,
+			ot.draft_text, ot.draft_shape, ot.draft_lang,
+			ot.sent_at, ot.replied_at, ot.reply_text,
+			ot.state, ot.last_state_transition_at, ot.created_at, ot.updated_at
 		FROM outreach_threads ot
 		JOIN unnest($2::text[], $3::text[]) AS keys(listing_id, marketplace_id)
 		  ON ot.listing_id = keys.listing_id
