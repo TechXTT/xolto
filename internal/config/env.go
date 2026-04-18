@@ -39,6 +39,10 @@ type ServerConfig struct {
 	AdminIPAllowlist    []string
 	TrustProxy          bool
 	HTTPTimeouts        HTTPTimeouts
+	// Support platform (XOL-53 SUP-2).
+	PlainAPIKey         string
+	PlainWebhookSecret  string
+	AppEnv              string
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -77,6 +81,10 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 			IdleTimeout:       parseDurationDefault(os.Getenv("SERVER_IDLE_TIMEOUT"), defaultServerIdleTimeout),
 			ReadHeaderTimeout: parseDurationDefault(os.Getenv("SERVER_READ_HEADER_TIMEOUT"), defaultServerReadHeaderTimeout),
 		},
+		// Support platform (XOL-53 SUP-2).
+		PlainAPIKey:        os.Getenv("PLAIN_API_KEY"),
+		PlainWebhookSecret: os.Getenv("PLAIN_WEBHOOK_SECRET"),
+		AppEnv:             os.Getenv("APP_ENV"),
 	}
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
@@ -97,6 +105,12 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("JWT_SECRET is required")
 	}
+	// Fail-safe env gate: PLAIN_API_KEY is required unless APP_ENV is explicitly
+	// set to a non-production value (dev, test, staging, etc.).
+	// Unset APP_ENV defaults to prod-safe behaviour.
+	if cfg.PlainAPIKey == "" && isProductionEnv(cfg.AppEnv) {
+		return cfg, fmt.Errorf("PLAIN_API_KEY is required in production")
+	}
 	return cfg, nil
 }
 
@@ -108,6 +122,20 @@ func (c ServerConfig) IsAdminEmail(email string) bool {
 		}
 	}
 	return false
+}
+
+// isProductionEnv returns true when the APP_ENV value should enforce all
+// production-required env vars. The only values that opt out are explicit
+// non-production names. Unset (empty string) is treated as production to
+// ensure a fail-safe default.
+func isProductionEnv(appEnv string) bool {
+	switch strings.ToLower(strings.TrimSpace(appEnv)) {
+	case "dev", "development", "test", "testing", "staging", "local":
+		return false
+	default:
+		// "production", "", or any unrecognised value → prod-safe.
+		return true
+	}
 }
 
 func getenvDefault(key, fallback string) string {
