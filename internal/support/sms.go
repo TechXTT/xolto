@@ -170,8 +170,10 @@ func (e *SMSEscalator) captureSentry(eventID string, err error) {
 		scope.SetTag("op", "sms.escalator.failure")
 		scope.SetTag("event_id", eventID)
 		scope.SetLevel(sentry.LevelError)
-		scope.SetExtra("event_id", eventID)
-		scope.SetExtra("error", err.Error())
+		scope.SetContext("sms_escalator", map[string]any{
+			"event_id": eventID,
+			"error":    err.Error(),
+		})
 	})
 	hub.CaptureException(err)
 }

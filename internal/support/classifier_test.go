@@ -135,10 +135,6 @@ func generalLLMResponse() string {
 	return `{"category":"general","market":"unknown","product_cat":"other","severity":"low","action_needed":"reply_only"}`
 }
 
-func incidentLLMResponse() string {
-	return `{"category":"login","market":"olx_bg","product_cat":"other","severity":"incident","action_needed":"billing_auth_fix"}`
-}
-
 // buildWorker constructs a ClassifierWorker with the given mocks.
 func buildWorker(
 	st *mockStore,
