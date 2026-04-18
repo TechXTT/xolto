@@ -56,6 +56,14 @@ type ServerConfig struct {
 	LinearAPIKey             string
 	AIModelClassifier        string
 	SupportClassifierWorkers int
+	// Per-call-site AI model overrides (XOL-60 SUP-9).
+	// Each falls through to AIModel when unset so no Railway provisioning
+	// is required for the PR to be safe to merge.
+	AIModelScorer          string // AI_MODEL_SCORER
+	AIModelGenerator       string // AI_MODEL_GENERATOR
+	AIModelAssistantBrief  string // AI_MODEL_ASSISTANT_BRIEF
+	AIModelAssistantDraft  string // AI_MODEL_ASSISTANT_DRAFT
+	AIModelAssistantChat   string // AI_MODEL_ASSISTANT_CHAT
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -111,6 +119,13 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		AIModelClassifier:        getenvDefault("AI_MODEL_CLASSIFIER", "gpt-5-nano"),
 		SupportClassifierWorkers: parseIntDefault(os.Getenv("SUPPORT_CLASSIFIER_WORKERS"), 2),
 	}
+	// Per-call-site AI model overrides (XOL-60 SUP-9). All default to
+	// AIModel so Railway provisioning can happen post-merge independently.
+	cfg.AIModelScorer = getenvDefault("AI_MODEL_SCORER", cfg.AIModel)
+	cfg.AIModelGenerator = getenvDefault("AI_MODEL_GENERATOR", cfg.AIModel)
+	cfg.AIModelAssistantBrief = getenvDefault("AI_MODEL_ASSISTANT_BRIEF", cfg.AIModel)
+	cfg.AIModelAssistantDraft = getenvDefault("AI_MODEL_ASSISTANT_DRAFT", cfg.AIModel)
+	cfg.AIModelAssistantChat = getenvDefault("AI_MODEL_ASSISTANT_CHAT", cfg.AIModel)
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
 	}

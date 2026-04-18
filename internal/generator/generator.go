@@ -25,6 +25,7 @@ type UsageCallback func(callType, model string, promptTokens, completionTokens, 
 
 type Generator struct {
 	aiCfg   config.AIConfig
+	model   string // per-call-site override (XOL-60 SUP-9); defaults to aiCfg.Model
 	client  *http.Client
 	onUsage UsageCallback
 }
@@ -32,9 +33,18 @@ type Generator struct {
 func New(aiCfg config.AIConfig) *Generator {
 	return &Generator{
 		aiCfg: aiCfg,
+		model: aiCfg.Model,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
+	}
+}
+
+// SetModel sets the per-call-site model override (AI_MODEL_GENERATOR).
+// It falls through to aiCfg.Model when not explicitly set. Call after New().
+func (g *Generator) SetModel(model string) {
+	if model != "" {
+		g.model = model
 	}
 }
 
@@ -74,13 +84,50 @@ func PrintSearches(searches []config.SearchConfig) error {
 }
 
 func (g *Generator) aiEnabled() bool {
-	return g.aiCfg.Enabled && g.aiCfg.APIKey != "" && g.aiCfg.Model != ""
+	return g.aiCfg.Enabled && g.aiCfg.APIKey != "" && g.model != ""
 }
 
 func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.SearchConfig, error) {
+	// searchConfigSchema is derived from config.SearchConfig — the exact fields
+	// returned by the AI (XOL-60 SUP-9 strict json_schema).
+	searchConfigSchema := &jsonSchemaFormat{
+		Type: "json_schema",
+		JSONSchema: jsonSchemaSpec{
+			Name:   "search_config_list",
+			Strict: true,
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"searches": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name":             map[string]any{"type": "string"},
+								"query":            map[string]any{"type": "string"},
+								"category_id":      map[string]any{"type": "integer"},
+								"max_price":        map[string]any{"type": "integer"},
+								"min_price":        map[string]any{"type": "integer"},
+								"condition":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+								"offer_percentage": map[string]any{"type": "integer"},
+								"auto_message":     map[string]any{"type": "boolean"},
+								"message_template": map[string]any{"type": "string"},
+							},
+							"required":             []string{"name", "query", "category_id", "max_price", "min_price", "condition", "offer_percentage", "auto_message", "message_template"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"searches"},
+				"additionalProperties": false,
+			},
+		},
+	}
+
 	reqBody := chatCompletionRequest{
-		Model:       g.aiCfg.Model,
-		Temperature: g.aiCfg.Temperature,
+		Model:          g.model,
+		Temperature:    g.aiCfg.Temperature,
+		ResponseFormat: searchConfigSchema,
 		Messages: []chatMessage{
 			{
 				Role: "system",
@@ -135,11 +182,12 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		return nil, fmt.Errorf("ai response contained no choices")
 	}
 
-	content := extractJSON(completion.Choices[0].Message.Content)
+	// With strict json_schema mode, the model returns valid JSON directly.
+	// No extractJSON fallback — surface parse failures as typed errors.
 	var payload struct {
 		Searches []config.SearchConfig `json:"searches"`
 	}
-	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+	if err := json.Unmarshal([]byte(completion.Choices[0].Message.Content), &payload); err != nil {
 		return nil, fmt.Errorf("parse ai json: %w", err)
 	}
 
@@ -353,10 +401,23 @@ func extractJSON(value string) string {
 	return value
 }
 
+// jsonSchemaFormat is the strict json_schema response_format (XOL-60 SUP-9).
+type jsonSchemaFormat struct {
+	Type       string         `json:"type"`
+	JSONSchema jsonSchemaSpec `json:"json_schema"`
+}
+
+type jsonSchemaSpec struct {
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
+}
+
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Temperature float64       `json:"temperature"`
-	Messages    []chatMessage `json:"messages"`
+	Model          string            `json:"model"`
+	Temperature    float64           `json:"temperature"`
+	Messages       []chatMessage     `json:"messages"`
+	ResponseFormat *jsonSchemaFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
@@ -377,6 +438,6 @@ type chatCompletionResponse struct {
 
 func (g *Generator) reportUsage(callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if g.onUsage != nil {
-		g.onUsage(callType, g.aiCfg.Model, prompt, completion, latencyMs, success, errMsg)
+		g.onUsage(callType, g.model, prompt, completion, latencyMs, success, errMsg)
 	}
 }

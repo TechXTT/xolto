@@ -121,6 +121,7 @@ func (s *Server) handleGenerateSearches(w http.ResponseWriter, r *http.Request, 
 		Temperature: 0.2,
 	}
 	gen := generator.New(aiCfg)
+	gen.SetModel(s.cfg.AIModelGenerator) // XOL-60 SUP-9: per-call-site model override
 	gen.SetUsageCallback(s.makeUsageCallback(user.ID, 0))
 	searches, err := gen.GenerateSearches(r.Context(), req.Topic)
 	if err != nil && len(searches) == 0 {

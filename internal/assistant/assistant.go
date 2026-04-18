@@ -101,31 +101,54 @@ const (
 type UsageCallback func(userID string, missionID int64, callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
 type Assistant struct {
-	cfg      *config.Config
-	store    store.Store
-	searcher marketplace.Marketplace
-	scorer   *scorer.Scorer
-	client   *http.Client
-	onUsage  UsageCallback
+	cfg        *config.Config
+	store      store.Store
+	searcher   marketplace.Marketplace
+	scorer     *scorer.Scorer
+	client     *http.Client
+	onUsage    UsageCallback
+	// Per-call-site model overrides (XOL-60 SUP-9); fall through to cfg.AI.Model.
+	modelBrief string // AI_MODEL_ASSISTANT_BRIEF (parseBriefWithAI)
+	modelDraft string // AI_MODEL_ASSISTANT_DRAFT (draftWithAI)
+	modelChat  string // AI_MODEL_ASSISTANT_CHAT  (compareWithAI / chatText)
 }
 
 func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, sc *scorer.Scorer) *Assistant {
 	return &Assistant{
-		cfg:      cfg,
-		store:    st,
-		searcher: searcher,
-		scorer:   sc,
+		cfg:        cfg,
+		store:      st,
+		searcher:   searcher,
+		scorer:     sc,
+		modelBrief: cfg.AI.Model,
+		modelDraft: cfg.AI.Model,
+		modelChat:  cfg.AI.Model,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
 	}
 }
 
+// SetModels sets the per-call-site model overrides for the three assistant
+// LLM paths. Empty strings fall through to cfg.AI.Model. Call after New().
+// Maps: brief=AI_MODEL_ASSISTANT_BRIEF, draft=AI_MODEL_ASSISTANT_DRAFT,
+// chat=AI_MODEL_ASSISTANT_CHAT (XOL-60 SUP-9).
+func (a *Assistant) SetModels(brief, draft, chat string) {
+	if brief != "" {
+		a.modelBrief = brief
+	}
+	if draft != "" {
+		a.modelDraft = draft
+	}
+	if chat != "" {
+		a.modelChat = chat
+	}
+}
+
 func (a *Assistant) SetUsageCallback(cb UsageCallback) { a.onUsage = cb }
 
-func (a *Assistant) reportUsage(userID string, missionID int64, callType string, prompt, completion, latencyMs int, success bool, errMsg string) {
+func (a *Assistant) reportUsage(userID string, missionID int64, callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if a.onUsage != nil {
-		a.onUsage(userID, missionID, callType, a.cfg.AI.Model, prompt, completion, latencyMs, success, errMsg)
+		a.onUsage(userID, missionID, callType, model, prompt, completion, latencyMs, success, errMsg)
 	}
 }
 
@@ -1495,9 +1518,38 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		SearchQueries      []string `json:"search_queries"`
 	}
 
+	// Strict json_schema response_format for the brief parser (XOL-60 SUP-9).
+	// Schema derived from profileResponse struct fields.
+	briefSchema := map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "buying_brief",
+			"strict": true,
+			"schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":                map[string]any{"type": "string"},
+					"target_query":        map[string]any{"type": "string"},
+					"category_id":         map[string]any{"type": "integer"},
+					"category":            map[string]any{"type": "string"},
+					"budget_max":          map[string]any{"type": "integer"},
+					"budget_stretch":      map[string]any{"type": "integer"},
+					"preferred_condition": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"required_features":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"nice_to_have":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"risk_tolerance":      map[string]any{"type": "string"},
+					"search_queries":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+				"required":             []string{"name", "target_query", "category_id", "category", "budget_max", "budget_stretch", "preferred_condition", "required_features", "nice_to_have", "risk_tolerance", "search_queries"},
+				"additionalProperties": false,
+			},
+		},
+	}
+
 	payload := map[string]any{
-		"model":       a.cfg.AI.Model,
-		"temperature": 0.2,
+		"model":           a.modelBrief,
+		"temperature":     0.2,
+		"response_format": briefSchema,
 		"messages": []map[string]string{
 			{
 				"role": "system",
@@ -1530,14 +1582,14 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, errMsg)
+		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, errMsg)
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
@@ -1552,17 +1604,18 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		a.reportUsage(userID, 0, "brief_parser", 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
-	a.reportUsage(userID, 0, "brief_parser", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	a.reportUsage(userID, 0, "brief_parser", a.modelBrief, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("no ai choices")
 	}
-	content := extractJSON(completion.Choices[0].Message.Content)
+	// With strict json_schema mode, the model returns valid JSON directly.
+	// No extractJSON fallback — surface parse failures as typed errors.
 	var parsed profileResponse
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(completion.Choices[0].Message.Content), &parsed); err != nil {
+		return nil, fmt.Errorf("parse ai brief json: %w", err)
 	}
 	if parsed.BudgetStretch == 0 {
 		parsed.BudgetStretch = parsed.BudgetMax
@@ -1611,7 +1664,7 @@ func missionCategoryFromParsed(parsedCategory, targetQuery, name string) string 
 
 func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []models.ShortlistEntry) (string, error) {
 	payload := map[string]any{
-		"model":       a.cfg.AI.Model,
+		"model":       a.modelChat,
 		"temperature": 0.5,
 		"messages": []map[string]string{
 			{
@@ -1654,7 +1707,7 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 		entryForPrompt.Verdict = ""
 	}
 	payload := map[string]any{
-		"model":       a.cfg.AI.Model,
+		"model":       a.modelDraft,
 		"temperature": 0.5,
 		"messages": []map[string]string{
 			{
@@ -1681,6 +1734,11 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 }
 
 func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64, callType string, payload map[string]any) (string, error) {
+	// Extract the model from the payload for usage reporting (set by caller).
+	model, _ := payload["model"].(string)
+	if model == "" {
+		model = a.cfg.AI.Model
+	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.cfg.AI.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
@@ -1692,14 +1750,14 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, errMsg)
+		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, errMsg)
 		return "", fmt.Errorf("%s", errMsg)
 	}
 	var completion struct {
@@ -1714,10 +1772,10 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		a.reportUsage(userID, missionID, callType, 0, 0, latencyMs, false, err.Error())
+		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
-	a.reportUsage(userID, missionID, callType, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	a.reportUsage(userID, missionID, callType, model, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
 	if len(completion.Choices) == 0 {
 		return "", fmt.Errorf("no ai choices")
 	}

@@ -1,0 +1,113 @@
+package generator
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/TechXTT/xolto/internal/config"
+)
+
+// validGeneratorResponse is a minimal AI response that satisfies the
+// strict json_schema parser path used by generateWithAI.
+const validGeneratorResponse = `{"choices":[{"message":{"role":"assistant","content":"{\"searches\":[{\"name\":\"Sony A7 III\",\"query\":\"sony a7 iii\",\"category_id\":487,\"max_price\":1100,\"min_price\":500,\"condition\":[\"good\",\"like_new\"],\"offer_percentage\":75,\"auto_message\":false,\"message_template\":\"Hi, would you accept EUR {{.OfferPrice}}?\"}]}"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
+
+// TestGeneratorRequestShape_ModelOverride verifies that:
+//   - When SetModel is called, the outgoing request body carries the overridden model.
+//   - The request body has response_format.type=="json_schema".
+//   - The request body has response_format.json_schema.strict==true.
+//   - The schema object is non-empty.
+//
+// (XOL-60 SUP-9 AC)
+func TestGeneratorRequestShape_ModelOverride(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validGeneratorResponse))
+	}))
+	defer srv.Close()
+
+	gen := New(config.AIConfig{
+		Enabled: true,
+		APIKey:  "test-key",
+		Model:   "gpt-4o-mini",
+		BaseURL: srv.URL,
+	})
+	gen.SetModel("gpt-5-nano") // per-call-site override
+	gen.client = srv.Client()
+
+	searches, err := gen.GenerateSearches(context.Background(), "sony camera")
+	if err != nil {
+		t.Fatalf("GenerateSearches() error = %v", err)
+	}
+	if len(searches) == 0 {
+		t.Fatal("expected at least one search result")
+	}
+
+	// Assert model override propagated.
+	if got, _ := captured["model"].(string); got != "gpt-5-nano" {
+		t.Errorf("expected model=gpt-5-nano in request, got %q", got)
+	}
+
+	// Assert response_format.type == "json_schema".
+	rf, ok := captured["response_format"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format missing or wrong type: %#v", captured["response_format"])
+	}
+	if got := rf["type"]; got != "json_schema" {
+		t.Errorf("expected response_format.type=json_schema, got %q", got)
+	}
+
+	// Assert response_format.json_schema.strict == true.
+	js, ok := rf["json_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format.json_schema missing or wrong type: %#v", rf["json_schema"])
+	}
+	if got := js["strict"]; got != true {
+		t.Errorf("expected response_format.json_schema.strict=true, got %v", got)
+	}
+
+	// Assert schema is non-empty.
+	schema, ok := js["schema"].(map[string]any)
+	if !ok || len(schema) == 0 {
+		t.Errorf("expected non-empty schema, got %#v", js["schema"])
+	}
+}
+
+// TestGeneratorRequestShape_ModelFallthrough verifies that when SetModel is NOT
+// called, the outgoing request uses cfg.Model (XOL-60 SUP-9 AC).
+func TestGeneratorRequestShape_ModelFallthrough(t *testing.T) {
+	var captured map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validGeneratorResponse))
+	}))
+	defer srv.Close()
+
+	gen := New(config.AIConfig{
+		Enabled: true,
+		APIKey:  "test-key",
+		Model:   "gpt-4o-mini",
+		BaseURL: srv.URL,
+	})
+	// No SetModel — should fall through to cfg.Model.
+	gen.client = srv.Client()
+
+	_, err := gen.GenerateSearches(context.Background(), "sony camera")
+	if err != nil {
+		t.Fatalf("GenerateSearches() error = %v", err)
+	}
+
+	if got, _ := captured["model"].(string); got != "gpt-4o-mini" {
+		t.Errorf("expected model=gpt-4o-mini (fallthrough), got %q", got)
+	}
+}

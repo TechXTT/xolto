@@ -334,3 +334,165 @@ func TestAIModelClassifierOverride(t *testing.T) {
 		t.Errorf("expected AIModelClassifier=gpt-4o-mini, got %q", cfg.AIModelClassifier)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Per-call-site AI_MODEL_* env tests (XOL-60 SUP-9)
+// ---------------------------------------------------------------------------
+
+// setBaseDevEnv sets the minimum env vars required for a dev-env config load.
+func setBaseDevEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "development")
+}
+
+// TestAIModelScorerFallthrough verifies that AI_MODEL_SCORER falls through to
+// AI_MODEL when unset (XOL-60 SUP-9 AC).
+func TestAIModelScorerFallthrough(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_SCORER", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelScorer != "gpt-4o-mini" {
+		t.Errorf("expected AIModelScorer=gpt-4o-mini (fallthrough to AI_MODEL), got %q", cfg.AIModelScorer)
+	}
+}
+
+// TestAIModelScorerOverride verifies that AI_MODEL_SCORER is respected when set.
+func TestAIModelScorerOverride(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_SCORER", "gpt-5-mini")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelScorer != "gpt-5-mini" {
+		t.Errorf("expected AIModelScorer=gpt-5-mini, got %q", cfg.AIModelScorer)
+	}
+}
+
+// TestAIModelGeneratorFallthrough verifies AI_MODEL_GENERATOR falls through.
+func TestAIModelGeneratorFallthrough(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_GENERATOR", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelGenerator != "gpt-4o-mini" {
+		t.Errorf("expected AIModelGenerator=gpt-4o-mini (fallthrough to AI_MODEL), got %q", cfg.AIModelGenerator)
+	}
+}
+
+// TestAIModelGeneratorOverride verifies AI_MODEL_GENERATOR is respected when set.
+func TestAIModelGeneratorOverride(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_GENERATOR", "gpt-5-nano")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelGenerator != "gpt-5-nano" {
+		t.Errorf("expected AIModelGenerator=gpt-5-nano, got %q", cfg.AIModelGenerator)
+	}
+}
+
+// TestAIModelAssistantBriefFallthrough verifies AI_MODEL_ASSISTANT_BRIEF falls through.
+func TestAIModelAssistantBriefFallthrough(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_BRIEF", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantBrief != "gpt-4o-mini" {
+		t.Errorf("expected AIModelAssistantBrief=gpt-4o-mini (fallthrough to AI_MODEL), got %q", cfg.AIModelAssistantBrief)
+	}
+}
+
+// TestAIModelAssistantBriefOverride verifies AI_MODEL_ASSISTANT_BRIEF is respected.
+func TestAIModelAssistantBriefOverride(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_BRIEF", "gpt-5-mini")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantBrief != "gpt-5-mini" {
+		t.Errorf("expected AIModelAssistantBrief=gpt-5-mini, got %q", cfg.AIModelAssistantBrief)
+	}
+}
+
+// TestAIModelAssistantDraftFallthrough verifies AI_MODEL_ASSISTANT_DRAFT falls through.
+func TestAIModelAssistantDraftFallthrough(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_DRAFT", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantDraft != "gpt-4o-mini" {
+		t.Errorf("expected AIModelAssistantDraft=gpt-4o-mini (fallthrough to AI_MODEL), got %q", cfg.AIModelAssistantDraft)
+	}
+}
+
+// TestAIModelAssistantDraftOverride verifies AI_MODEL_ASSISTANT_DRAFT is respected.
+func TestAIModelAssistantDraftOverride(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_DRAFT", "gpt-5-mini")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantDraft != "gpt-5-mini" {
+		t.Errorf("expected AIModelAssistantDraft=gpt-5-mini, got %q", cfg.AIModelAssistantDraft)
+	}
+}
+
+// TestAIModelAssistantChatFallthrough verifies AI_MODEL_ASSISTANT_CHAT falls through.
+func TestAIModelAssistantChatFallthrough(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_CHAT", "")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantChat != "gpt-4o-mini" {
+		t.Errorf("expected AIModelAssistantChat=gpt-4o-mini (fallthrough to AI_MODEL), got %q", cfg.AIModelAssistantChat)
+	}
+}
+
+// TestAIModelAssistantChatOverride verifies AI_MODEL_ASSISTANT_CHAT is respected.
+func TestAIModelAssistantChatOverride(t *testing.T) {
+	setBaseDevEnv(t)
+	t.Setenv("AI_MODEL", "gpt-4o-mini")
+	t.Setenv("AI_MODEL_ASSISTANT_CHAT", "gpt-5-mini")
+
+	cfg, err := LoadServerConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AIModelAssistantChat != "gpt-5-mini" {
+		t.Errorf("expected AIModelAssistantChat=gpt-5-mini, got %q", cfg.AIModelAssistantChat)
+	}
+}
