@@ -43,6 +43,11 @@ type ServerConfig struct {
 	PlainAPIKey         string
 	PlainWebhookSecret  string
 	AppEnv              string
+	// SMS escalation (XOL-56 SUP-5).
+	TwilioAccountSID  string
+	TwilioAuthToken   string
+	TwilioFromNumber  string
+	FounderSMSNumber  string
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -85,6 +90,11 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		PlainAPIKey:        os.Getenv("PLAIN_API_KEY"),
 		PlainWebhookSecret: os.Getenv("PLAIN_WEBHOOK_SECRET"),
 		AppEnv:             os.Getenv("APP_ENV"),
+		// SMS escalation (XOL-56 SUP-5).
+		TwilioAccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
+		FounderSMSNumber: os.Getenv("FOUNDER_SMS_NUMBER"),
 	}
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
@@ -110,6 +120,22 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	// Unset APP_ENV defaults to prod-safe behaviour.
 	if cfg.PlainAPIKey == "" && isProductionEnv(cfg.AppEnv) {
 		return cfg, fmt.Errorf("PLAIN_API_KEY is required in production")
+	}
+	// Fail-safe env gate: Twilio SMS vars are required in production (XOL-56 SUP-5).
+	// Unset APP_ENV is treated as production (fail-safe default).
+	if isProductionEnv(cfg.AppEnv) {
+		if cfg.TwilioAccountSID == "" {
+			return cfg, fmt.Errorf("TWILIO_ACCOUNT_SID is required in production")
+		}
+		if cfg.TwilioAuthToken == "" {
+			return cfg, fmt.Errorf("TWILIO_AUTH_TOKEN is required in production")
+		}
+		if cfg.TwilioFromNumber == "" {
+			return cfg, fmt.Errorf("TWILIO_FROM_NUMBER is required in production")
+		}
+		if cfg.FounderSMSNumber == "" {
+			return cfg, fmt.Errorf("FOUNDER_SMS_NUMBER is required in production")
+		}
 	}
 	return cfg, nil
 }
