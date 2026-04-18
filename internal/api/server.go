@@ -53,6 +53,10 @@ type Server struct {
 	// The channel is buffered with a small capacity; events are dropped if no
 	// consumer is reading (Phase 1 — no DB-backed queue).
 	supportEvents chan store.SupportEvent
+	// mustHaveEvaluator is the optional semantic LLM evaluator for must-have
+	// matching (XOL-22). When nil the /matches handler uses the tokenizer-only
+	// path via ScoreMustHaves. Set at startup via SetMustHaveEvaluator.
+	mustHaveEvaluator scorer.MustHaveEvaluator
 }
 
 type googleTokenResponse struct {
@@ -124,6 +128,13 @@ func (s *Server) Handler() http.Handler {
 // their context is cancelled.
 func (s *Server) SupportEvents() <-chan store.SupportEvent {
 	return s.supportEvents
+}
+
+// SetMustHaveEvaluator wires the optional LLM-backed must-have evaluator
+// (XOL-22) into the /matches handler. When e is nil the handler falls back to
+// tokenizer-only scoring. Must be called before Handler().
+func (s *Server) SetMustHaveEvaluator(e scorer.MustHaveEvaluator) {
+	s.mustHaveEvaluator = e
 }
 
 func (s *Server) StartBillingReconcileLoop(ctx context.Context, interval time.Duration) {
