@@ -26,6 +26,7 @@ import (
 	"github.com/TechXTT/xolto/internal/reasoner"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
+	"github.com/TechXTT/xolto/internal/support"
 	"github.com/TechXTT/xolto/internal/worker"
 	"github.com/joho/godotenv"
 )
@@ -110,6 +111,20 @@ func main() {
 	pool.SetEmailNotifier(emailNotifier)
 	pool.Start(context.Background())
 	defer pool.Stop()
+
+	// Construct SMSEscalator (XOL-56 SUP-5). SUP-4's classifier will consume
+	// this as a callback. In non-prod envs Twilio vars may be absent; the
+	// escalator handles dry-run logging in that case.
+	var twilioSender support.TwilioSenderInterface
+	if cfg.TwilioAccountSID != "" {
+		twilioSender = support.NewTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, nil)
+	}
+	_ = support.NewSMSEscalator(support.SMSEscalatorConfig{
+		Sender:     twilioSender,
+		FromNumber: cfg.TwilioFromNumber,
+		FounderNum: cfg.FounderSMSNumber,
+		AppEnv:     cfg.AppEnv,
+	})
 
 	// Start the outreach stale-transition goroutine. Wakes every hour and
 	// transitions awaiting_reply threads older than 7 days to stale.
