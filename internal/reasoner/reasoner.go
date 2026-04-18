@@ -276,7 +276,7 @@ func (r *Reasoner) callLLM(
 					"You must judge whether the listing is actually relevant to what the user searched for — " +
 					"a listing is NOT relevant if it is a completely different product category than the search intent " +
 					"(e.g. a phone appearing in a camera search, or a bag appearing in a laptop search). " +
-					"Reply with strict JSON only.",
+					localeInstruction(search.CountryCode) + " Reply with strict JSON only.",
 			},
 			{
 				"role":    "user",
@@ -642,6 +642,19 @@ var stopWords = map[string]bool{
 	"this": true, "that": true, "are": true, "has": true, "have": true,
 	"in": true, "is": true, "it": true, "on": true, "at": true,
 	"used": true, "good": true, "new": true, "like": true,
+}
+
+// localeInstruction returns a language instruction for the LLM based on the
+// user's country code. The reasoning field should be readable by the buyer.
+func localeInstruction(countryCode string) string {
+	switch strings.ToUpper(countryCode) {
+	case "BG":
+		return "Write the reasoning field in Bulgarian."
+	case "NL":
+		return "Write the reasoning field in Dutch."
+	default:
+		return "Write the reasoning field in English."
+	}
 }
 
 type chatMessage struct {

@@ -361,11 +361,11 @@ func TestScorerRequestShape_ModelFallthrough(t *testing.T) {
 	defer srv.Close()
 
 	r := New(config.AIConfig{
-		Enabled:               true,
-		APIKey:                "test-key",
-		Model:                 "gpt-4o-mini",
-		BaseURL:               srv.URL,
-		SkipLLMConfidence:     0.99,
+		Enabled:                true,
+		APIKey:                 "test-key",
+		Model:                  "gpt-4o-mini",
+		BaseURL:                srv.URL,
+		SkipLLMConfidence:      0.99,
 		MaxCallsPerUserPerHour: 100,
 		MaxCallsGlobalPerHour:  1000,
 	})
@@ -388,5 +388,69 @@ func TestScorerRequestShape_ModelFallthrough(t *testing.T) {
 
 	if got, _ := captured["model"].(string); got != "gpt-4o-mini" {
 		t.Errorf("expected model=gpt-4o-mini (fallthrough), got %q", got)
+	}
+}
+
+// TestScorerLocaleInstruction verifies that the system prompt carries a
+// language instruction derived from search.CountryCode (XOL-20).
+func TestScorerLocaleInstruction(t *testing.T) {
+	cases := []struct {
+		countryCode string
+		wantSubstr  string
+	}{
+		{"BG", "Bulgarian"},
+		{"bg", "Bulgarian"}, // case-insensitive
+		{"NL", "Dutch"},
+		{"", "English"},  // default
+		{"US", "English"}, // unknown → English
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.countryCode, func(t *testing.T) {
+			var captured map[string]any
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(raw, &captured)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(validScorerResponse))
+			}))
+			defer srv.Close()
+
+			r := New(config.AIConfig{
+				Enabled:                true,
+				APIKey:                 "test-key",
+				Model:                  "gpt-5-nano",
+				BaseURL:                srv.URL,
+				SkipLLMConfidence:      0.99,
+				MaxCallsPerUserPerHour: 100,
+				MaxCallsGlobalPerHour:  1000,
+			})
+			r.client = srv.Client()
+
+			listing := models.Listing{Title: "Sony A7 III", Price: 10000, PriceType: "fixed"}
+			search := models.SearchSpec{
+				UserID:      "u1",
+				Query:       "sony a7 iii",
+				CountryCode: tc.countryCode,
+			}
+			_, err := r.Analyze(context.Background(), listing, search, 10000, nil)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+
+			// Extract system message content from captured messages.
+			msgs, _ := captured["messages"].([]any)
+			var systemContent string
+			for _, m := range msgs {
+				msg, _ := m.(map[string]any)
+				if msg["role"] == "system" {
+					systemContent, _ = msg["content"].(string)
+				}
+			}
+			if !strings.Contains(systemContent, tc.wantSubstr) {
+				t.Errorf("expected system prompt to contain %q for country_code=%q, got: %q", tc.wantSubstr, tc.countryCode, systemContent)
+			}
+		})
 	}
 }
