@@ -62,13 +62,26 @@ type ThreadInfo struct {
 	CustomerName string
 	// Subject is the thread title / subject line.
 	Subject string
-	// Body is the plain-text body of the thread.
-	// Note: Plain's GraphQL API requires a separate paginated query
-	// (threadTimelineEntries) to retrieve message content. To keep this
-	// implementation within the ~60 LOC budget, Body is left empty here.
-	// The classifier degrades gracefully when Body is empty.
+	// Body is the plain-text body of the thread, built by concatenating the
+	// customer-authored timeline entries (ChatEntry, EmailEntry, SlackMessageEntry).
+	// Internal entry types (NoteEntry, CustomEntry, system transitions) are skipped.
+	// Capped at threadBodyMaxBytes with a trailing truncation marker when exceeded.
+	// Empty when the thread has no customer content or the timeline fetch failed
+	// (the latter still returns metadata — the classifier degrades gracefully).
 	Body string
 }
+
+// threadBodyMaxBytes caps the extracted body text to keep classifier prompts
+// bounded and LLM token cost predictable.
+const threadBodyMaxBytes = 8 * 1024
+
+// threadTimelineFirst is the page size for timeline entries. Support threads
+// are overwhelmingly under this count; we do not paginate further.
+const threadTimelineFirst = 25
+
+// threadBodyTruncSuffix is appended when the concatenated body exceeds
+// threadBodyMaxBytes.
+const threadBodyTruncSuffix = "\n...[truncated]"
 
 // ---------------------------------------------------------------------------
 // PreflightResult — diagnostic snapshot from Preflight
@@ -166,13 +179,20 @@ func (c *Client) Preflight(ctx context.Context) PreflightResult {
 // GetThread
 // ---------------------------------------------------------------------------
 
-// GetThread fetches thread metadata (id, title, customer) from Plain's
-// GraphQL API. The Body field is left empty — retrieving message content
-// requires a separate paginated threadTimelineEntries query which is
-// outside the scope of this method (see ThreadInfo.Body doc comment).
+// GetThread fetches thread metadata and concatenates customer-authored
+// timeline entries into ThreadInfo.Body. The body extraction is a single
+// combined GraphQL query over thread metadata + timelineEntries (first N).
+//
+// Entry selection: ChatEntry.text, EmailEntry.textContent (or fullTextContent
+// when hasMoreTextContent is true), SlackMessageEntry.text. All other entry
+// types (NoteEntry, CustomEntry, system transitions, link events, surveys,
+// etc.) are silently skipped.
+//
+// Body is capped at threadBodyMaxBytes with a truncation marker. If the
+// timeline payload is present but yields no customer content, Body is empty.
 func (c *Client) GetThread(ctx context.Context, threadID string) (ThreadInfo, error) {
 	query := `
-query GetThread($threadId: ID!) {
+query GetThread($threadId: ID!, $first: Int!) {
   thread(threadId: $threadId) {
     id
     title
@@ -182,10 +202,23 @@ query GetThread($threadId: ID!) {
         email
       }
     }
+    timelineEntries(first: $first) {
+      edges {
+        node {
+          entry {
+            __typename
+            ... on ChatEntry { text }
+            ... on EmailEntry { textContent fullTextContent hasMoreTextContent }
+            ... on SlackMessageEntry { text }
+          }
+        }
+      }
+    }
   }
 }`
 	variables := map[string]any{
 		"threadId": threadID,
+		"first":    threadTimelineFirst,
 	}
 
 	var resp struct {
@@ -199,6 +232,13 @@ query GetThread($threadId: ID!) {
 						Email string `json:"email"`
 					} `json:"primaryEmailAddress"`
 				} `json:"customer"`
+				TimelineEntries struct {
+					Edges []struct {
+						Node struct {
+							Entry timelineEntryPayload `json:"entry"`
+						} `json:"node"`
+					} `json:"edges"`
+				} `json:"timelineEntries"`
 			} `json:"thread"`
 		} `json:"data"`
 		Errors []graphQLError `json:"errors"`
@@ -224,7 +264,62 @@ query GetThread($threadId: ID!) {
 	if info.ThreadID == "" {
 		info.ThreadID = threadID
 	}
+
+	parts := make([]string, 0, len(t.TimelineEntries.Edges))
+	for _, edge := range t.TimelineEntries.Edges {
+		if text := edge.Node.Entry.extractText(); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	info.Body = joinAndCapBody(parts)
+
 	return info, nil
+}
+
+// timelineEntryPayload decodes the union-typed Entry field. Only the subset
+// of customer-content entry types is modelled; everything else is skipped
+// via an empty extractText result.
+type timelineEntryPayload struct {
+	Typename           string `json:"__typename"`
+	Text               string `json:"text"`
+	TextContent        string `json:"textContent"`
+	FullTextContent    string `json:"fullTextContent"`
+	HasMoreTextContent bool   `json:"hasMoreTextContent"`
+}
+
+// extractText returns the customer-authored text for this entry, or "" when
+// the entry type carries no customer content we care about.
+func (p timelineEntryPayload) extractText() string {
+	switch p.Typename {
+	case "ChatEntry", "SlackMessageEntry":
+		return strings.TrimSpace(p.Text)
+	case "EmailEntry":
+		if p.HasMoreTextContent && strings.TrimSpace(p.FullTextContent) != "" {
+			return strings.TrimSpace(p.FullTextContent)
+		}
+		return strings.TrimSpace(p.TextContent)
+	}
+	return ""
+}
+
+// joinAndCapBody concatenates the non-empty parts with a blank-line separator
+// and truncates the result to threadBodyMaxBytes, appending a marker if cut.
+func joinAndCapBody(parts []string) string {
+	nonEmpty := parts[:0]
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	body := strings.Join(nonEmpty, "\n\n")
+	if len(body) > threadBodyMaxBytes {
+		cut := threadBodyMaxBytes - len(threadBodyTruncSuffix)
+		if cut < 0 {
+			cut = 0
+		}
+		body = body[:cut] + threadBodyTruncSuffix
+	}
+	return body
 }
 
 // ---------------------------------------------------------------------------
