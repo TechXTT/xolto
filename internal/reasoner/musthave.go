@@ -242,8 +242,10 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 	}
 
 	payload := map[string]any{
-		"model":                 e.cfg.Model,
-		"max_completion_tokens": 512,
+		"model": e.cfg.Model,
+		// gpt-5 reasoning models consume hidden reasoning tokens before the
+		// visible output; 2048 covers reasoning + the verdicts JSON payload.
+		"max_completion_tokens": 2048,
 		"messages": []map[string]any{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userMsg},

@@ -348,8 +348,11 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	userMsg := BuildClassifierUserPrompt(body, subject, customerEmail)
 	llmStart := time.Now()
 	rawText, err := w.cfg.LLM.Complete(ctx, LLMRequest{
-		Model:       w.cfg.LLMModel,
-		MaxTokens:   256,
+		Model: w.cfg.LLMModel,
+		// gpt-5 reasoning models consume hidden reasoning tokens before
+		// emitting the final output; a tight cap yields an empty response.
+		// 2048 covers typical reasoning + the ~80-token JSON schema payload.
+		MaxTokens:   2048,
 		Temperature: 0,
 		System:      ClassifierSystemPrompt(),
 		UserMessage: userMsg,
@@ -502,7 +505,7 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	)
 	draftText, err := w.cfg.LLM.Complete(ctx, LLMRequest{
 		Model:       w.cfg.LLMModel,
-		MaxTokens:   512,
+		MaxTokens:   2048,
 		Temperature: 0.3,
 		System:      "You are a helpful, empathetic support agent for xolto.",
 		UserMessage: draftPrompt,
