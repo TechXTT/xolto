@@ -570,6 +570,77 @@ func TestClassifierRequestShape_OpenAICompatible(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// SUP-60: Enriched getThread warn log — MCPCallError fields accessible
+// ---------------------------------------------------------------------------
+
+// TestClassifierWorker_GetThreadMCPError_EnrichedFields verifies that when
+// GetThread returns an *plain.MCPCallError (e.g. a real 401), the classifier
+// degrades gracefully AND the error is accessible via errors.As so that the
+// warn log can emit endpoint/status_code/body_snippet. The test does not hook
+// the logger (it would require a custom slog.Handler); instead it asserts
+// the error type reachable from the mock, validating the wire path used by
+// classifier.go's warn log.
+func TestClassifierWorker_GetThreadMCPError_EnrichedFields(t *testing.T) {
+	// Build a real httptest 401 server so we can produce a genuine *MCPCallError
+	// — the same path the production classifier's warn log uses.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+	}))
+	defer srv.Close()
+
+	realClient := plain.NewPlainMCPClient("bad-token")
+	realClient.Endpoint = srv.URL
+	realClient.HTTPClient = srv.Client()
+
+	// Verify that GetThread on a 401 server returns *plain.MCPCallError.
+	_, err := realClient.GetThread(context.Background(), "th_check")
+	if err == nil {
+		t.Fatal("expected 401 GetThread to return an error")
+	}
+	var mcpErr *plain.MCPCallError
+	if !errors.As(err, &mcpErr) {
+		t.Fatalf("expected *plain.MCPCallError via errors.As, got %T: %v", err, err)
+	}
+	if mcpErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected status_code=401, got %d", mcpErr.StatusCode)
+	}
+	if mcpErr.BodySnippet == "" {
+		t.Error("expected body_snippet non-empty for 401 response")
+	}
+	if mcpErr.Endpoint == "" {
+		t.Error("expected endpoint non-empty in MCPCallError")
+	}
+
+	// Now run the classifier with a mock that returns this MCPCallError.
+	// The worker must degrade gracefully (not panic, not return an error to the
+	// channel — it should classify with fallback body) and persist a classification.
+	capturedErr := err
+	st := &mockStore{}
+	plainMCP := &mockPlainMCP{
+		getThreadFn: func(_ context.Context, _ string) (plain.ThreadInfo, error) {
+			return plain.ThreadInfo{}, capturedErr
+		},
+	}
+	linearMCP := &mockLinearMCP{}
+	llm := &mockLLMClient{
+		responses: []string{generalLLMResponse(), "Thank you for reaching out."},
+	}
+	worker := buildWorker(st, plainMCP, linearMCP, llm, nil)
+
+	event := store.SupportEvent{
+		ID:            "evt-mcp401",
+		PlainThreadID: "th_mcp401_001",
+	}
+	runSingle(t, worker, event)
+
+	// Classifier must have degraded gracefully and still persisted.
+	if st.classifyCalls != 1 {
+		t.Errorf("expected 1 AttachClassification call after getThread MCPCallError, got %d", st.classifyCalls)
+	}
+}
+
 // TestClassifierIncidentKeywordOverride_WinsOverLLM verifies that the
 // incident-keyword hard-floor override forces severity=incident even when the
 // LLM returns a lower severity (e.g. "low"). The keyword check is run BEFORE

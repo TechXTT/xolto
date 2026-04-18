@@ -286,12 +286,21 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 	// -------------------------------------------------------------------------
 	threadInfo, err := w.cfg.PlainMCP.GetThread(ctx, event.PlainThreadID)
 	if err != nil {
-		w.logger.Warn(
-			"classifier: getThread failed, proceeding with stored data",
+		// Enrich the warn log with HTTP diagnostics when available (SUP-60).
+		warnAttrs := []any{
 			"op", "classifier.get_thread.warn",
 			"plain_thread_id", event.PlainThreadID,
 			"error", err,
-		)
+		}
+		var mcpErr *plain.MCPCallError
+		if errors.As(err, &mcpErr) {
+			warnAttrs = append(warnAttrs,
+				"endpoint", mcpErr.Endpoint,
+				"status_code", mcpErr.StatusCode,
+				"body_snippet", mcpErr.BodySnippet,
+			)
+		}
+		w.logger.Warn("classifier: getThread failed, proceeding with stored data", warnAttrs...)
 		// Degrade gracefully: use the thread ID as body fallback so we can
 		// still classify with minimal context.
 		threadInfo = plain.ThreadInfo{

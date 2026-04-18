@@ -52,6 +52,11 @@ type ServerConfig struct {
 	// PlainMCPToken and LinearAPIKey are required in production.
 	// AIModelClassifier is the per-call-site model override for the classifier
 	// worker; it falls through to AIModel if unset.
+	//
+	// PLAIN_API_KEY and PLAIN_MCP_TOKEN are separate env vars by convention
+	// even when a single Plain credential is used for both. Do not collapse
+	// them — they target different endpoints (GraphQL vs MCP) and may diverge
+	// if Plain introduces MCP-scoped tokens.
 	PlainMCPToken            string
 	LinearAPIKey             string
 	AIModelClassifier        string

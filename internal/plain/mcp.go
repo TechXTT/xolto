@@ -34,6 +34,57 @@ import (
 var ErrPlainMCPUnavailable = errors.New("plain/mcp: endpoint unavailable")
 
 // ---------------------------------------------------------------------------
+// MCPCallError — structured error exposing HTTP status + body snippet
+// ---------------------------------------------------------------------------
+
+// MCPCallError is returned by callTool (and therefore all callers of callTool)
+// when the server responds with a non-2xx HTTP status. It exposes the status
+// code and a sanitised body snippet so that callers (e.g. the classifier warn
+// log) can surface diagnostics without logging the raw credential.
+type MCPCallError struct {
+	// StatusCode is the HTTP status code returned by the server.
+	StatusCode int
+	// BodySnippet is the first 256 characters of the response body, with
+	// newlines replaced by spaces, for single-line log safety.
+	BodySnippet string
+	// Endpoint is the URL that was called.
+	Endpoint string
+}
+
+func (e *MCPCallError) Error() string {
+	return fmt.Sprintf("plain/mcp: HTTP %d: %s", e.StatusCode, e.BodySnippet)
+}
+
+// Unwrap returns ErrPlainMCPUnavailable so errors.Is(err, ErrPlainMCPUnavailable)
+// still works for callers that do not inspect the status code.
+func (e *MCPCallError) Unwrap() error { return ErrPlainMCPUnavailable }
+
+// ---------------------------------------------------------------------------
+// PreflightResult — diagnostic snapshot from Preflight
+// ---------------------------------------------------------------------------
+
+// PreflightResult holds the outcome of a single Preflight probe call.
+type PreflightResult struct {
+	// Configured is true when the token is non-empty after strings.TrimSpace.
+	Configured bool
+	// Endpoint is the URL that was called (empty when Configured is false).
+	Endpoint string
+	// TokenLen is len(strings.TrimSpace(token)) — length of the trimmed credential.
+	TokenLen int
+	// RawTokenLen is len(token) — includes any surrounding whitespace/newlines.
+	// When RawTokenLen != TokenLen the value contains whitespace padding.
+	RawTokenLen int
+	// StatusCode is the HTTP status returned by the preflight probe.
+	// Zero when no HTTP call was made (e.g. empty token).
+	StatusCode int
+	// BodySnippet is the first 256 characters of the response body, newlines
+	// replaced with spaces, for single-line log safety.
+	BodySnippet string
+	// Err is any wire-level or application-level error from the probe.
+	Err error
+}
+
+// ---------------------------------------------------------------------------
 // Domain types returned by getThread
 // ---------------------------------------------------------------------------
 
@@ -129,16 +180,27 @@ type mcpError struct {
 	Message string `json:"message"`
 }
 
-// callTool invokes a single MCP tool and returns the raw result bytes.
-func (c *PlainMCPClient) callTool(ctx context.Context, tool string, args map[string]any) (json.RawMessage, error) {
+// bodySnippet returns the first 256 characters of body with newlines replaced
+// by spaces, safe for single-line structured log fields.
+func bodySnippet(b []byte) string {
+	s := strings.ReplaceAll(string(b), "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	return strings.TrimSpace(s)
+}
+
+// callMethod sends a raw JSON-RPC 2.0 request with the given method and params,
+// and returns the raw result bytes. It is the shared transport used by both
+// callTool and Preflight. On non-2xx HTTP status it returns *MCPCallError so
+// callers can inspect status code and body snippet via errors.As.
+func (c *PlainMCPClient) callMethod(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	reqBody := mcpRequest{
 		JSONRPC: "2.0",
 		ID:      1,
-		Method:  "tools/call",
-		Params: map[string]any{
-			"name":      tool,
-			"arguments": args,
-		},
+		Method:  method,
+		Params:  params,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -146,7 +208,8 @@ func (c *PlainMCPClient) callTool(ctx context.Context, tool string, args map[str
 		return nil, fmt.Errorf("plain/mcp: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(data))
+	ep := c.endpoint()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("plain/mcp: build request: %w", err)
 	}
@@ -165,7 +228,11 @@ func (c *PlainMCPClient) callTool(ctx context.Context, tool string, args map[str
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrPlainMCPUnavailable, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &MCPCallError{
+			StatusCode:  resp.StatusCode,
+			BodySnippet: bodySnippet(body),
+			Endpoint:    ep,
+		}
 	}
 
 	var rpcResp mcpResponse
@@ -173,9 +240,61 @@ func (c *PlainMCPClient) callTool(ctx context.Context, tool string, args map[str
 		return nil, fmt.Errorf("plain/mcp: unmarshal response: %w", err)
 	}
 	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("plain/mcp: tool %q error %d: %s", tool, rpcResp.Error.Code, rpcResp.Error.Message)
+		return nil, fmt.Errorf("plain/mcp: RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	return rpcResp.Result, nil
+}
+
+// callTool invokes a single MCP tool and returns the raw result bytes.
+// On non-2xx HTTP status, the error is *MCPCallError and callers can use
+// errors.As to retrieve status code and body snippet.
+func (c *PlainMCPClient) callTool(ctx context.Context, tool string, args map[string]any) (json.RawMessage, error) {
+	return c.callMethod(ctx, "tools/call", map[string]any{
+		"name":      tool,
+		"arguments": args,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Preflight
+// ---------------------------------------------------------------------------
+
+// Preflight issues a low-cost probe against the MCP endpoint to verify that
+// the configured token is accepted. It calls tools/list (an auth-only MCP
+// standard method that requires no tool arguments).
+//
+// Preflight never panics and never crashes the caller — any error is captured
+// in PreflightResult.Err. The caller is responsible for logging.
+//
+// The token value is never included in PreflightResult or any error message.
+func (c *PlainMCPClient) Preflight(ctx context.Context) PreflightResult {
+	trimmed := strings.TrimSpace(c.Token)
+	result := PreflightResult{
+		Configured:  trimmed != "",
+		TokenLen:    len(trimmed),
+		RawTokenLen: len(c.Token),
+		Endpoint:    c.endpoint(),
+	}
+
+	if !result.Configured {
+		// No token — skip HTTP call entirely.
+		return result
+	}
+
+	_, err := c.callMethod(ctx, "tools/list", map[string]any{})
+	if err != nil {
+		result.Err = err
+		var mcpErr *MCPCallError
+		if errors.As(err, &mcpErr) {
+			result.StatusCode = mcpErr.StatusCode
+			result.BodySnippet = mcpErr.BodySnippet
+		}
+		return result
+	}
+
+	// Successful probe — 2xx (any 2xx we reach here due to callMethod logic).
+	result.StatusCode = http.StatusOK
+	return result
 }
 
 // ---------------------------------------------------------------------------

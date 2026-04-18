@@ -151,6 +151,42 @@ func main() {
 	classifierCtx, classifierCancel := context.WithCancel(context.Background())
 	defer classifierCancel()
 	plainMCPClient := plain.NewPlainMCPClient(cfg.PlainMCPToken)
+
+	// SUP-60: boot preflight — log credential health without logging the value.
+	// Server must continue to boot even when preflight fails.
+	{
+		pfCtx, pfCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pf := plainMCPClient.Preflight(pfCtx)
+		pfCancel()
+
+		pfAttrs := []any{
+			"op", "plain_mcp.preflight",
+			"configured", pf.Configured,
+			"endpoint", pf.Endpoint,
+			"token_len", pf.TokenLen,
+			"raw_token_len", pf.RawTokenLen,
+			"status_code", pf.StatusCode,
+			"body_snippet", pf.BodySnippet,
+		}
+		if pf.Err != nil {
+			pfAttrs = append(pfAttrs, "error", pf.Err)
+		}
+		if pf.Configured && pf.StatusCode >= 200 && pf.StatusCode < 300 {
+			logger.Info("plain MCP preflight OK", pfAttrs...)
+		} else {
+			logger.Warn("plain MCP preflight failed", pfAttrs...)
+		}
+
+		if pf.RawTokenLen != pf.TokenLen {
+			logger.Warn(
+				"plain MCP token has surrounding whitespace — trim before setting env var",
+				"op", "plain_mcp.token_whitespace_detected",
+				"token_len", pf.TokenLen,
+				"raw_token_len", pf.RawTokenLen,
+			)
+		}
+	}
+
 	linearMCPClient := linear.NewLinearMCPClient(cfg.LinearAPIKey)
 	classifierLLMClient := support.NewOpenAICompatClient(cfg.AIAPIKey, cfg.AIBaseURL)
 	classifierWorker := support.NewClassifierWorker(support.ClassifierConfig{
