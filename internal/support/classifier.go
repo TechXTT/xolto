@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TechXTT/xolto/internal/linear"
@@ -205,6 +206,7 @@ type ClassifierConfig struct {
 type ClassifierWorker struct {
 	cfg    ClassifierConfig
 	logger *slog.Logger
+	wg     sync.WaitGroup
 }
 
 // NewClassifierWorker constructs a ClassifierWorker from the given config.
@@ -224,6 +226,7 @@ func (w *ClassifierWorker) Start(ctx context.Context, eventCh <-chan store.Suppo
 		numWorkers = 2
 	}
 	for i := 0; i < numWorkers; i++ {
+		w.wg.Add(1)
 		go w.runWorker(ctx, eventCh)
 	}
 	w.logger.Info(
@@ -233,8 +236,16 @@ func (w *ClassifierWorker) Start(ctx context.Context, eventCh <-chan store.Suppo
 	)
 }
 
+// Wait blocks until every goroutine launched by Start has returned. Safe to
+// call multiple times; tests use it to synchronise mock-state reads with the
+// worker's completion.
+func (w *ClassifierWorker) Wait() {
+	w.wg.Wait()
+}
+
 // runWorker is the goroutine body — drains eventCh until closed or cancelled.
 func (w *ClassifierWorker) runWorker(ctx context.Context, eventCh <-chan store.SupportEvent) {
+	defer w.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():

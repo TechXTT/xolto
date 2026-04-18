@@ -154,6 +154,8 @@ func buildWorker(
 }
 
 // runSingle sends one event through the worker and waits for it to be processed.
+// It synchronises with the worker pool via worker.Wait() so the caller can
+// safely read mock state immediately after runSingle returns.
 func runSingle(t *testing.T, worker *support.ClassifierWorker, event store.SupportEvent) {
 	t.Helper()
 	ch := make(chan store.SupportEvent, 1)
@@ -164,17 +166,7 @@ func runSingle(t *testing.T, worker *support.ClassifierWorker, event store.Suppo
 	defer cancel()
 
 	worker.Start(ctx, ch, 1)
-
-	// Wait until the channel is drained (worker closes) or timeout.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-		if len(ch) == 0 {
-			// Give the worker a little time to finish processing.
-			time.Sleep(50 * time.Millisecond)
-			break
-		}
-	}
+	worker.Wait()
 }
 
 // ---------------------------------------------------------------------------
@@ -363,15 +355,7 @@ func TestClassifierWorker_Latency(t *testing.T) {
 
 	startTS := time.Now()
 	worker.Start(ctx, ch, 1)
-
-	// Wait for processing to complete.
-	deadline := time.Now().Add(55 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-		if st.classifyCalls >= 1 {
-			break
-		}
-	}
+	worker.Wait()
 	elapsed := time.Since(startTS)
 
 	if elapsed >= 60*time.Second {
@@ -423,7 +407,7 @@ func TestClassifierWorker_GracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	worker.Start(ctx, ch, 2)
 	cancel() // should cause workers to exit cleanly; no panic expected
-	time.Sleep(20 * time.Millisecond)
+	worker.Wait()
 }
 
 // TestClassifierWorker_SMSCallback_NotCalledForNonIncident verifies the
