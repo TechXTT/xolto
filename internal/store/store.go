@@ -720,6 +720,9 @@ func migrate(db *sql.DB) error {
 	// XOL-24: outreach thread reply-time tracking.
 	migrateOutreachThreadsSQLite(db)
 
+	// XOL-53 SUP-2: support events intake table.
+	migrateSupportEventsSQLite(db)
+
 	return nil
 }
 
