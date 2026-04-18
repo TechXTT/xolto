@@ -317,6 +317,15 @@ func (w *ClassifierWorker) processEvent(ctx context.Context, event store.Support
 			ThreadID: event.PlainThreadID,
 			Body:     fmt.Sprintf("Thread ID: %s", event.PlainThreadID),
 		}
+	} else {
+		// body_len lets operators tell from Railway logs whether SUP-11 body
+		// extraction landed or whether the classifier is running on metadata
+		// only. The body itself is never logged.
+		w.logger.Info("classifier: getThread ok",
+			"op", "classifier.get_thread",
+			"plain_thread_id", event.PlainThreadID,
+			"body_len", len(threadInfo.Body),
+		)
 	}
 
 	body := threadInfo.Body

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/TechXTT/xolto/internal/plain"
@@ -279,6 +280,7 @@ func TestClient_GetThread_OK(t *testing.T) {
 						"email": "ana@example.com",
 					},
 				},
+				"timelineEntries": map[string]any{"edges": []any{}},
 			},
 		},
 	})
@@ -303,6 +305,167 @@ func TestClient_GetThread_OK(t *testing.T) {
 	}
 	if info.CustomerName != "Ana Kostadinova" {
 		t.Errorf("expected CustomerName=Ana Kostadinova, got %q", info.CustomerName)
+	}
+	if info.Body != "" {
+		t.Errorf("expected empty Body on empty timeline, got %q", info.Body)
+	}
+}
+
+func TestClient_GetThread_WithBody(t *testing.T) {
+	chatText := "битата батерия не държи заряд"
+	emailText := "Hi, my battery drains in 1 hour"
+	srv := newTestServer(t, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"thread": map[string]any{
+				"id":    "th_bg",
+				"title": "Battery issue",
+				"customer": map[string]any{
+					"fullName":            "Ivan Petrov",
+					"primaryEmailAddress": map[string]any{"email": "ivan@example.com"},
+				},
+				"timelineEntries": map[string]any{
+					"edges": []any{
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename": "ChatEntry",
+							"text":       chatText,
+						}}},
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename":  "EmailEntry",
+							"textContent": emailText,
+						}}},
+					},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	client := plain.New("k")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	info, err := client.GetThread(context.Background(), "th_bg")
+	if err != nil {
+		t.Fatalf("GetThread() error = %v", err)
+	}
+	want := chatText + "\n\n" + emailText
+	if info.Body != want {
+		t.Errorf("body mismatch\n  want=%q\n  got =%q", want, info.Body)
+	}
+}
+
+func TestClient_GetThread_EmailFullTextContent(t *testing.T) {
+	short := "short preview"
+	full := "the complete email body content that exceeds the preview"
+	srv := newTestServer(t, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"thread": map[string]any{
+				"id":       "th_email",
+				"title":    "Long email",
+				"customer": map[string]any{"fullName": "x", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"timelineEntries": map[string]any{
+					"edges": []any{
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename":         "EmailEntry",
+							"textContent":        short,
+							"fullTextContent":    full,
+							"hasMoreTextContent": true,
+						}}},
+					},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	client := plain.New("k")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	info, err := client.GetThread(context.Background(), "th_email")
+	if err != nil {
+		t.Fatalf("GetThread() error = %v", err)
+	}
+	if info.Body != full {
+		t.Errorf("expected fullTextContent when hasMoreTextContent=true, got %q", info.Body)
+	}
+}
+
+func TestClient_GetThread_BodyTruncated(t *testing.T) {
+	// 10 KB of text — exceeds the 8 KB cap.
+	big := strings.Repeat("a", 10*1024)
+	srv := newTestServer(t, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"thread": map[string]any{
+				"id":       "th_big",
+				"title":    "Large thread",
+				"customer": map[string]any{"fullName": "", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"timelineEntries": map[string]any{
+					"edges": []any{
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename": "ChatEntry",
+							"text":       big,
+						}}},
+					},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	client := plain.New("k")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	info, err := client.GetThread(context.Background(), "th_big")
+	if err != nil {
+		t.Fatalf("GetThread() error = %v", err)
+	}
+	if len(info.Body) > 8*1024 {
+		t.Errorf("body exceeds 8 KB cap: len=%d", len(info.Body))
+	}
+	if !strings.HasSuffix(info.Body, "...[truncated]") {
+		t.Errorf("expected truncation marker suffix, got last 20 bytes=%q", info.Body[max(0, len(info.Body)-20):])
+	}
+}
+
+func TestClient_GetThread_SkipNonCustomerEntries(t *testing.T) {
+	srv := newTestServer(t, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"thread": map[string]any{
+				"id":       "th_mix",
+				"title":    "Mixed",
+				"customer": map[string]any{"fullName": "", "primaryEmailAddress": map[string]any{"email": "x@x"}},
+				"timelineEntries": map[string]any{
+					"edges": []any{
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename": "NoteEntry",
+							"text":       "internal note — should not appear",
+						}}},
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename": "ThreadStatusTransitionedEntry",
+						}}},
+						map[string]any{"node": map[string]any{"entry": map[string]any{
+							"__typename": "ChatEntry",
+							"text":       "actual customer message",
+						}}},
+					},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	client := plain.New("k")
+	client.Endpoint = srv.URL
+	client.HTTPClient = srv.Client()
+
+	info, err := client.GetThread(context.Background(), "th_mix")
+	if err != nil {
+		t.Fatalf("GetThread() error = %v", err)
+	}
+	if info.Body != "actual customer message" {
+		t.Errorf("expected only ChatEntry text, got %q", info.Body)
 	}
 }
 
