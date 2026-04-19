@@ -119,6 +119,8 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 	for _, offer := range payload.Data {
 		if offer.Status == "" || offer.Status == "active" {
 			active = append(active, offer)
+		} else {
+			slog.Info("olxbg: dropped non-active listing", "status", offer.Status, "id", string(offer.ID))
 		}
 	}
 

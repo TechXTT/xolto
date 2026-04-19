@@ -83,10 +83,11 @@ type searchResponse struct {
 }
 
 type apiOffer struct {
-	ID     flexString `json:"id"`
-	URL    string     `json:"url"`
-	Title  string     `json:"title"`
-	Photos []struct {
+	ID          flexString `json:"id"`
+	URL         string     `json:"url"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Photos      []struct {
 		Link string `json:"link"`
 	} `json:"photos"`
 	Location struct {
@@ -200,6 +201,7 @@ func mapListing(offer apiOffer) models.Listing {
 		CanonicalID:    fmt.Sprintf("olxbg:%s", offerID),
 		MarketplaceID:  "olxbg",
 		Title:          offer.Title,
+		Description:    strings.TrimSpace(offer.Description),
 		Price:          eurCents,
 		PriceType:      priceType,
 		Condition:      condition,
