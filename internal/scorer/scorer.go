@@ -510,7 +510,11 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		}
 	}
 
-	bundleTerms := []string{"bundle", " lot ", "complete set", "collection"}
+	bundleTerms := []string{
+		"bundle", " lot ", "complete set", "collection",
+		// BG Cyrillic — OLX.bg wedge (XOL-88)
+		"комплект", " лот ", "с аксесоари",
+	}
 	for _, term := range bundleTerms {
 		if strings.Contains(lower, term) {
 			flags = append(flags, "unclear_bundle")
@@ -603,8 +607,11 @@ func isElectronicsListing(text string) bool {
 
 func isPhoneOrLaptop(text string) bool {
 	return containsAny(text,
+		// EN terms (existing)
 		"iphone", "samsung", "pixel", "oneplus", "smartphone", "phone",
 		"laptop", "macbook", "notebook", "thinkpad", "surface",
+		// BG Cyrillic — OLX.bg wedge (XOL-88)
+		"телефон", "смартфон", "лаптоп",
 	)
 }
 

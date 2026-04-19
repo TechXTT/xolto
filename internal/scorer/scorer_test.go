@@ -432,6 +432,81 @@ func TestScoreLikeNewBonusRegression(t *testing.T) {
 	}
 }
 
+// TestBGRiskFlagPatterns verifies XOL-88 C-11 Phase 2: BG Cyrillic coverage gaps
+// in isPhoneOrLaptop (no_battery_health) and bundleTerms (unclear_bundle).
+func TestBGRiskFlagPatterns(t *testing.T) {
+	cases := []struct {
+		name        string
+		title       string
+		description string
+		condition   string
+		imageURLs   []string
+		fairPrice   int
+		wantFlag    string
+		wantPresent bool
+	}{
+		{
+			name:        "bg_phone_no_battery_mention_fires_flag",
+			title:       "Смартфон 128GB",
+			description: "Телефон в добро състояние.",
+			condition:   "good",
+			imageURLs:   []string{"a", "b", "c"},
+			fairPrice:   50000,
+			wantFlag:    "no_battery_health",
+			wantPresent: true,
+		},
+		{
+			name:        "bg_phone_with_battery_mention_no_flag",
+			title:       "Смартфон 128GB",
+			description: "батерия 95% капацитет.",
+			condition:   "good",
+			imageURLs:   []string{"a", "b", "c"},
+			fairPrice:   50000,
+			wantFlag:    "no_battery_health",
+			wantPresent: false,
+		},
+		{
+			name:        "bg_bundle_komplekt_fires_flag",
+			title:       "iPhone 13 комплект",
+			description: "Продавам с кутия.",
+			condition:   "good",
+			imageURLs:   []string{"a", "b", "c"},
+			fairPrice:   50000,
+			wantFlag:    "unclear_bundle",
+			wantPresent: true,
+		},
+		{
+			name:        "bg_bundle_s_aksesоari_fires_flag",
+			title:       "Лаптоп с аксесоари",
+			description: "Продавам лаптоп с мишка и чанта.",
+			condition:   "good",
+			imageURLs:   []string{"a", "b", "c"},
+			fairPrice:   50000,
+			wantFlag:    "unclear_bundle",
+			wantPresent: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:      "test-" + tc.name,
+				Title:       tc.title,
+				Description: tc.description,
+				Condition:   tc.condition,
+				Price:       40000,
+				PriceType:   "fixed",
+				ImageURLs:   tc.imageURLs,
+			}, tc.fairPrice)
+			got := containsFlag(flags, tc.wantFlag)
+			if got != tc.wantPresent {
+				t.Errorf("%s: flag %q present=%v, want present=%v (flags=%v)",
+					tc.name, tc.wantFlag, got, tc.wantPresent, flags)
+			}
+		})
+	}
+}
+
 // TestCategoryConditionWeights verifies XOL-86 C-9 Phase 3: category-specific
 // condition score deltas applied on top of the flat Phase 1 adjustments.
 func TestCategoryConditionWeights(t *testing.T) {
