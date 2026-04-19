@@ -54,7 +54,7 @@ func TestMatrixShapeByVerdict(t *testing.T) {
 	for _, v := range verdicts {
 		for _, flag := range top5Flags {
 			listing := nlListing("de Sony A6000 body", []string{flag}, 30000)
-			note := draftnote.Draft(v.verdict, listing)
+			note := draftnote.Draft(v.verdict, listing, draftnote.MissionContext{})
 
 			if note.Shape != v.expectedShape {
 				t.Errorf("verdict=%s flag=%s: expected shape %q, got %q",
@@ -75,7 +75,7 @@ func TestMatrixShapeByVerdict(t *testing.T) {
 func TestAskSellerFlagPriorityOrder(t *testing.T) {
 	cases := []struct {
 		flags          []string
-		expectedSubstr string // Dutch question keyword expected in text
+		expectedSubstr string // Dutch question keyword expected in text or questions
 	}{
 		// anomaly_price beats everything
 		{
@@ -106,13 +106,15 @@ func TestAskSellerFlagPriorityOrder(t *testing.T) {
 
 	for _, c := range cases {
 		listing := nlListing("de Canon EOS M50", c.flags, 0)
-		note := draftnote.Draft(scorer.ActionAskSeller, listing)
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 
 		if note.Shape != draftnote.ShapeAskSeller {
 			t.Errorf("flags=%v: expected shape ask_seller, got %q", c.flags, note.Shape)
 		}
-		if !strings.Contains(strings.ToLower(note.Text), c.expectedSubstr) {
-			t.Errorf("flags=%v: expected text to contain %q, got: %s", c.flags, c.expectedSubstr, note.Text)
+		// questions carry the flag-driven text; check all text output
+		combined := note.Text + " " + strings.Join(note.Questions, " ")
+		if !strings.Contains(strings.ToLower(combined), c.expectedSubstr) {
+			t.Errorf("flags=%v: expected combined output to contain %q, got: %s", c.flags, c.expectedSubstr, combined)
 		}
 	}
 }
@@ -121,12 +123,13 @@ func TestAskSellerFlagPriorityOrder(t *testing.T) {
 // is used when no known flag matches (or all are deduped by listing content).
 func TestAskSellerFallbackWhenNoKnownFlag(t *testing.T) {
 	listing := nlListing("de Fujifilm X100V", []string{}, 0)
-	note := draftnote.Draft(scorer.ActionAskSeller, listing)
+	note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeAskSeller {
 		t.Fatalf("expected shape ask_seller, got %q", note.Shape)
 	}
-	if !strings.Contains(note.Text, "conditie") {
-		t.Errorf("expected generic NL fallback to contain 'conditie', got: %s", note.Text)
+	combined := note.Text + " " + strings.Join(note.Questions, " ")
+	if !strings.Contains(combined, "conditie") {
+		t.Errorf("expected generic NL fallback to contain 'conditie', got: %s", combined)
 	}
 }
 
@@ -139,7 +142,7 @@ func TestBuyDraftNoPriceIncluded(t *testing.T) {
 		FairPrice: 120000,
 		RiskFlags: []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeBuy {
 		t.Fatalf("expected shape buy, got %q", note.Shape)
 	}
@@ -161,7 +164,7 @@ func TestNegotiateFloorGuard(t *testing.T) {
 		FairPrice: fairPrice,
 		RiskFlags: []string{},
 	}
-	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeNegotiate {
 		t.Fatalf("expected shape negotiate, got %q", note.Shape)
 	}
@@ -183,7 +186,7 @@ func TestNegotiateNoAnchorWhenFairPriceZero(t *testing.T) {
 		ComparablesCount: 0,
 		RiskFlags:        []string{},
 	}
-	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeNegotiate {
 		t.Fatalf("expected shape negotiate even without anchor, got %q", note.Shape)
 	}
@@ -197,7 +200,7 @@ func TestNegotiateNoAnchorWhenFairPriceZero(t *testing.T) {
 // refusal — user asked for a draft anyway).
 func TestSkipVerdictEmitsGenericShape(t *testing.T) {
 	listing := nlListing("de iPhone 12 Pro", []string{"anomaly_price"}, 0)
-	note := draftnote.Draft(scorer.ActionSkip, listing)
+	note := draftnote.Draft(scorer.ActionSkip, listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeGeneric {
 		t.Fatalf("expected shape generic for skip, got %q", note.Shape)
 	}
@@ -214,8 +217,8 @@ func TestDeterminism(t *testing.T) {
 		FairPrice:   45000,
 		RiskFlags:   []string{"missing_key_photos", "no_model_id"},
 	}
-	first := draftnote.Draft(scorer.ActionAskSeller, listing)
-	second := draftnote.Draft(scorer.ActionAskSeller, listing)
+	first := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
+	second := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 
 	if first.Text != second.Text {
 		t.Errorf("Draft is not deterministic:\nfirst:  %s\nsecond: %s", first.Text, second.Text)
@@ -234,7 +237,7 @@ func TestLanguageDetectionNL(t *testing.T) {
 		Title:     "de Canon EOS R5 body in goede staat",
 		RiskFlags: []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangNL {
 		t.Errorf("expected lang nl for Dutch listing, got %q", note.Lang)
 	}
@@ -247,7 +250,7 @@ func TestLanguageDetectionEN(t *testing.T) {
 		Description: "Excellent condition, barely used. Comes with original box.",
 		RiskFlags:   []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangEN {
 		t.Errorf("expected lang en for English listing, got %q", note.Lang)
 	}
@@ -260,14 +263,15 @@ func TestAskSellerDedupesBatteryHealthWhenMentioned(t *testing.T) {
 		Title:     "de iPhone 13 batterij 94% uitstekend",
 		RiskFlags: []string{"no_battery_health", "missing_key_photos"},
 	}
-	note := draftnote.Draft(scorer.ActionAskSeller, listing)
+	note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 	// no_battery_health should be deduped (title mentions battery/batterij).
-	// Next priority is missing_key_photos — should appear in text.
-	if strings.Contains(strings.ToLower(note.Text), "batterijgezondheid") {
-		t.Errorf("battery question should be deduped when listing title mentions battery: %s", note.Text)
+	// Next priority is missing_key_photos — should appear in questions.
+	combined := note.Text + " " + strings.Join(note.Questions, " ")
+	if strings.Contains(strings.ToLower(combined), "batterijgezondheid") {
+		t.Errorf("battery question should be deduped when listing title mentions battery: %s", combined)
 	}
-	if !strings.Contains(strings.ToLower(note.Text), "foto") {
-		t.Errorf("expected missing_key_photos question after deduplication, got: %s", note.Text)
+	if !strings.Contains(strings.ToLower(combined), "foto") {
+		t.Errorf("expected missing_key_photos question after deduplication, got: %s", combined)
 	}
 }
 
@@ -277,7 +281,7 @@ func TestAskSellerDedupesBatteryHealthWhenMentioned(t *testing.T) {
 // unknown verdicts fallback to generic (not a panic or error).
 func TestInvalidVerdictFallsToGeneric(t *testing.T) {
 	listing := models.Listing{Title: "camera", RiskFlags: []string{}}
-	note := draftnote.Draft("unknown_verdict", listing)
+	note := draftnote.Draft("unknown_verdict", listing, draftnote.MissionContext{})
 	if note.Shape != draftnote.ShapeGeneric {
 		t.Errorf("unexpected verdict should fall to generic, got %q", note.Shape)
 	}
@@ -300,7 +304,7 @@ func TestLanguageDetectionBG(t *testing.T) {
 		Title:     "Фотоапарат Canon EOS R10 батерия 94%",
 		RiskFlags: []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Errorf("expected lang bg for Bulgarian listing, got %q", note.Lang)
 	}
@@ -309,7 +313,7 @@ func TestLanguageDetectionBG(t *testing.T) {
 // TestBGBuyDraft verifies BG buy template text (XOL-38 M3-D).
 func TestBGBuyDraft(t *testing.T) {
 	listing := bgListing("Фотоапарат Canon EOS R10 батерия", []string{}, 0)
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Fatalf("expected lang bg, got %q", note.Lang)
 	}
@@ -327,9 +331,10 @@ func TestBGBuyDraft(t *testing.T) {
 }
 
 // TestBGNegotiateDraft verifies BG negotiate template text (XOL-38 M3-D).
+// Note: BG negotiate now uses BGN (лв.) format, not EUR.
 func TestBGNegotiateDraft(t *testing.T) {
 	listing := bgListing("Sony A6000 батерия 88%", []string{}, 30000)
-	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Fatalf("expected lang bg, got %q", note.Lang)
 	}
@@ -339,44 +344,48 @@ func TestBGNegotiateDraft(t *testing.T) {
 	if !strings.Contains(note.Text, "Здравейте") {
 		t.Errorf("BG negotiate draft must contain 'Здравейте', got: %s", note.Text)
 	}
-	// Price anchor must appear when FairPrice > 0
-	if !strings.Contains(note.Text, "EUR") {
-		t.Errorf("BG negotiate draft with fairPrice>0 must contain EUR price anchor, got: %s", note.Text)
+	// Price anchor must appear when FairPrice > 0 — in BG, as лв. not EUR
+	if !strings.Contains(note.Text, "лв.") {
+		t.Errorf("BG negotiate draft with fairPrice>0 must contain BGN price anchor (лв.), got: %s", note.Text)
 	}
 }
 
 // TestBGNegotiateDraftNoAnchor verifies BG negotiate without fair price (XOL-38 M3-D).
 func TestBGNegotiateDraftNoAnchor(t *testing.T) {
 	listing := bgListing("iPhone 13 Pro употребяван", []string{}, 0)
-	note := draftnote.Draft(scorer.ActionNegotiate, listing)
+	note := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Fatalf("expected lang bg, got %q", note.Lang)
 	}
 	if strings.Contains(note.Text, "EUR") {
 		t.Errorf("BG negotiate draft with fairPrice=0 must not contain EUR anchor, got: %s", note.Text)
 	}
+	if strings.Contains(note.Text, "лв.") {
+		t.Errorf("BG negotiate draft with fairPrice=0 must not contain BGN anchor, got: %s", note.Text)
+	}
 }
 
 // TestBGAskSellerDraft verifies BG ask-seller template including flag question (XOL-38 M3-D).
 func TestBGAskSellerDraft(t *testing.T) {
 	listing := bgListing("MacBook Pro М1 батерия", []string{"no_battery_health"}, 0)
-	note := draftnote.Draft(scorer.ActionAskSeller, listing)
+	note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Fatalf("expected lang bg, got %q", note.Lang)
 	}
 	if note.Shape != draftnote.ShapeAskSeller {
 		t.Fatalf("expected shape ask_seller, got %q", note.Shape)
 	}
-	// BG battery question must appear
-	if !strings.Contains(note.Text, "батерия") && !strings.Contains(note.Text, "батер") {
-		t.Errorf("BG ask_seller with no_battery_health flag must include battery question, got: %s", note.Text)
+	// BG battery question must appear in questions
+	combined := note.Text + " " + strings.Join(note.Questions, " ")
+	if !strings.Contains(combined, "батерия") && !strings.Contains(combined, "батер") {
+		t.Errorf("BG ask_seller with no_battery_health flag must include battery question, got: %s", combined)
 	}
 }
 
 // TestBGGenericDraft verifies BG generic (skip) template (XOL-38 M3-D).
 func TestBGGenericDraft(t *testing.T) {
 	listing := bgListing("Nikon D750 употребяван", []string{}, 0)
-	note := draftnote.Draft(scorer.ActionSkip, listing)
+	note := draftnote.Draft(scorer.ActionSkip, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangBG {
 		t.Fatalf("expected lang bg, got %q", note.Lang)
 	}
@@ -393,7 +402,7 @@ func TestBGGenericDraft(t *testing.T) {
 func TestBGFlagPriorityOrder(t *testing.T) {
 	cases := []struct {
 		flags          []string
-		expectedSubstr string // BG question keyword expected in text
+		expectedSubstr string // BG question keyword expected in questions
 	}{
 		{
 			[]string{"anomaly_price", "vague_condition", "no_battery_health"},
@@ -411,12 +420,13 @@ func TestBGFlagPriorityOrder(t *testing.T) {
 	for _, c := range cases {
 		// "употребяван" triggers BG detection
 		listing := bgListing("Canon EOS R10 употребяван", c.flags, 0)
-		note := draftnote.Draft(scorer.ActionAskSeller, listing)
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
 		if note.Lang != draftnote.LangBG {
 			t.Errorf("flags=%v: expected lang bg, got %q", c.flags, note.Lang)
 		}
-		if !strings.Contains(strings.ToLower(note.Text), c.expectedSubstr) {
-			t.Errorf("flags=%v: expected text to contain %q, got: %s", c.flags, c.expectedSubstr, note.Text)
+		combined := note.Text + " " + strings.Join(note.Questions, " ")
+		if !strings.Contains(strings.ToLower(combined), c.expectedSubstr) {
+			t.Errorf("flags=%v: expected combined output to contain %q, got: %s", c.flags, c.expectedSubstr, combined)
 		}
 	}
 }
@@ -428,7 +438,7 @@ func TestNLDraftUnchanged(t *testing.T) {
 		Title:     "de Canon EOS R5 body in goede staat",
 		RiskFlags: []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangNL {
 		t.Errorf("NL listing must still produce lang nl after BG detection addition, got %q", note.Lang)
 	}
@@ -445,11 +455,123 @@ func TestENDraftUnchanged(t *testing.T) {
 		Description: "Excellent condition, barely used. Comes with original box.",
 		RiskFlags:   []string{},
 	}
-	note := draftnote.Draft(scorer.ActionBuy, listing)
+	note := draftnote.Draft(scorer.ActionBuy, listing, draftnote.MissionContext{})
 	if note.Lang != draftnote.LangEN {
 		t.Errorf("EN listing must still produce lang en, got %q", note.Lang)
 	}
 	if !strings.Contains(note.Text, "Hi!") {
 		t.Errorf("EN buy draft must contain 'Hi!', got: %s", note.Text)
+	}
+}
+
+// TestNegotiateOfferCalibration verifies offer is 85% of fair price.
+func TestNegotiateOfferCalibration(t *testing.T) {
+	cases := []struct {
+		fairPrice      int
+		wantOfferPrice int
+		wantZero       bool
+	}{
+		{100_00, 85_00, false},  // 100 EUR → 85 EUR offer
+		{50_00, 42_50, false},   // 50 EUR → 42.50 EUR (int truncation of 5000 * 0.85 = 4250 cents)
+		{0, 0, true},            // no anchor → OfferPrice == 0
+	}
+	for _, c := range cases {
+		listing := enListing("Sony A6000", nil, c.fairPrice)
+		note := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
+		if c.wantZero {
+			if note.OfferPrice != 0 {
+				t.Errorf("fairPrice=0: expected OfferPrice=0, got %d", note.OfferPrice)
+			}
+		} else {
+			if note.OfferPrice != c.wantOfferPrice {
+				t.Errorf("fairPrice=%d: expected OfferPrice=%d, got %d", c.fairPrice, c.wantOfferPrice, note.OfferPrice)
+			}
+		}
+	}
+}
+
+// TestAskSellerQuestionsFromMustHaves verifies mission must-haves drive questions.
+func TestAskSellerQuestionsFromMustHaves(t *testing.T) {
+	t.Run("two unknown must-haves produce two questions", func(t *testing.T) {
+		listing := enListing("iPhone 13", nil, 0)
+		mission := draftnote.MissionContext{MustHaves: []string{"original charger", "battery health"}}
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, mission)
+		if len(note.Questions) != 2 {
+			t.Fatalf("expected 2 questions, got %d: %v", len(note.Questions), note.Questions)
+		}
+		for _, q := range note.Questions {
+			if !strings.Contains(strings.ToLower(q), "original charger") &&
+				!strings.Contains(strings.ToLower(q), "battery health") {
+				t.Errorf("question does not reference must-have text: %q", q)
+			}
+		}
+		// text is opener only — must-have text must not appear in Text
+		if strings.Contains(note.Text, "original charger") || strings.Contains(note.Text, "battery health") {
+			t.Errorf("must-have text must not appear in Note.Text opener, got: %q", note.Text)
+		}
+	})
+
+	t.Run("matched must-have not included as question", func(t *testing.T) {
+		listing := models.Listing{
+			Title:       "iPhone 13",
+			Description: "includes original charger in box",
+		}
+		mission := draftnote.MissionContext{MustHaves: []string{"original charger"}}
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, mission)
+		for _, q := range note.Questions {
+			if strings.Contains(strings.ToLower(q), "original charger") {
+				t.Errorf("matched must-have should not appear as question, got: %q", q)
+			}
+		}
+	})
+
+	t.Run("no must-haves with risk flag produces one question", func(t *testing.T) {
+		listing := enListing("iPhone 13", []string{"no_battery_health"}, 0)
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
+		if len(note.Questions) == 0 {
+			t.Fatal("expected at least one question from risk flag")
+		}
+	})
+
+	t.Run("no must-haves no risk flags produces generic fallback", func(t *testing.T) {
+		listing := enListing("iPhone 13", nil, 0)
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, draftnote.MissionContext{})
+		if len(note.Questions) == 0 {
+			t.Fatal("expected generic fallback question, got empty slice")
+		}
+	})
+
+	t.Run("cap at 5 questions max", func(t *testing.T) {
+		many := []string{"must-have-1", "must-have-2", "must-have-3", "must-have-4", "must-have-5", "must-have-6"}
+		listing := enListing("iPhone 13", []string{"no_battery_health"}, 0)
+		mission := draftnote.MissionContext{MustHaves: many}
+		note := draftnote.Draft(scorer.ActionAskSeller, listing, mission)
+		if len(note.Questions) > 5 {
+			t.Errorf("expected at most 5 questions, got %d", len(note.Questions))
+		}
+	})
+}
+
+// TestBGNFormatInNegotiateText verifies BGN format used for BG listings.
+func TestBGNFormatInNegotiateText(t *testing.T) {
+	// BG listing (Cyrillic title → detectLang returns LangBG)
+	bgLst := models.Listing{
+		Title:     "iPhone на Apple",
+		FairPrice: 391_17, // EUR 391.17 ≈ 765 BGN
+		RiskFlags: nil,
+	}
+	note := draftnote.Draft(scorer.ActionNegotiate, bgLst, draftnote.MissionContext{})
+	if strings.Contains(note.Text, "EUR") {
+		t.Errorf("BG negotiate text must not contain 'EUR', got: %q", note.Text)
+	}
+	if !strings.Contains(note.Text, "лв.") {
+		t.Errorf("BG negotiate text must contain 'лв.', got: %q", note.Text)
+	}
+
+	// NL listing — must still use EUR
+	nlLst := nlListing("de iPhone van Apple", nil, 391_17)
+	noteNL := draftnote.Draft(scorer.ActionNegotiate, nlLst, draftnote.MissionContext{})
+	if !strings.Contains(noteNL.Text, "EUR") {
+		t.Errorf("NL negotiate text must contain 'EUR', got: %q", noteNL.Text)
 	}
 }
