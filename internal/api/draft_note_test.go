@@ -180,5 +180,22 @@ func TestDraftNoteVerdictShapeMatrix(t *testing.T) {
 		if lang != "nl" && lang != "en" {
 			t.Errorf("verdict=%s: lang must be nl or en, got %q", c.verdict, lang)
 		}
+		questions, hasQuestions := resp["questions"]
+		if !hasQuestions {
+			t.Errorf("verdict=%s: response missing 'questions' field", c.verdict)
+		}
+		if hasQuestions {
+			qSlice, ok := questions.([]any)
+			if !ok {
+				t.Errorf("verdict=%s: 'questions' must be a JSON array, got %T", c.verdict, questions)
+			} else if c.verdict == "ask_seller" {
+				if len(qSlice) == 0 {
+					t.Errorf("verdict=ask_seller: expected at least 1 question (generic fallback), got empty")
+				}
+			} else {
+				// buy, negotiate, skip: questions must be present but may be empty
+				_ = qSlice
+			}
+		}
 	}
 }
