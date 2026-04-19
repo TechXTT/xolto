@@ -34,11 +34,20 @@ const (
 	LangEN Lang = "en"
 )
 
+// MissionContext carries mission-level data needed to ground the draft.
+// Pass zero value when no mission is supplied — all fields default safely.
+type MissionContext struct {
+	MustHaves   []string
+	CountryCode string
+}
+
 // Note is the structured output of Draft.
 type Note struct {
-	Text  string `json:"text"`
-	Shape Shape  `json:"shape"`
-	Lang  Lang   `json:"lang"`
+	Text       string   `json:"text"`
+	Shape      Shape    `json:"shape"`
+	Lang       Lang     `json:"lang"`
+	Questions  []string `json:"questions"`             // non-nil; empty for buy/negotiate/generic
+	OfferPrice int      `json:"offer_price,omitempty"` // negotiate only; EUR cents; 0 = omit
 }
 
 // flagToQuestionNL maps the priority-ordered risk flags to a Dutch clarifying
@@ -220,20 +229,28 @@ func hasModelPattern(s string) bool {
 	return inWord && hasLetter && hasDigit
 }
 
-// Draft generates a verdict-shaped seller note for the given listing and
-// verdict string. verdict must be one of the four canonical action values;
-// the caller is responsible for validating and rejecting unknown verdicts
-// before calling Draft.
+// Draft generates a verdict-shaped seller note for the given listing,
+// verdict string, and mission context. verdict must be one of the four
+// canonical action values; the caller is responsible for validating and
+// rejecting unknown verdicts before calling Draft.
 //
 // The negotiate shape uses the listing's FairPrice to anchor the price
 // suggestion. When FairPrice is zero (no comparables data), the shape still
 // emits negotiate text but without a specific price anchor — the caller's
 // report must surface this gap (see structural emission gap disclosure).
-func Draft(verdict string, listing models.Listing) Note {
+//
+// Pass a zero MissionContext when no mission is supplied — all fields default
+// safely and the draft is still useful.
+func Draft(verdict string, listing models.Listing, mission MissionContext) Note {
 	lang := detectLang(listing)
 	shape := verdictToShape(verdict)
-	text := buildText(shape, lang, listing)
-	return Note{Text: text, Shape: shape, Lang: lang}
+	note := buildNote(shape, lang, listing, mission)
+	note.Shape = shape
+	note.Lang = lang
+	if note.Questions == nil {
+		note.Questions = []string{}
+	}
+	return note
 }
 
 func verdictToShape(verdict string) Shape {
@@ -252,16 +269,16 @@ func verdictToShape(verdict string) Shape {
 	}
 }
 
-func buildText(shape Shape, lang Lang, listing models.Listing) string {
+func buildNote(shape Shape, lang Lang, listing models.Listing, mission MissionContext) Note {
 	switch shape {
 	case ShapeBuy:
-		return buildBuyText(lang, listing)
+		return Note{Text: buildBuyText(lang, listing)}
 	case ShapeNegotiate:
-		return buildNegotiateText(lang, listing)
+		return buildNegotiateNote(lang, listing)
 	case ShapeAskSeller:
-		return buildAskSellerText(lang, listing)
+		return buildAskSellerNote(lang, listing, mission)
 	default:
-		return buildGenericText(lang, listing)
+		return Note{Text: buildGenericText(lang, listing)}
 	}
 }
 
@@ -286,111 +303,150 @@ func buildBuyText(lang Lang, listing models.Listing) string {
 	}
 }
 
-func buildNegotiateText(lang Lang, listing models.Listing) string {
-	// Negotiate draft: comparables-anchored price suggestion.
-	// Guard: anchor must not go below fair_price × 0.85.
-	fairPrice := listing.FairPrice
-	if fairPrice <= 0 {
-		// No anchor available — emit intent-only negotiate text without a price.
-		// Structural emission gap: when FairPrice=0 the draft omits the price
-		// anchor. Callers can detect this via listing.FairPrice == 0.
-		switch lang {
-		case LangBG:
-			return strings.TrimSpace(fmt.Sprintf(
-				"Здравейте! Интересувам се от %s. Въз основа на сравними обяви се питам дали има гъвкавост в цената. Можете ли да ми кажете повече?",
-				listing.Title,
-			))
-		case LangNL:
-			return strings.TrimSpace(fmt.Sprintf(
-				"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare aanbiedingen vraag ik me af of er iets mogelijk is aan de prijs. Kun je me meer vertellen?",
-				listing.Title,
-			))
-		default:
-			return strings.TrimSpace(fmt.Sprintf(
-				"Hi! I'm interested in your %s. Based on comparable listings I was wondering if there's any flexibility on the price. Could you tell me more?",
-				listing.Title,
-			))
-		}
-	}
-
-	// Suggested offer = fair price (market value). Floor at 85% of fair price.
-	suggestedOffer := fairPrice
-	floor := int(float64(fairPrice) * 0.85)
-	if suggestedOffer < floor {
-		suggestedOffer = floor
-	}
-
+func buildNegotiateNoAnchorText(lang Lang, listing models.Listing) string {
+	// No anchor available — emit intent-only negotiate text without a price.
+	// Structural emission gap: when FairPrice=0 the draft omits the price
+	// anchor. Callers can detect this via listing.FairPrice == 0.
 	switch lang {
 	case LangBG:
 		return strings.TrimSpace(fmt.Sprintf(
-			"Здравейте! Интересувам се от %s. Въз основа на сравними обяви пазарната цена е около %s. Бихте ли се съгласили на %s? Ако всичко е наред, мога да взема бързо.",
+			"Здравейте! Интересувам се от %s. Въз основа на сравними обяви се питам дали има гъвкавост в цената. Можете ли да ми кажете повече?",
 			listing.Title,
-			format.Euro(fairPrice),
-			format.Euro(suggestedOffer),
 		))
 	case LangNL:
 		return strings.TrimSpace(fmt.Sprintf(
-			"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare advertenties zie ik een marktprijs rond %s. Zou je %s overwegen? Als alles in orde is, kan ik snel ophalen.",
+			"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare aanbiedingen vraag ik me af of er iets mogelijk is aan de prijs. Kun je me meer vertellen?",
 			listing.Title,
-			format.Euro(fairPrice),
-			format.Euro(suggestedOffer),
 		))
 	default:
 		return strings.TrimSpace(fmt.Sprintf(
-			"Hi! I'm interested in your %s. Based on comparable listings the market price is around %s. Would you consider %s? If everything checks out I can pick it up quickly.",
+			"Hi! I'm interested in your %s. Based on comparable listings I was wondering if there's any flexibility on the price. Could you tell me more?",
 			listing.Title,
-			format.Euro(fairPrice),
-			format.Euro(suggestedOffer),
 		))
 	}
 }
 
-func buildAskSellerText(lang Lang, listing models.Listing) string {
-	// Ask seller draft: clarifying question from top-priority risk flag.
-	flag := topPriorityFlag(listing.RiskFlags, listing)
-
-	var question string
-	if flag != "" {
-		switch lang {
-		case LangBG:
-			question = flagToQuestionBG[flag]
-		case LangNL:
-			question = flagToQuestionNL[flag]
-		default:
-			question = flagToQuestionEN[flag]
-		}
+func buildNegotiateNote(lang Lang, listing models.Listing) Note {
+	fairPrice := listing.FairPrice
+	if fairPrice <= 0 {
+		// No anchor — intent-only text, no offer price
+		return Note{Text: buildNegotiateNoAnchorText(lang, listing), Questions: []string{}}
 	}
 
-	if question == "" {
-		switch lang {
-		case LangBG:
-			question = "Можете ли да разкажете повече за състоянието и включените аксесоари?"
-		case LangNL:
-			question = "Kun je meer vertellen over de conditie en meegeleverde accessoires?"
-		default:
-			question = "Could you tell me more about the condition and what accessories are included?"
-		}
+	suggestedOffer := int(float64(fairPrice) * 0.85)
+	floor := int(float64(fairPrice) * 0.70)
+	if suggestedOffer < floor {
+		suggestedOffer = floor
 	}
 
+	var fairFmt, offerFmt string
+	if lang == LangBG {
+		fairFmt = format.BGN(fairPrice)
+		offerFmt = format.BGN(suggestedOffer)
+	} else {
+		fairFmt = format.Euro(fairPrice)
+		offerFmt = format.Euro(suggestedOffer)
+	}
+
+	var text string
 	switch lang {
 	case LangBG:
-		return strings.TrimSpace(fmt.Sprintf(
-			"Здравейте! Интересувам се от %s. %s",
-			listing.Title,
-			question,
+		text = strings.TrimSpace(fmt.Sprintf(
+			"Здравейте! Интересувам се от %s. Въз основа на сравними обяви пазарната цена е около %s. Бихте ли се съгласили на %s? Ако всичко е наред, мога да взема бързо.",
+			listing.Title, fairFmt, offerFmt,
 		))
 	case LangNL:
-		return strings.TrimSpace(fmt.Sprintf(
-			"Hoi! Ik heb interesse in je %s. %s",
-			listing.Title,
-			question,
+		text = strings.TrimSpace(fmt.Sprintf(
+			"Hoi! Ik heb interesse in je %s. Op basis van vergelijkbare advertenties zie ik een marktprijs rond %s. Zou je %s overwegen? Als alles in orde is, kan ik snel ophalen.",
+			listing.Title, fairFmt, offerFmt,
 		))
 	default:
-		return strings.TrimSpace(fmt.Sprintf(
-			"Hi! I'm interested in your %s. %s",
-			listing.Title,
-			question,
+		text = strings.TrimSpace(fmt.Sprintf(
+			"Hi! I'm interested in your %s. Based on comparable listings the market price is around %s. Would you consider %s? If everything checks out I can pick it up quickly.",
+			listing.Title, fairFmt, offerFmt,
 		))
+	}
+	return Note{Text: text, Questions: []string{}, OfferPrice: suggestedOffer}
+}
+
+func buildAskSellerNote(lang Lang, listing models.Listing, mission MissionContext) Note {
+	questions := buildAskSellerQuestions(lang, listing, mission)
+
+	var opener string
+	switch lang {
+	case LangBG:
+		opener = strings.TrimSpace(fmt.Sprintf("Здравейте! Интересувам се от %s. Имам няколко въпроса:", listing.Title))
+	case LangNL:
+		opener = strings.TrimSpace(fmt.Sprintf("Hoi! Ik heb interesse in je %s. Ik heb een paar vragen:", listing.Title))
+	default:
+		opener = strings.TrimSpace(fmt.Sprintf("Hi! I'm interested in your %s. I have a few questions:", listing.Title))
+	}
+	return Note{Text: opener, Questions: questions}
+}
+
+func buildAskSellerQuestions(lang Lang, listing models.Listing, mission MissionContext) []string {
+	const maxTotal = 5
+	const maxFromMustHaves = 3
+
+	var questions []string
+
+	// 1. Must-have questions (unmatched only, up to 3)
+	if len(mission.MustHaves) > 0 {
+		matches := scorer.ScoreMustHaves(listing, mission.MustHaves)
+		for _, m := range matches {
+			if len(questions) >= maxFromMustHaves {
+				break
+			}
+			if m.Status == scorer.MustHaveStatusUnknown {
+				questions = append(questions, mustHaveQuestion(m.Text, lang))
+			}
+		}
+	}
+
+	// 2. Risk-flag questions (fill remaining slots up to maxTotal)
+	remaining := maxTotal - len(questions)
+	if remaining > 0 {
+		flag := topPriorityFlag(listing.RiskFlags, listing)
+		if flag != "" {
+			var q string
+			switch lang {
+			case LangBG:
+				q = flagToQuestionBG[flag]
+			case LangNL:
+				q = flagToQuestionNL[flag]
+			default:
+				q = flagToQuestionEN[flag]
+			}
+			if q != "" {
+				questions = append(questions, q)
+			}
+		}
+	}
+
+	// 3. Generic fallback — never return empty
+	if len(questions) == 0 {
+		switch lang {
+		case LangBG:
+			questions = []string{"Можете ли да разкажете повече за състоянието и включените аксесоари?"}
+		case LangNL:
+			questions = []string{"Kun je meer vertellen over de conditie en meegeleverde accessoires?"}
+		default:
+			questions = []string{"Could you tell me more about the condition and what accessories are included?"}
+		}
+	}
+
+	return questions
+}
+
+func mustHaveQuestion(mh string, lang Lang) string {
+	mh = strings.TrimSpace(mh)
+	switch lang {
+	case LangBG:
+		return fmt.Sprintf("Можете ли да потвърдите: %s?", mh)
+	case LangNL:
+		return fmt.Sprintf("Kun je bevestigen: %s?", mh)
+	default:
+		return fmt.Sprintf("Could you confirm: %s?", mh)
 	}
 }
 

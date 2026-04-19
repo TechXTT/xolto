@@ -500,7 +500,18 @@ func (s *Server) handleDraftNote(w http.ResponseWriter, r *http.Request, user *m
 		return
 	}
 
-	note := draftnote.Draft(verdict, *listing)
+	var missionCtx draftnote.MissionContext
+	if body.MissionID > 0 {
+		mission, mErr := s.db.GetMission(body.MissionID)
+		if mErr == nil && mission != nil && mission.UserID == user.ID {
+			missionCtx = draftnote.MissionContext{
+				MustHaves:   mission.RequiredFeatures,
+				CountryCode: mission.CountryCode,
+			}
+		}
+		// On error or wrong user: proceed with empty MissionContext — draft is still useful.
+	}
+	note := draftnote.Draft(verdict, *listing, missionCtx)
 	writeJSON(w, http.StatusOK, note)
 }
 
