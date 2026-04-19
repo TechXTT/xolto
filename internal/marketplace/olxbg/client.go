@@ -45,6 +45,9 @@ func (c *client) search(ctx context.Context, spec models.SearchSpec) ([]models.L
 		rawCount += len(batch)
 		for _, offer := range batch {
 			listing := mapListing(offer)
+			if spec.CategoryID > 0 {
+				listing.CategoryID = spec.CategoryID
+			}
 			if !matchesPrice(listing.Price, spec.MinPrice, spec.MaxPrice) {
 				droppedPrice++
 				continue
