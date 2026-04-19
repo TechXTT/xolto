@@ -156,6 +156,20 @@ func matchesCondition(condition string, allowed []string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
+	// No condition info — pass through; scorer applies unknown penalty.
+	if condition == "" || condition == "unknown" {
+		return true
+	}
+	// "used" is OLX.bg's general-purpose pre-owned condition (BG: Употребявана).
+	// Accept it when the user allows "good" or "fair".
+	if condition == "used" {
+		for _, v := range allowed {
+			if v == "good" || v == "fair" {
+				return true
+			}
+		}
+		return false
+	}
 	for _, v := range allowed {
 		if v == condition {
 			return true
