@@ -196,6 +196,11 @@ func mapListing(offer apiOffer) models.Listing {
 	condition := conditionFromParams(offer.Params)
 	city := offer.Location.City.Name
 
+	// Date is intentionally left zero: the OLX API v1 search feed does not
+	// expose a listing creation or publication timestamp. The scorer's freshness
+	// bonus (+0.5 for listings posted < 1h ago) will not fire for OLX.bg
+	// listings — preferable to falsely triggering it on every scrape cycle.
+
 	return models.Listing{
 		ItemID:         fmt.Sprintf("olxbg_%s", offerID),
 		CanonicalID:    fmt.Sprintf("olxbg:%s", offerID),
