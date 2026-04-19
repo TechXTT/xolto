@@ -185,7 +185,7 @@ func TestDraftNoteVerdictShapeMatrix(t *testing.T) {
 			t.Errorf("verdict=%s: response missing 'questions' field", c.verdict)
 		}
 		if hasQuestions {
-			qSlice, ok := questions.([]interface{})
+			qSlice, ok := questions.([]any)
 			if !ok {
 				t.Errorf("verdict=%s: 'questions' must be a JSON array, got %T", c.verdict, questions)
 			} else if c.verdict == "ask_seller" {
