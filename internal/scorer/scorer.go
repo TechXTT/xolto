@@ -296,6 +296,9 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 			score -= 0.3
 			reason.WriteString(" (camera penalty)")
 		case "phone":
+			score -= 0.2                              // XOL-98
+			reason.WriteString(" (phone fair penalty)") // XOL-98
+		case "laptop":
 			score += 0.1
 		}
 	case "used":
@@ -579,6 +582,53 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "off_platform_redirect")
 	}
 
+	// carrier_locked: phone-only risk flag. Detects carrier/network locking signals
+	// in BG Cyrillic and EN (XOL-98).
+	if isPhoneOrLaptop(lower) {
+		carrierLockedTerms := []string{
+			// BG Cyrillic
+			"заключен за",
+			"заключен към",
+			" лок ", // spaces prevent false positives inside words like "локален"
+			// EN
+			"carrier locked",
+			"network locked",
+			"sim locked",
+			"sim lock",
+			"locked to",
+		}
+		for _, term := range carrierLockedTerms {
+			if strings.Contains(lower, term) {
+				flags = append(flags, "carrier_locked") // XOL-98
+				break
+			}
+		}
+	}
+
+	// screen_replaced: phone-only risk flag. Detects aftermarket or replaced
+	// display signals in BG Cyrillic and EN (XOL-98).
+	if isPhoneOrLaptop(lower) {
+		screenReplacedTerms := []string{
+			// BG Cyrillic
+			"сменен дисплей",
+			"сменен екран",
+			"нов дисплей",
+			"нов екран",
+			"смяна на дисплей",
+			// EN
+			"display replaced",
+			"screen replaced",
+			"aftermarket screen",
+			"non-original display",
+		}
+		for _, term := range screenReplacedTerms {
+			if strings.Contains(lower, term) {
+				flags = append(flags, "screen_replaced") // XOL-98
+				break
+			}
+		}
+	}
+
 	seen := make(map[string]bool, len(flags))
 	deduped := flags[:0]
 	for _, f := range flags {
@@ -617,6 +667,11 @@ func isPhoneOrLaptop(text string) bool {
 		"laptop", "macbook", "notebook", "thinkpad", "surface",
 		// BG Cyrillic — OLX.bg wedge (XOL-88)
 		"телефон", "смартфон", "лаптоп",
+		// BG Cyrillic brand terms — XOL-98
+		"айфон",    // iPhone in Bulgarian
+		"самсунг",  // Samsung in Cyrillic
+		"хуауей",   // Huawei
+		"моторола", // Motorola
 	)
 }
 
