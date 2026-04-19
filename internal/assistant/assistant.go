@@ -1044,7 +1044,7 @@ func collectConcerns(listing models.Listing, mission models.Mission, scored mode
 	return concerns
 }
 
-func buildQuestions(listing models.Listing, concerns []string) []string {
+func buildQuestions(_ models.Listing, concerns []string) []string {
 	questions := []string{
 		"Can you confirm everything works as expected — no faults or missing parts?",
 		"What accessories and original packaging are included?",
@@ -1224,7 +1224,7 @@ func formatEuro(cents int) string {
 	return format.Euro(cents)
 }
 
-func buildVerdict(label models.RecommendationLabel, fitScore float64, scored models.ScoredListing, concerns []string) string {
+func buildVerdict(label models.RecommendationLabel, _ float64, scored models.ScoredListing, concerns []string) string {
 	switch label {
 	case models.RecommendationBuyNow:
 		if len(concerns) == 0 {
@@ -1272,14 +1272,6 @@ func humanizeConcern(concern string) string {
 	default:
 		return concern
 	}
-}
-
-func humanizeConcerns(concerns []string) []string {
-	out := make([]string, 0, len(concerns))
-	for _, concern := range concerns {
-		out = append(out, humanizeConcern(concern))
-	}
-	return out
 }
 
 func minInt(a, b int) int {
@@ -1466,10 +1458,9 @@ func extractBudget(text string) int {
 		"under ", "max ", "budget ",
 		"под ", "до ", "максимум ", "бюджет ",
 	} {
-		idx := strings.Index(text, marker)
-		if idx >= 0 {
+		if _, after, ok := strings.Cut(text, marker); ok {
 			var value int
-			fmt.Sscanf(text[idx+len(marker):], "%d", &value)
+			fmt.Sscanf(after, "%d", &value)
 			if value > 0 {
 				return value
 			}
@@ -1791,18 +1782,6 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 	return strings.TrimSpace(completion.Choices[0].Message.Content), nil
 }
 
-func extractJSON(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "{") {
-		return value
-	}
-	start := strings.IndexByte(value, '{')
-	end := strings.LastIndexByte(value, '}')
-	if start >= 0 && end > start {
-		return value[start : end+1]
-	}
-	return value
-}
 
 func mustJSON(v any) string {
 	raw, _ := json.MarshalIndent(v, "", "  ")
