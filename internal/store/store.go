@@ -1581,25 +1581,26 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 	baseArgs := []any{prefix, missionID, missionID}
 
 	if filter.Market != "" {
-		whereExtras += "\n  AND marketplace_id = ?"
+		whereExtras += "\n  AND l.marketplace_id = ?"
 		baseArgs = append(baseArgs, filter.Market)
 	}
 	if filter.Condition != "" {
-		whereExtras += "\n  AND condition = ?"
+		whereExtras += "\n  AND l.condition = ?"
 		baseArgs = append(baseArgs, filter.Condition)
 	}
 	if filter.MinScore > 0 {
-		whereExtras += "\n  AND score >= ?"
+		whereExtras += "\n  AND l.score >= ?"
 		baseArgs = append(baseArgs, float64(filter.MinScore))
 	}
 
 	// Count query — same WHERE, no LIMIT/OFFSET.
+	// Uses the same "l." column alias as the page query so whereExtras is shared.
 	countQuery := `
 		SELECT COUNT(*)
-		FROM listings
-		WHERE item_id LIKE ?
-		  AND (? = 0 OR profile_id = ?)
-		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras
+		FROM listings l
+		WHERE l.item_id LIKE ?
+		  AND (? = 0 OR l.profile_id = ?)
+		  AND COALESCE(l.feedback, '') <> 'dismissed'` + whereExtras
 
 	var total int
 	if err := s.db.QueryRow(countQuery, baseArgs...).Scan(&total); err != nil {
@@ -1609,21 +1610,28 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 	// ORDER BY per sort mode — every mode includes the unique item_id tie-breaker.
 	orderBy := sqliteOrderBy(filter.Sort)
 
-	// Page query.
+	// Page query. The LEFT JOIN on outreach_threads derives user_id from the
+	// scoped item_id (format "userID::itemID") using SQLite string functions so
+	// that no new bind parameter is required.
 	pageArgs := append(baseArgs, limit, offset)
 	pageQuery := `
-		SELECT item_id, profile_id, title, price, price_type, image_urls,
-		       url, condition, marketplace_id,
-		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       COALESCE(recommended_action, 'ask_seller'),
-		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, ''),
-		       COALESCE(outreach_status, 'none')
-		FROM listings
-		WHERE item_id LIKE ?
-		  AND (? = 0 OR profile_id = ?)
-		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras + `
+		SELECT l.item_id, l.profile_id, l.title, l.price, l.price_type, l.image_urls,
+		       l.url, l.condition, l.marketplace_id,
+		       l.score, l.fair_price, l.offer_price, l.confidence, l.reasoning, l.risk_flags,
+		       COALESCE(l.recommended_action, 'ask_seller'),
+		       l.comparables_count, l.comparables_median_age_days,
+		       l.last_seen, COALESCE(l.feedback, ''),
+		       COALESCE(l.currency_status, ''),
+		       COALESCE(l.outreach_status, 'none'),
+		       ot.sent_at AS outreach_sent_at
+		FROM listings l
+		LEFT JOIN outreach_threads ot
+		    ON ot.user_id = SUBSTR(l.item_id, 1, INSTR(l.item_id, '::') - 1)
+		   AND ot.listing_id = SUBSTR(l.item_id, INSTR(l.item_id, '::') + 2)
+		   AND ot.marketplace_id = l.marketplace_id
+		WHERE l.item_id LIKE ?
+		  AND (? = 0 OR l.profile_id = ?)
+		  AND COALESCE(l.feedback, '') <> 'dismissed'` + whereExtras + `
 		` + orderBy + `
 		LIMIT ? OFFSET ?`
 
@@ -1637,6 +1645,7 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 	for rows.Next() {
 		var listing models.Listing
 		var imageURLsJSON, riskFlagsJSON, lastSeen string
+		var outreachSentAt sql.NullString
 		if err := rows.Scan(
 			&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 			&listing.URL, &listing.Condition, &listing.MarketplaceID,
@@ -1646,8 +1655,14 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 			&lastSeen, &listing.Feedback,
 			&listing.CurrencyStatus,
 			&listing.OutreachStatus,
+			&outreachSentAt,
 		); err != nil {
 			return nil, 0, err
+		}
+		if outreachSentAt.Valid && outreachSentAt.String != "" {
+			if t, err := parseSQLiteTime(outreachSentAt.String); err == nil {
+				listing.OutreachSentAt = &t
+			}
 		}
 		listing.ItemID = unscopedItemID(listing.ItemID)
 		if strings.TrimSpace(listing.MarketplaceID) == "" {
@@ -1685,20 +1700,26 @@ func sqliteOrderBy(sort string) string {
 
 func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error) {
 	row := s.db.QueryRow(`
-		SELECT item_id, profile_id, title, price, price_type, image_urls,
-		       url, condition, marketplace_id,
-		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       COALESCE(recommended_action, 'ask_seller'),
-		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, ''),
-		       COALESCE(outreach_status, 'none')
-		FROM listings
-		WHERE item_id = ?
+		SELECT l.item_id, l.profile_id, l.title, l.price, l.price_type, l.image_urls,
+		       l.url, l.condition, l.marketplace_id,
+		       l.score, l.fair_price, l.offer_price, l.confidence, l.reasoning, l.risk_flags,
+		       COALESCE(l.recommended_action, 'ask_seller'),
+		       l.comparables_count, l.comparables_median_age_days,
+		       l.last_seen, COALESCE(l.feedback, ''),
+		       COALESCE(l.currency_status, ''),
+		       COALESCE(l.outreach_status, 'none'),
+		       ot.sent_at AS outreach_sent_at
+		FROM listings l
+		LEFT JOIN outreach_threads ot
+		    ON ot.user_id = SUBSTR(l.item_id, 1, INSTR(l.item_id, '::') - 1)
+		   AND ot.listing_id = SUBSTR(l.item_id, INSTR(l.item_id, '::') + 2)
+		   AND ot.marketplace_id = l.marketplace_id
+		WHERE l.item_id = ?
 	`, scopedItemID(userID, itemID))
 
 	var listing models.Listing
 	var imageURLsJSON, riskFlagsJSON, lastSeen string
+	var outreachSentAt sql.NullString
 	if err := row.Scan(
 		&listing.ItemID, &listing.ProfileID, &listing.Title, &listing.Price, &listing.PriceType, &imageURLsJSON,
 		&listing.URL, &listing.Condition, &listing.MarketplaceID,
@@ -1708,11 +1729,17 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		&lastSeen, &listing.Feedback,
 		&listing.CurrencyStatus,
 		&listing.OutreachStatus,
+		&outreachSentAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if outreachSentAt.Valid && outreachSentAt.String != "" {
+		if t, err := parseSQLiteTime(outreachSentAt.String); err == nil {
+			listing.OutreachSentAt = &t
+		}
 	}
 	listing.ItemID = unscopedItemID(listing.ItemID)
 	if strings.TrimSpace(listing.MarketplaceID) == "" {

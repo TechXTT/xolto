@@ -380,3 +380,107 @@ func TestPostgresPagination(t *testing.T) {
 		t.Fatalf("pagination: expected 12 unique items, got %d", len(seen))
 	}
 }
+
+// ---------------------------------------------------------------
+// XOL-24: outreach_sent_at joined into ListRecentListingsPaginated
+// ---------------------------------------------------------------
+
+// TestPostgresOutreachSentAtPresent verifies that a listing with an
+// outreach_threads row returns a non-nil OutreachSentAt in the matches result.
+func TestPostgresOutreachSentAtPresent(t *testing.T) {
+	st := openTestPostgres(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	userID := createPGUser(t, st)
+
+	// Insert a single listing.
+	l := models.Listing{
+		ItemID:        "xol24-listing-sent",
+		Title:         "XOL-24 with outreach",
+		Price:         30000,
+		PriceType:     "fixed",
+		MarketplaceID: "olxbg",
+		Condition:     "good",
+	}
+	scored := models.ScoredListing{Score: 7.0, OfferPrice: 25000}
+	if err := st.SaveListing(userID, l, "xol24 query", scored); err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	// Insert outreach thread for that listing.
+	thread := OutreachThread{
+		UserID:        userID,
+		ListingID:     l.ItemID,
+		MarketplaceID: l.MarketplaceID,
+		DraftText:     "test message",
+		DraftShape:    "negotiate",
+		DraftLang:     "bg",
+	}
+	if _, err := st.UpsertThreadOnSent(ctx, thread); err != nil {
+		t.Fatalf("UpsertThreadOnSent() error = %v", err)
+	}
+
+	// ListRecentListingsPaginated should expose OutreachSentAt.
+	listings, _, err := st.ListRecentListingsPaginated(userID, 20, 0, 0, models.MatchesFilter{})
+	if err != nil {
+		t.Fatalf("ListRecentListingsPaginated() error = %v", err)
+	}
+	var found *models.Listing
+	for i := range listings {
+		if listings[i].ItemID == l.ItemID {
+			found = &listings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("listing %q not found in results", l.ItemID)
+	}
+	if found.OutreachSentAt == nil {
+		t.Fatalf("expected OutreachSentAt to be non-nil for listing with outreach thread")
+	}
+	if found.OutreachSentAt.IsZero() {
+		t.Fatalf("expected OutreachSentAt to be non-zero")
+	}
+}
+
+// TestPostgresOutreachSentAtAbsent verifies that a listing with no
+// outreach_threads row returns nil OutreachSentAt in the matches result.
+func TestPostgresOutreachSentAtAbsent(t *testing.T) {
+	st := openTestPostgres(t)
+	defer st.Close()
+
+	userID := createPGUser(t, st)
+
+	// Insert a listing with no outreach thread.
+	l := models.Listing{
+		ItemID:        "xol24-listing-no-outreach",
+		Title:         "XOL-24 no outreach",
+		Price:         20000,
+		PriceType:     "fixed",
+		MarketplaceID: "olxbg",
+		Condition:     "good",
+	}
+	scored := models.ScoredListing{Score: 6.0, OfferPrice: 18000}
+	if err := st.SaveListing(userID, l, "xol24 query", scored); err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	listings, _, err := st.ListRecentListingsPaginated(userID, 20, 0, 0, models.MatchesFilter{})
+	if err != nil {
+		t.Fatalf("ListRecentListingsPaginated() error = %v", err)
+	}
+	var found *models.Listing
+	for i := range listings {
+		if listings[i].ItemID == l.ItemID {
+			found = &listings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("listing %q not found in results", l.ItemID)
+	}
+	if found.OutreachSentAt != nil {
+		t.Fatalf("expected OutreachSentAt to be nil for listing with no outreach thread, got %v", found.OutreachSentAt)
+	}
+}

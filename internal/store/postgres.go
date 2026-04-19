@@ -2362,17 +2362,17 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 
 	if filter.Market != "" {
 		n++
-		whereExtras += fmt.Sprintf("\n  AND marketplace_id = $%d", n)
+		whereExtras += fmt.Sprintf("\n  AND l.marketplace_id = $%d", n)
 		extraArgs = append(extraArgs, filter.Market)
 	}
 	if filter.Condition != "" {
 		n++
-		whereExtras += fmt.Sprintf("\n  AND condition = $%d", n)
+		whereExtras += fmt.Sprintf("\n  AND l.condition = $%d", n)
 		extraArgs = append(extraArgs, filter.Condition)
 	}
 	if filter.MinScore > 0 {
 		n++
-		whereExtras += fmt.Sprintf("\n  AND score >= $%d", n)
+		whereExtras += fmt.Sprintf("\n  AND l.score >= $%d", n)
 		extraArgs = append(extraArgs, float64(filter.MinScore))
 	}
 
@@ -2380,12 +2380,13 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 	countArgs := append(baseArgs, extraArgs...)
 
 	// Count query — same WHERE, no LIMIT/OFFSET.
+	// Uses "l." alias so whereExtras (which uses l.) is consistent.
 	countQuery := `
 		SELECT COUNT(*)
-		FROM listings
-		WHERE item_id LIKE $1
-		  AND ($2 = 0 OR profile_id = $2)
-		  AND COALESCE(feedback, '') <> 'dismissed'` + whereExtras
+		FROM listings l
+		WHERE l.item_id LIKE $1
+		  AND ($2 = 0 OR l.profile_id = $2)
+		  AND COALESCE(l.feedback, '') <> 'dismissed'` + whereExtras
 
 	var total int
 	if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
@@ -2396,25 +2397,32 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 	// Postgres supports NULLS LAST natively.
 	orderBy := postgresOrderBy(filter.Sort)
 
-	// LIMIT and OFFSET occupy the next two placeholders.
+	// LIMIT and OFFSET occupy the next two placeholders; user_id for the
+	// outreach LEFT JOIN occupies the one after that.
 	limitPlaceholder := n + 1
 	offsetPlaceholder := n + 2
-	pageArgs := append(countArgs, limit, offset)
+	userIDPlaceholder := n + 3
+	pageArgs := append(countArgs, limit, offset, userID)
 	pageQuery := fmt.Sprintf(`
-		SELECT item_id, profile_id, title, price, price_type, image_urls,
-		       url, condition, marketplace_id,
-		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       COALESCE(recommended_action, 'ask_seller'),
-		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, ''),
-		       COALESCE(outreach_status, 'none')
-		FROM listings
-		WHERE item_id LIKE $1
-		  AND ($2 = 0 OR profile_id = $2)
-		  AND COALESCE(feedback, '') <> 'dismissed'`+whereExtras+`
+		SELECT l.item_id, l.profile_id, l.title, l.price, l.price_type, l.image_urls,
+		       l.url, l.condition, l.marketplace_id,
+		       l.score, l.fair_price, l.offer_price, l.confidence, l.reasoning, l.risk_flags,
+		       COALESCE(l.recommended_action, 'ask_seller'),
+		       l.comparables_count, l.comparables_median_age_days,
+		       l.last_seen, COALESCE(l.feedback, ''),
+		       COALESCE(l.currency_status, ''),
+		       COALESCE(l.outreach_status, 'none'),
+		       ot.sent_at AS outreach_sent_at
+		FROM listings l
+		LEFT JOIN outreach_threads ot
+		    ON ot.user_id = $%d
+		   AND ot.listing_id = SPLIT_PART(l.item_id, '::', 2)
+		   AND ot.marketplace_id = l.marketplace_id
+		WHERE l.item_id LIKE $1
+		  AND ($2 = 0 OR l.profile_id = $2)
+		  AND COALESCE(l.feedback, '') <> 'dismissed'`+whereExtras+`
 		%s
-		LIMIT $%d OFFSET $%d`, orderBy, limitPlaceholder, offsetPlaceholder)
+		LIMIT $%d OFFSET $%d`, userIDPlaceholder, orderBy, limitPlaceholder, offsetPlaceholder)
 
 	rows, err := s.db.Query(pageQuery, pageArgs...)
 	if err != nil {
@@ -2435,6 +2443,7 @@ func (s *PostgresStore) ListRecentListingsPaginated(userID string, limit, offset
 			&listing.Date, &listing.Feedback,
 			&listing.CurrencyStatus,
 			&listing.OutreachStatus,
+			&listing.OutreachSentAt,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2474,17 +2483,22 @@ func postgresOrderBy(sort string) string {
 
 func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, error) {
 	row := s.db.QueryRow(`
-		SELECT item_id, profile_id, title, price, price_type, image_urls,
-		       url, condition, marketplace_id,
-		       score, fair_price, offer_price, confidence, reasoning, risk_flags,
-		       COALESCE(recommended_action, 'ask_seller'),
-		       comparables_count, comparables_median_age_days,
-		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, ''),
-		       COALESCE(outreach_status, 'none')
-		FROM listings
-		WHERE item_id = $1
-	`, scopedItemID(userID, itemID))
+		SELECT l.item_id, l.profile_id, l.title, l.price, l.price_type, l.image_urls,
+		       l.url, l.condition, l.marketplace_id,
+		       l.score, l.fair_price, l.offer_price, l.confidence, l.reasoning, l.risk_flags,
+		       COALESCE(l.recommended_action, 'ask_seller'),
+		       l.comparables_count, l.comparables_median_age_days,
+		       l.last_seen, COALESCE(l.feedback, ''),
+		       COALESCE(l.currency_status, ''),
+		       COALESCE(l.outreach_status, 'none'),
+		       ot.sent_at AS outreach_sent_at
+		FROM listings l
+		LEFT JOIN outreach_threads ot
+		    ON ot.user_id = $2
+		   AND ot.listing_id = SPLIT_PART(l.item_id, '::', 2)
+		   AND ot.marketplace_id = l.marketplace_id
+		WHERE l.item_id = $1
+	`, scopedItemID(userID, itemID), userID)
 
 	var listing models.Listing
 	var imageURLsJSON, riskFlagsJSON string
@@ -2497,6 +2511,7 @@ func (s *PostgresStore) GetListing(userID, itemID string) (*models.Listing, erro
 		&listing.Date, &listing.Feedback,
 		&listing.CurrencyStatus,
 		&listing.OutreachStatus,
+		&listing.OutreachSentAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

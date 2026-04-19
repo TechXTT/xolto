@@ -42,6 +42,9 @@ type Listing struct {
 	// Valid values: "none" | "sent" | "replied" | "won" | "lost".
 	// Default is "none" for all rows that predate this field.
 	OutreachStatus string
+	// OutreachSentAt is the timestamp when the user first sent a message for
+	// this listing (XOL-24). Nil when no outreach thread exists for this listing.
+	OutreachSentAt *time.Time `json:"outreach_sent_at,omitempty"`
 }
 
 type Seller struct {
