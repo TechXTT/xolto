@@ -63,12 +63,40 @@ var cameraAccessoryTokens = map[string]bool{
 }
 
 // cameraCoreTokens suggest the listing is an actual camera offer (body/kit)
-// instead of a standalone accessory.
+// instead of a standalone accessory. Note: "camera" is intentionally excluded
+// because it appears in accessory titles (e.g. "camera bag", "camera case").
 var cameraCoreTokens = map[string]bool{
-	"camera": true, "body": true, "kit": true, "mirrorless": true, "dslr": true,
+	"body": true, "kit": true, "mirrorless": true, "dslr": true,
 	"lens": true, "lenses": true, "toestel": true,
 	"апарат": true, "камера": true, "фотоапарат": true,
 	"обектив": true, "обектива": true, "обективи": true, "комплект": true, "тяло": true,
+}
+
+// phoneIntentTokens indicate phone-focused searches where accessory-only
+// listings (cases, chargers, cables, etc.) should be filtered unless the query
+// explicitly asks for accessories.
+var phoneIntentTokens = map[string]bool{
+	"pixel": true, "galaxy": true, "iphone": true, "samsung": true, "oneplus": true,
+	"xiaomi": true, "motorola": true, "xperia": true, "huawei": true,
+	"smartphone": true, "смартфон": true,
+}
+
+// phoneAccessoryTokens identify listing titles that are likely standalone
+// phone accessories.
+var phoneAccessoryTokens = map[string]bool{
+	"case": true, "cases": true, "cover": true, "covers": true,
+	"charger": true, "chargers": true, "cable": true, "cables": true,
+	"holder": true, "mount": true, "stand": true,
+	"калъф": true, "калъфи": true, "протектор": true, "протектори": true,
+	"зарядно": true, "кабел": true, "кабели": true, "поставка": true, "стойка": true,
+}
+
+// phoneCoreTokens indicate the listing IS a phone device (storage/connectivity specs),
+// not a phone accessory that merely mentions the compatible model.
+var phoneCoreTokens = map[string]bool{
+	"128gb": true, "256gb": true, "64gb": true, "512gb": true, "16gb": true, "32gb": true, "1tb": true,
+	"sim": true, "lte": true, "5g": true, "4g": true, "unlocked": true,
+	"разблокиран": true,
 }
 
 type UserWorker struct {
@@ -125,20 +153,29 @@ func shouldRejectAccessoryListing(title, query string) bool {
 		queryTokens[tok] = struct{}{}
 	}
 
-	if !cameraIntentQuery(queryTokens) {
-		return false
-	}
-	// If the query itself asks for an accessory ("a6000 bag"), keep it.
-	if containsAnyToken(queryTokens, cameraAccessoryTokens) {
-		return false
+	titleTokens := tokenizeWords(title)
+
+	// Camera accessory check
+	if cameraIntentQuery(queryTokens) {
+		if containsAnyToken(queryTokens, cameraAccessoryTokens) {
+			return false
+		}
+		if containsAnyToken(titleTokens, cameraAccessoryTokens) {
+			return !containsAnyToken(titleTokens, cameraCoreTokens)
+		}
 	}
 
-	titleTokens := tokenizeWords(title)
-	if !containsAnyToken(titleTokens, cameraAccessoryTokens) {
-		return false
+	// Phone accessory check
+	if phoneIntentQuery(queryTokens) {
+		if containsAnyToken(queryTokens, phoneAccessoryTokens) {
+			return false
+		}
+		if phoneIntentQuery(titleTokens) && containsAnyToken(titleTokens, phoneAccessoryTokens) {
+			return !containsAnyToken(titleTokens, phoneCoreTokens)
+		}
 	}
-	// Accessory token + no camera-core token => likely irrelevant for camera hunt.
-	return !containsAnyToken(titleTokens, cameraCoreTokens)
+
+	return false
 }
 
 func cameraIntentQuery(tokens map[string]struct{}) bool {
@@ -147,6 +184,15 @@ func cameraIntentQuery(tokens map[string]struct{}) bool {
 			return true
 		}
 		if looksCameraModelToken(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func phoneIntentQuery(tokens map[string]struct{}) bool {
+	for tok := range tokens {
+		if phoneIntentTokens[tok] {
 			return true
 		}
 	}
