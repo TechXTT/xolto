@@ -19,6 +19,11 @@ const (
 	olxMaxPages  = 5  // cap at 200 results per search cycle
 )
 
+// olxBGCategoryIDs is the allowlist of confirmed valid OLX.bg category IDs.
+// Marktplaats IDs (487=cameras, 495=lenses) are NL-specific — they must not
+// be forwarded to OLX.bg. Add verified IDs here as XOL-78 is resolved.
+var olxBGCategoryIDs = map[int]bool{}
+
 type client struct {
 	http *http.Client
 }
@@ -86,7 +91,11 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 	if spec.MaxPrice > 0 {
 		params.Set("price[to]", strconv.Itoa(EURCentsToBGNWhole(spec.MaxPrice)))
 	}
-	if spec.CategoryID > 0 {
+	// olxBGCategoryIDs is the allowlist of confirmed valid OLX.bg category IDs.
+	// Marktplaats IDs (e.g. 487=cameras, 495=lenses) are NL-specific and MUST NOT
+	// be sent to OLX.bg — they map to unrelated BG categories or return nothing.
+	// Add confirmed OLX.bg IDs here once verified against the live API (XOL-78).
+	if olxBGCategoryIDs[spec.CategoryID] {
 		params.Set("category_id", strconv.Itoa(spec.CategoryID))
 	}
 
