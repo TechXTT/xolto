@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/TechXTT/xolto/internal/config"
@@ -273,7 +274,7 @@ func TestAssistantDraftRequestShape_NoResponseFormat(t *testing.T) {
 		Title:     "Sony A7 III body",
 		AskPrice:  85000,
 	}
-	_, err := a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeEN)
+	_, err := a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeEN, nil)
 	if err != nil {
 		t.Fatalf("draftWithAI() error = %v", err)
 	}
@@ -286,6 +287,88 @@ func TestAssistantDraftRequestShape_NoResponseFormat(t *testing.T) {
 	// Prose path: response_format must NOT be present.
 	if _, present := captured["response_format"]; present {
 		t.Errorf("draftWithAI must not send response_format, but it was present: %#v", captured["response_format"])
+	}
+}
+
+// TestDraftWithAI_RiskFlagsInPayload verifies that when riskFlags is non-empty,
+// the LLM request payload contains the flags in the risk_flags field of the
+// user message content (XOL-92 AC).
+func TestDraftWithAI_RiskFlagsInPayload(t *testing.T) {
+	var capturedUserContent string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		// Extract user message content string.
+		if msgs, ok := body["messages"].([]any); ok {
+			for _, m := range msgs {
+				msg, _ := m.(map[string]any)
+				if role, _ := msg["role"].(string); role == "user" {
+					capturedUserContent, _ = msg["content"].(string)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validProseResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+
+	entry := models.ShortlistEntry{
+		MissionID: 1,
+		ItemID:    "stale-item-1",
+		Title:     "iPhone 13",
+		AskPrice:  60000,
+	}
+	riskFlags := []string{"stale_listing"}
+	_, err := a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeBG, riskFlags)
+	if err != nil {
+		t.Fatalf("draftWithAI() error = %v", err)
+	}
+
+	if !strings.Contains(capturedUserContent, "stale_listing") {
+		t.Errorf("expected risk_flags to contain 'stale_listing' in user message payload, got: %s", capturedUserContent)
+	}
+}
+
+// TestDraftWithAI_EmptyRiskFlagsNoPanic verifies that passing nil or empty
+// riskFlags does not panic and produces a valid LLM request (XOL-92 AC).
+func TestDraftWithAI_EmptyRiskFlagsNoPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validProseResponse))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+
+	entry := models.ShortlistEntry{
+		MissionID: 2,
+		ItemID:    "item-no-flags",
+		Title:     "Samsung Galaxy S22",
+		AskPrice:  55000,
+	}
+
+	// nil riskFlags must not panic.
+	result, err := a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeBG, nil)
+	if err != nil {
+		t.Fatalf("draftWithAI(nil flags) error = %v", err)
+	}
+	if strings.TrimSpace(result) == "" {
+		t.Errorf("draftWithAI(nil flags) returned empty result")
+	}
+
+	// empty slice must not panic.
+	result, err = a.draftWithAI(context.Background(), "u1", entry, "olx_bg", localeBG, []string{})
+	if err != nil {
+		t.Fatalf("draftWithAI(empty flags) error = %v", err)
+	}
+	if strings.TrimSpace(result) == "" {
+		t.Errorf("draftWithAI(empty flags) returned empty result")
 	}
 }
 

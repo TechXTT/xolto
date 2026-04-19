@@ -467,7 +467,11 @@ func (a *Assistant) DraftSellerMessage(ctx context.Context, userID, itemID strin
 			content = rendered
 		}
 	} else if a.aiEnabled() {
-		if aiDraft, err := a.draftWithAI(ctx, userID, *entry, marketplaceID, locale); err == nil && aiDraft != "" {
+		var riskFlags []string
+		if listing, lookupErr := a.store.GetListing(userID, entry.ItemID); lookupErr == nil {
+			riskFlags = listing.RiskFlags
+		}
+		if aiDraft, err := a.draftWithAI(ctx, userID, *entry, marketplaceID, locale, riskFlags); err == nil && aiDraft != "" {
 			content = aiDraft
 		}
 	}
@@ -1697,7 +1701,7 @@ func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []
 	return a.chatText(ctx, userID, missionID, "compare", payload)
 }
 
-func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models.ShortlistEntry, marketplaceID string, locale messageLocale) (string, error) {
+func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models.ShortlistEntry, marketplaceID string, locale messageLocale, riskFlags []string) (string, error) {
 	language := localeLabel(locale)
 	// Reference data (Concerns, SuggestedQuestions, Verdict) is generated in
 	// English by the scorer/buildQuestions. Stripping those fields for non-EN
@@ -1720,7 +1724,9 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 					"Include: a brief mention of what appeals about the listing, one question about condition or completeness if relevant, " +
 					"and the suggested offer phrased naturally as 'would you consider X?'. " +
 					"Keep it to 2-3 sentences. Do not commit to buying. Do not be pushy. " +
-					"Output only the message body — no preamble, no translation notes.",
+					"Output only the message body — no preamble, no translation notes. " +
+					"If risk_flags contains 'stale_listing', explicitly ask whether the item is still available. " +
+					"If risk_flags contains 'no_battery_health', ask about the battery health or capacity. ",
 			},
 			{
 				"role": "user",
@@ -1728,6 +1734,7 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 					"marketplace": marketplaceID,
 					"language":    string(locale),
 					"entry":       entryForPrompt,
+					"risk_flags":  riskFlags,
 				}),
 			},
 		},
