@@ -14,6 +14,7 @@ type SearchSpec struct {
 	PostalCode           string
 	RadiusKm             int
 	CategoryID           int
+	Category             string // canonical: "camera" | "laptop" | "phone" | "other"
 	MaxPrice             int
 	MinPrice             int
 	Condition            []string

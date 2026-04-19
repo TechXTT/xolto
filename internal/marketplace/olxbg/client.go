@@ -19,10 +19,14 @@ const (
 	olxMaxPages  = 5  // cap at 200 results per search cycle
 )
 
-// olxBGCategoryIDs is the allowlist of confirmed valid OLX.bg category IDs.
-// Marktplaats IDs (487=cameras, 495=lenses) are NL-specific — they must not
-// be forwarded to OLX.bg. Add verified IDs here as XOL-78 is resolved.
-var olxBGCategoryIDs = map[int]bool{}
+// olxBGCategoryForCanonical maps canonical mission category strings to verified
+// OLX.bg API category IDs. Verified 2026-04-19 via live GET /api/v1/offers/?query=…&limit=1.
+// Marktplaats IDs (487=cameras, 495=lenses) are NL-specific and MUST NOT be used here.
+var olxBGCategoryForCanonical = map[string]int{
+	"camera": 277,
+	"laptop": 634,
+	"phone":  882,
+}
 
 type client struct {
 	http *http.Client
@@ -91,12 +95,10 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 	if spec.MaxPrice > 0 {
 		params.Set("price[to]", strconv.Itoa(EURCentsToBGNWhole(spec.MaxPrice)))
 	}
-	// olxBGCategoryIDs is the allowlist of confirmed valid OLX.bg category IDs.
-	// Marktplaats IDs (e.g. 487=cameras, 495=lenses) are NL-specific and MUST NOT
-	// be sent to OLX.bg — they map to unrelated BG categories or return nothing.
-	// Add confirmed OLX.bg IDs here once verified against the live API (XOL-78).
-	if olxBGCategoryIDs[spec.CategoryID] {
-		params.Set("category_id", strconv.Itoa(spec.CategoryID))
+	// Resolve OLX.bg category ID from canonical mission category string.
+	// Marktplaats numeric IDs (487, 495, …) are NL-specific and MUST NOT be forwarded.
+	if catID := olxBGCategoryForCanonical[spec.Category]; catID > 0 {
+		params.Set("category_id", strconv.Itoa(catID))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, olxBGBaseURL+"?"+params.Encode(), nil)
