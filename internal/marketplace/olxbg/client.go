@@ -20,12 +20,13 @@ const (
 )
 
 // olxBGCategoryForCanonical maps canonical mission category strings to verified
-// OLX.bg API category IDs. Verified 2026-04-19 via live GET /api/v1/offers/?query=…&limit=1.
+// OLX.bg API category IDs. Verified 2026-04-19 via live GET /api/v1/offers/?query=…&limit=1
+// (XOL-97 audit 2026-04-19).
 // Marktplaats IDs (487=cameras, 495=lenses) are NL-specific and MUST NOT be used here.
 var olxBGCategoryForCanonical = map[string]int{
-	"camera": 277,
-	"laptop": 634,
-	"phone":  882,
+	"camera": 277, // Фотоапарати — verified XOL-97 2026-04-19
+	"laptop": 634, // Лаптопи — verified XOL-97 2026-04-19
+	"phone":  276, // Телефони и таблети — verified XOL-97 2026-04-19; 882 was Samsung brand only // XOL-98
 }
 
 type client struct {

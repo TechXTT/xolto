@@ -3,6 +3,8 @@ package scorer
 import (
 	"strings"
 	"testing"
+
+	"github.com/TechXTT/xolto/internal/models"
 )
 
 // TestIsElectronicsListingBGTokens verifies that BG Cyrillic electronics
@@ -99,6 +101,162 @@ func TestHasRefurbishedAmbiguityBGTokens(t *testing.T) {
 			got := hasRefurbishedAmbiguity(strings.ToLower(tc.text))
 			if got != tc.want {
 				t.Errorf("hasRefurbishedAmbiguity(%q): expected %v, got %v", tc.text, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestCarrierLockedRiskFlag verifies that carrier_locked fires on BG Cyrillic and EN
+// carrier-locking signals on phone listings, and does not fire on clean listings (XOL-98).
+func TestCarrierLockedRiskFlag(t *testing.T) {
+	cases := []struct {
+		name        string
+		title       string
+		description string
+		wantFlag    bool
+	}{
+		{
+			name:        "bg_zaluchen_za_mtel",
+			title:       "телефон Samsung Galaxy заключен за мтел",
+			description: "",
+			wantFlag:    true,
+		},
+		{
+			name:        "en_carrier_locked",
+			title:       "iPhone 13 carrier locked AT&T",
+			description: "",
+			wantFlag:    true,
+		},
+		{
+			name:        "en_network_locked_in_desc",
+			title:       "Samsung Galaxy S22",
+			description: "network locked to Vodafone",
+			wantFlag:    true,
+		},
+		{
+			name:        "en_sim_locked",
+			title:       "iPhone 12 sim locked",
+			description: "",
+			wantFlag:    true,
+		},
+		{
+			name:        "clean_phone_listing",
+			title:       "iPhone 14 Pro 256GB unlocked",
+			description: "отлично състояние",
+			wantFlag:    false,
+		},
+		{
+			name:        "no_false_positive_lokalen",
+			title:       "телефон Xiaomi локален",
+			description: "",
+			wantFlag:    false, // "локален" must not match " лок " with spaces
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:      "test-cl-" + tc.name,
+				Title:       tc.title,
+				Description: tc.description,
+				Price:       50000,
+				PriceType:   "fixed",
+				Condition:   "good",
+				ImageURLs:   []string{"a", "b", "c"},
+			}, 0)
+			got := containsFlag(flags, "carrier_locked")
+			if got != tc.wantFlag {
+				t.Errorf("carrier_locked for title=%q desc=%q: got %v, want %v (flags=%v)",
+					tc.title, tc.description, got, tc.wantFlag, flags)
+			}
+		})
+	}
+}
+
+// TestScreenReplacedRiskFlag verifies that screen_replaced fires on BG Cyrillic and EN
+// display-replacement signals on phone listings, and does not fire on clean listings (XOL-98).
+func TestScreenReplacedRiskFlag(t *testing.T) {
+	cases := []struct {
+		name        string
+		title       string
+		description string
+		wantFlag    bool
+	}{
+		{
+			name:        "bg_smenen_displej",
+			title:       "телефон Samsung сменен дисплей",
+			description: "",
+			wantFlag:    true,
+		},
+		{
+			name:        "bg_nov_ekran_in_desc",
+			title:       "iPhone 11",
+			description: "нов екран, батерия 89%",
+			wantFlag:    true,
+		},
+		{
+			name:        "en_screen_replaced",
+			title:       "iPhone 12 screen replaced 64GB",
+			description: "",
+			wantFlag:    true,
+		},
+		{
+			name:        "en_aftermarket_screen",
+			title:       "Samsung Galaxy S21",
+			description: "aftermarket screen but works perfectly",
+			wantFlag:    true,
+		},
+		{
+			name:        "clean_phone_no_screen_mention",
+			title:       "iPhone 13 128GB like new",
+			description: "оригинален, без забележки",
+			wantFlag:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:      "test-sr-" + tc.name,
+				Title:       tc.title,
+				Description: tc.description,
+				Price:       50000,
+				PriceType:   "fixed",
+				Condition:   "good",
+				ImageURLs:   []string{"a", "b", "c"},
+			}, 0)
+			got := containsFlag(flags, "screen_replaced")
+			if got != tc.wantFlag {
+				t.Errorf("screen_replaced for title=%q desc=%q: got %v, want %v (flags=%v)",
+					tc.title, tc.description, got, tc.wantFlag, flags)
+			}
+		})
+	}
+}
+
+// TestIsPhoneOrLaptopCyrillicBrands verifies that XOL-98 BG Cyrillic brand terms
+// are recognised by isPhoneOrLaptop.
+func TestIsPhoneOrLaptopCyrillicBrands(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"айфон 13 128gb", true},
+		{"самсунг галакси s22", true},
+		{"хуауей p40 pro", true},
+		{"моторола edge 30", true},
+		// regression: existing terms still work
+		{"iphone 14 pro", true},
+		{"samsung galaxy s23", true},
+		{"телефон xiaomi", true},
+		// non-phone must not match
+		{"диван ikea malm", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			got := isPhoneOrLaptop(strings.ToLower(tc.text))
+			if got != tc.want {
+				t.Errorf("isPhoneOrLaptop(%q): got %v, want %v", tc.text, got, tc.want)
 			}
 		})
 	}

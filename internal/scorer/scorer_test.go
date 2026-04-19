@@ -548,6 +548,56 @@ func TestStaleListing(t *testing.T) {
 	}
 }
 
+// TestPhoneFairConditionPenaltyXOL98 verifies that a phone + fair listing scores
+// approximately 0.2 lower than an identical phone + like_new listing (XOL-98).
+// The delta comes from: like_new gets +0.5 flat bonus, fair gets −0.3 flat penalty,
+// plus phone fair category weight −0.2, so the net spread is ≥ 0.2.
+func TestPhoneFairConditionPenaltyXOL98(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer-phone-fair.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	rsn := reasoner.New(config.AIConfig{})
+	sc := New(st, config.ScoringConfig{MinScore: 7, MarketSampleSize: 20}, rsn)
+
+	base := models.Listing{
+		ItemID:    "xol98-phone-base",
+		Title:     "iPhone 13 128GB",
+		Price:     80000,
+		PriceType: "fixed",
+	}
+	search := models.SearchSpec{
+		UserID:          "u1",
+		Query:           "iphone 13",
+		Category:        "phone",
+		OfferPercentage: 70,
+	}
+
+	likeNewListing := base
+	likeNewListing.Condition = "like_new"
+	scoredLikeNew := sc.Score(context.Background(), likeNewListing, search)
+
+	fairListing := base
+	fairListing.ItemID = "xol98-phone-fair"
+	fairListing.Condition = "fair"
+	scoredFair := sc.Score(context.Background(), fairListing, search)
+
+	if scoredFair.Score >= scoredLikeNew.Score {
+		t.Errorf("XOL-98: phone+fair (%.4f) should be lower than phone+like_new (%.4f)",
+			scoredFair.Score, scoredLikeNew.Score)
+	}
+	// Verify the category weight was applied: the delta between like_new and fair
+	// must be > 0.2 (flat fair penalty 0.3 + phone category -0.2 + like_new +0.5 = 1.0 total spread).
+	diff := scoredLikeNew.Score - scoredFair.Score
+	const minDelta = 0.2
+	if diff < minDelta {
+		t.Errorf("XOL-98: phone like_new vs fair delta=%.4f, want >= %.1f", diff, minDelta)
+	}
+}
+
 // TestCategoryConditionWeights verifies XOL-86 C-9 Phase 3: category-specific
 // condition score deltas applied on top of the flat Phase 1 adjustments.
 func TestCategoryConditionWeights(t *testing.T) {
@@ -590,10 +640,11 @@ func TestCategoryConditionWeights(t *testing.T) {
 		t.Errorf("AC-1: fair+camera (%.4f) should be < fair+laptop (%.4f)", fairCamera, fairLaptop)
 	}
 
-	// AC-2: fair + phone must score higher than fair + laptop.
+	// AC-2: fair + phone must score lower than fair + laptop.
+	// XOL-98: phone fair penalty is −0.2; laptop fair bonus is +0.1, so phone < laptop.
 	fairPhone := score("fair", "phone", 3)
-	if fairPhone <= fairLaptop {
-		t.Errorf("AC-2: fair+phone (%.4f) should be > fair+laptop (%.4f)", fairPhone, fairLaptop)
+	if fairPhone >= fairLaptop {
+		t.Errorf("AC-2: fair+phone (%.4f) should be < fair+laptop (%.4f) after XOL-98 phone fair penalty", fairPhone, fairLaptop)
 	}
 
 	// AC-3: used + camera must score lower than used + laptop.
