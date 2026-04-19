@@ -35,8 +35,10 @@ func New(cfg config.AIConfig) *Reasoner {
 	return &Reasoner{
 		cfg:   cfg,
 		model: cfg.Model,
+		// 120s: gpt-5/o-series reasoning models need 30-60s+ with the 16000-token
+		// budget introduced in SUP-15. Previous 20s was tuned for gpt-4o-mini.
 		client: &http.Client{
-			Timeout: 20 * time.Second,
+			Timeout: 120 * time.Second,
 		},
 		limiter: newRateLimiter(cfg.MaxCallsPerUserPerHour, cfg.MaxCallsGlobalPerHour),
 	}
