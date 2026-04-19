@@ -188,9 +188,7 @@ func resolveAction(r ClassifyResult, listing models.Listing) Action {
 		}
 		return ActionAskSeller
 	case InterpNegotiable:
-		if r.Confidence == ConfHigh && listing.FairPrice > 0 && listing.Price <= int(float64(listing.FairPrice)*1.05) {
-			return ActionAccept
-		}
+		// Seller willing to negotiate → always counter; never accept without pushing first.
 		if r.Confidence != ConfLow {
 			return ActionCounter
 		}
