@@ -288,6 +288,25 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 
 	score = clamp(score, 1, 10)
 
+	// Category-specific condition adjustment (XOL-86 C-9 Phase 3).
+	switch strings.ToLower(listing.Condition) {
+	case "fair":
+		switch search.Category {
+		case "camera":
+			score -= 0.3
+			reason.WriteString(" (camera penalty)")
+		case "phone":
+			score += 0.1
+		}
+	case "used":
+		switch search.Category {
+		case "camera":
+			score -= 0.2
+			reason.WriteString(", used camera")
+		}
+	}
+	score = clamp(score, 1, 10)
+
 	// AI explicitly judged the listing as irrelevant to the search query.
 	if (analysis.Source == "ai" || analysis.Source == "ai-cache") && !analysis.Relevant {
 		compCount, compMedian := computeComparableStats(comparables)

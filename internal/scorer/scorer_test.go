@@ -431,3 +431,80 @@ func TestScoreLikeNewBonusRegression(t *testing.T) {
 			want, diff, scoredLikeNew.Score, scoredUsed.Score)
 	}
 }
+
+// TestCategoryConditionWeights verifies XOL-86 C-9 Phase 3: category-specific
+// condition score deltas applied on top of the flat Phase 1 adjustments.
+func TestCategoryConditionWeights(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer-catweights.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	rsn := reasoner.New(config.AIConfig{})
+	sc := New(st, config.ScoringConfig{MinScore: 7, MarketSampleSize: 20}, rsn)
+
+	base := models.Listing{
+		ItemID:    "xol86-base",
+		Title:     "Sony A6000",
+		Price:     10000,
+		PriceType: "fixed",
+	}
+
+	score := func(condition, category string, idx int) float64 {
+		l := base
+		l.ItemID = fmt.Sprintf("xol86-%d", idx)
+		l.Condition = condition
+		s := models.SearchSpec{
+			UserID:          "u1",
+			Query:           "sony a6000",
+			Category:        category,
+			OfferPercentage: 70,
+		}
+		return sc.Score(context.Background(), l, s).Score
+	}
+
+	const tol = 0.001
+
+	// AC-1: fair + camera must score lower than fair + laptop.
+	fairCamera := score("fair", "camera", 1)
+	fairLaptop := score("fair", "laptop", 2)
+	if fairCamera >= fairLaptop {
+		t.Errorf("AC-1: fair+camera (%.4f) should be < fair+laptop (%.4f)", fairCamera, fairLaptop)
+	}
+
+	// AC-2: fair + phone must score higher than fair + laptop.
+	fairPhone := score("fair", "phone", 3)
+	if fairPhone <= fairLaptop {
+		t.Errorf("AC-2: fair+phone (%.4f) should be > fair+laptop (%.4f)", fairPhone, fairLaptop)
+	}
+
+	// AC-3: used + camera must score lower than used + laptop.
+	usedCamera := score("used", "camera", 4)
+	usedLaptop := score("used", "laptop", 5)
+	if usedCamera >= usedLaptop {
+		t.Errorf("AC-3: used+camera (%.4f) should be < used+laptop (%.4f)", usedCamera, usedLaptop)
+	}
+	// Verify the delta is −0.2.
+	diff := usedLaptop - usedCamera
+	if diff < 0.2-tol || diff > 0.2+tol {
+		t.Errorf("AC-3: used+camera delta should be −0.2, got %.4f", diff)
+	}
+
+	// AC-4: for_parts has no category branch in Phase 3, so for_parts+camera must
+	// equal for_parts+laptop — the category override must not affect for_parts.
+	forPartsCamera := score("for_parts", "camera", 6)
+	forPartsLaptop := score("for_parts", "laptop", 9)
+	if forPartsCamera < forPartsLaptop-tol || forPartsCamera > forPartsLaptop+tol {
+		t.Errorf("AC-4: for_parts+camera (%.4f) should equal for_parts+laptop (%.4f) — no category delta on for_parts",
+			forPartsCamera, forPartsLaptop)
+	}
+
+	// AC-5: good + camera — no category penalty; score must equal good + laptop.
+	goodCamera := score("good", "camera", 7)
+	goodLaptop := score("good", "laptop", 8)
+	if goodCamera < goodLaptop-tol || goodCamera > goodLaptop+tol {
+		t.Errorf("AC-5: good+camera (%.4f) should equal good+laptop (%.4f)", goodCamera, goodLaptop)
+	}
+}
