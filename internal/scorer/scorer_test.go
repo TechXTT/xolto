@@ -183,3 +183,111 @@ func TestScoreEmitsRecommendedActionForUnscorableListing(t *testing.T) {
 		})
 	}
 }
+
+// TestComputeRiskFlagsOffPlatformRedirect verifies that off_platform_redirect
+// fires for OLX.bg scam contact patterns and does not fire for clean listings (XOL-80).
+func TestComputeRiskFlagsOffPlatformRedirect(t *testing.T) {
+	cases := []struct {
+		name        string
+		description string
+		wantFlag    bool
+	}{
+		{
+			name:        "cyrillic_write_whatsapp_with_phone",
+			description: "Пишете ми на WhatsApp +359888123456",
+			wantFlag:    true,
+		},
+		{
+			name:        "cyrillic_call_bg_mobile",
+			description: "Обадете се на 0877123456 за повече информация",
+			wantFlag:    true,
+		},
+		{
+			name:        "viber_mention_bulgarian",
+			description: "За въпроси пишете на Viber или Telegram",
+			wantFlag:    true,
+		},
+		{
+			name:        "phone_only_no_messenger",
+			description: "Телефон за контакт: 0887654321",
+			wantFlag:    true,
+		},
+		{
+			name:        "clean_description",
+			description: "Отлично качество, без проблеми. Продавам поради закупуване на нов модел.",
+			wantFlag:    false,
+		},
+		{
+			name:        "empty_description",
+			description: "",
+			wantFlag:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:      "test-" + tc.name,
+				Title:       "Sony A6000",
+				Description: tc.description,
+				Price:       50000,
+				PriceType:   "fixed",
+				ImageURLs:   []string{"a", "b", "c"},
+			}, 0)
+			got := containsFlag(flags, "off_platform_redirect")
+			if got != tc.wantFlag {
+				t.Errorf("off_platform_redirect for %q: got %v, want %v (flags=%v)",
+					tc.description, got, tc.wantFlag, flags)
+			}
+		})
+	}
+}
+
+// TestComputeRiskFlagsVagueConditionBG verifies that BG vague-condition terms
+// trigger the vague_condition flag (XOL-80).
+func TestComputeRiskFlagsVagueConditionBG(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		desc  string
+	}{
+		{
+			name:  "for_parts_bg",
+			title: "Лаптоп Dell за части",
+			desc:  "",
+		},
+		{
+			name:  "not_working_bg",
+			title: "iPhone 12",
+			desc:  "Телефонът не работи, продавам за части.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:      "test-" + tc.name,
+				Title:       tc.title,
+				Description: tc.desc,
+				Price:       10000,
+				PriceType:   "fixed",
+				ImageURLs:   []string{"a", "b", "c"},
+			}, 0)
+			if !containsFlag(flags, "vague_condition") {
+				t.Errorf("expected vague_condition flag for title=%q desc=%q, got flags=%v",
+					tc.title, tc.desc, flags)
+			}
+		})
+	}
+}
+
+// containsFlag is a test helper that checks whether a named flag appears in a
+// flag slice.
+func containsFlag(flags []string, flag string) bool {
+	for _, f := range flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}

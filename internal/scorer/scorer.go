@@ -18,6 +18,10 @@ import (
 
 const minOfferCents = 1000 // EUR10 minimum offer
 
+// offPlatformPhoneRe matches Bulgarian mobile phone patterns used in scam listings.
+// Compiled once at package level (XOL-80).
+var offPlatformPhoneRe = regexp.MustCompile(`\+?359\s*\d{8,9}|0[87]\d{7,8}`)
+
 // accessoryTitleRe matches ASCII/Latin accessory terms using \b word boundaries.
 // Covers EN and NL terms (XOL-21).
 var accessoryTitleRe = regexp.MustCompile(
@@ -469,7 +473,12 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "anomaly_price")
 	}
 
-	vagueTerms := []string{"as is", "as-is", "untested", "for parts", "sold as seen", "no returns", "working condition", "not working"}
+	vagueTerms := []string{
+		// EN/NL terms (existing)
+		"as is", "as-is", "untested", "for parts", "sold as seen", "no returns", "working condition", "not working",
+		// BG terms — added for OLX.bg wedge (XOL-80)
+		"за части", "за ремонт", "не работи", "без гаранция", "като е", "проблем с",
+	}
 	for _, term := range vagueTerms {
 		if strings.Contains(lower, term) {
 			flags = append(flags, "vague_condition")
@@ -510,6 +519,33 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "refurbished_ambiguity")
 	}
 
+	// off_platform_redirect: detect scam contact redirect attempts in description only (XOL-80).
+	// Check description only (not title) to reduce false positives.
+	descLower := strings.ToLower(listing.Description)
+	offPlatformASCII := []string{"whatsapp", "viber", "telegram", "signal"}
+	offPlatformCyrillic := []string{"пишете на", "пишете ми", "обадете се", "пиши на", "обади се"}
+	offPlatformTriggered := false
+	for _, term := range offPlatformASCII {
+		if strings.Contains(descLower, term) {
+			offPlatformTriggered = true
+			break
+		}
+	}
+	if !offPlatformTriggered {
+		for _, term := range offPlatformCyrillic {
+			if strings.Contains(listing.Description, term) {
+				offPlatformTriggered = true
+				break
+			}
+		}
+	}
+	if !offPlatformTriggered && offPlatformPhoneRe.MatchString(listing.Description) {
+		offPlatformTriggered = true
+	}
+	if offPlatformTriggered {
+		flags = append(flags, "off_platform_redirect")
+	}
+
 	return flags
 }
 
@@ -521,9 +557,9 @@ func isElectronicsListing(text string) bool {
 		"sony", "nikon", "canon", "fuji", "fujifilm", "gpu", "cpu", "graphics card",
 		"smartphone", "tablet", "notebook", "thinkpad", "surface", "playstation", "xbox", "nintendo",
 		"monitor", "television", "tv", "router", "modem", "headphone", "airpods", "charger", "battery",
-		// BG Cyrillic terms — added for OLX.bg wedge (XOL-35 M3-A)
+		// BG Cyrillic terms — added for OLX.bg wedge (XOL-35 M3-A); принтер added XOL-80
 		"фотоапарат", "камера", "обектив", "лаптоп", "компютър",
-		"слушалки", "телефон", "таблет",
+		"слушалки", "телефон", "таблет", "принтер",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
