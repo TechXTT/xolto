@@ -2929,7 +2929,7 @@ func (s *SQLiteStore) GetMarketAverage(query string, categoryID int, marketplace
 		SELECT AVG(price), COUNT(*) FROM (
 			SELECT price FROM price_history
 			WHERE query = ? AND category_id = ? AND marketplace_id = ?
-			AND timestamp > datetime('now', '-7 days')
+			AND timestamp > datetime('now', '-30 days')
 			ORDER BY timestamp DESC
 			LIMIT ?
 		)

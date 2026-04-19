@@ -144,7 +144,7 @@ func setDefaults(cfg *Config) {
 		cfg.Scoring.MinScore = 7.0
 	}
 	if cfg.Scoring.MarketSampleSize == 0 {
-		cfg.Scoring.MarketSampleSize = 20
+		cfg.Scoring.MarketSampleSize = 5
 	}
 	if cfg.Messenger.MaxMessagesPerHour == 0 {
 		cfg.Messenger.MaxMessagesPerHour = 10

@@ -733,6 +733,90 @@ func TestRecordPriceEmptyMarketplaceID(t *testing.T) {
 	}
 }
 
+// TestGetMarketAverageMinSamplesExact verifies that exactly minSamples (5)
+// recent price rows return ok=true, while one fewer (4) returns ok=false.
+func TestGetMarketAverageMinSamplesExact(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "market-avg-min-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const query = "iphone 13"
+	const catID = 0
+	const marketplace = "olxbg"
+	const minSamples = 5
+
+	// Insert 4 prices — one below the minimum threshold.
+	for _, p := range []int{1000, 2000, 3000, 4000} {
+		if err := st.RecordPrice(query, catID, marketplace, p); err != nil {
+			t.Fatalf("RecordPrice error = %v", err)
+		}
+	}
+
+	_, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(4 samples) error = %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false with 4 samples (below minSamples=5), got true")
+	}
+
+	// Insert a 5th price to reach the exact minimum.
+	if err := st.RecordPrice(query, catID, marketplace, 5000); err != nil {
+		t.Fatalf("RecordPrice error = %v", err)
+	}
+
+	avg, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(5 samples) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with 5 samples (at minSamples=5), got false")
+	}
+	// Average of 1000+2000+3000+4000+5000 = 3000.
+	if avg != 3000 {
+		t.Errorf("expected avg=3000, got %d", avg)
+	}
+}
+
+// TestGetMarketAverageWindowExpiry verifies that price rows older than 30 days
+// are excluded from the market average, causing ok=false even when enough rows
+// exist in total.
+func TestGetMarketAverageWindowExpiry(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "market-avg-expiry-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const query = "samsung galaxy s22"
+	const catID = 0
+	const marketplace = "olxbg"
+	const minSamples = 5
+
+	// Insert 5 rows with a timestamp older than 30 days directly via the db.
+	oldTS := time.Now().Add(-31 * 24 * time.Hour).UTC().Format("2006-01-02 15:04:05")
+	for _, p := range []int{1000, 2000, 3000, 4000, 5000} {
+		if _, err := st.db.Exec(
+			"INSERT INTO price_history (query, category_id, marketplace_id, price, timestamp) VALUES (?, ?, ?, ?, ?)",
+			query, catID, marketplace, p, oldTS,
+		); err != nil {
+			t.Fatalf("insert old row error = %v", err)
+		}
+	}
+
+	_, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(expired samples) error = %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for samples older than 30 days, got true")
+	}
+}
+
 // TestUpdateOutreachStatusValidStatuses verifies that each of the five valid
 // outreach status values can be persisted and read back via GetListing.
 func TestUpdateOutreachStatusValidStatuses(t *testing.T) {

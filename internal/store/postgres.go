@@ -2755,7 +2755,7 @@ func (s *PostgresStore) GetMarketAverage(query string, categoryID int, marketpla
 			SELECT price
 			FROM price_history
 			WHERE query = $1 AND category_id = $2 AND marketplace_id = $3
-			  AND timestamp > NOW() - INTERVAL '7 days'
+			  AND timestamp > NOW() - INTERVAL '30 days'
 			ORDER BY timestamp DESC
 			LIMIT $4
 		) recent
