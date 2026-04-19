@@ -681,6 +681,9 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	// XOL-79 (C-6): outreach lifecycle status per saved listing.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE listings ADD COLUMN IF NOT EXISTS outreach_status TEXT NOT NULL DEFAULT 'none'`)
 
+	// XOL-101: manual recheck rate-limit timestamp on missions.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS last_manual_recheck_at TIMESTAMPTZ`)
+
 	return nil
 }
 
@@ -876,6 +879,31 @@ func (s *PostgresStore) UpdateMissionStatus(id int64, status string) error {
 		SET status = $1, active = $2, updated_at = NOW()
 		WHERE id = $3
 	`, status, active, id)
+	return err
+}
+
+func (s *PostgresStore) GetMissionLastRecheck(ctx context.Context, missionID int64, userID string) (time.Time, error) {
+	var t time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT last_manual_recheck_at FROM shopping_profiles WHERE id = $1 AND user_id = $2
+	`, missionID, userID).Scan(&t)
+	if err == sql.ErrNoRows {
+		return time.Time{}, sql.ErrNoRows
+	}
+	return t, err
+}
+
+func (s *PostgresStore) SetMissionRecheck(ctx context.Context, missionID int64, userID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE shopping_profiles SET last_manual_recheck_at = NOW() WHERE id = $1 AND user_id = $2
+	`, missionID, userID)
+	return err
+}
+
+func (s *PostgresStore) ResetMissionSearchSpecsNextRun(ctx context.Context, missionID int64, userID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE search_configs SET next_run_at = NOW() WHERE profile_id = $1 AND user_id = $2
+	`, missionID, userID)
 	return err
 }
 

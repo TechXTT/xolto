@@ -986,6 +986,18 @@ func (s *SQLiteStore) UpdateMissionStatus(id int64, status string) error {
 	return err
 }
 
+func (s *SQLiteStore) GetMissionLastRecheck(_ context.Context, _ int64, _ string) (time.Time, error) {
+	return time.Time{}, sql.ErrNoRows
+}
+
+func (s *SQLiteStore) SetMissionRecheck(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
+func (s *SQLiteStore) ResetMissionSearchSpecsNextRun(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
 func (s *SQLiteStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
 	concernsJSON, err := json.Marshal(entry.Concerns)
 	if err != nil {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -359,6 +360,54 @@ func (s *Server) handleMissionByID(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"mission":  mission,
 			"listings": listings,
+		})
+		return
+	}
+
+	// POST /missions/{id}/recheck
+	if strings.HasSuffix(rawPath, "/recheck") {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		idPart := strings.Trim(strings.TrimSuffix(rawPath, "/recheck"), "/")
+		id, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid mission id")
+			return
+		}
+		mission, err := s.db.GetMission(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if mission == nil || mission.UserID != user.ID {
+			writeError(w, http.StatusNotFound, "mission not found")
+			return
+		}
+		lastRecheck, err := s.db.GetMissionLastRecheck(r.Context(), id, user.ID)
+		if err == nil && time.Since(lastRecheck) < 10*time.Minute {
+			retryAfter := int((10*time.Minute - time.Since(lastRecheck)).Seconds())
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":               "rate_limited",
+				"retry_after_seconds": retryAfter,
+			})
+			return
+		}
+		if err := s.db.ResetMissionSearchSpecsNextRun(r.Context(), id, user.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to recheck")
+			return
+		}
+		if err := s.db.SetMissionRecheck(r.Context(), id, user.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record recheck")
+			return
+		}
+		nextAllowedAt := time.Now().UTC().Add(10 * time.Minute)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":              true,
+			"next_allowed_at": nextAllowedAt.Format(time.RFC3339),
 		})
 		return
 	}
