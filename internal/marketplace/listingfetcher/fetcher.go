@@ -191,6 +191,9 @@ func (f *Fetcher) fetchOLXByID(ctx context.Context, rawURL string) (models.Listi
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return models.Listing{}, err
 	}
+	if s := payload.Data.Status; s != "" && s != "active" {
+		return models.Listing{}, fmt.Errorf("listing is no longer available (%s)", s)
+	}
 
 	var rawPrice float64
 	var apiCurrency string
