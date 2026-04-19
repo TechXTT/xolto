@@ -71,6 +71,9 @@ type Writer interface {
 	UpsertMission(mission models.Mission) (int64, error)
 	UpdateMissionStatus(id int64, status string) error
 	DeleteMission(id int64, userID string) error
+	GetMissionLastRecheck(ctx context.Context, missionID int64, userID string) (time.Time, error)
+	SetMissionRecheck(ctx context.Context, missionID int64, userID string) error
+	ResetMissionSearchSpecsNextRun(ctx context.Context, missionID int64, userID string) error
 	SaveShortlistEntry(entry models.ShortlistEntry) error
 	SaveConversationArtifact(userID string, intent models.ConversationIntent, input, output string) error
 	SaveActionDraft(draft models.ActionDraft) error
