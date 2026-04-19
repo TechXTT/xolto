@@ -258,8 +258,10 @@ func (r *Reasoner) callLLM(
 	// the reasoning budget enough room. Mirrors the pattern in musthave.go (XOL-65).
 	payload := map[string]any{
 		"model": r.model,
-		// 2048 covers reasoning + the deal_analysis JSON payload.
-		"max_completion_tokens": 2048,
+		// 16000 gives reasoning models (gpt-5/o-series) room for hidden thinking
+		// tokens before visible JSON output. Prior limit of 2048 caused null content
+		// (finish_reason=length) → parse failure on every call (SUP-15).
+		"max_completion_tokens": 16000,
 		"messages": []map[string]any{
 			{
 				"role": "system",
@@ -325,10 +327,17 @@ func (r *Reasoner) callLLM(
 		return models.DealAnalysis{}, fmt.Errorf("ai response contained no choices")
 	}
 
+	choice := completion.Choices[0]
+	if choice.Message.Content == nil || *choice.Message.Content == "" {
+		// Reasoning models return null content when finish_reason="length" (budget
+		// exhausted) or "refusal". Treat as a retryable inference error.
+		return models.DealAnalysis{}, fmt.Errorf("ai response empty content (finish_reason=%q)", choice.FinishReason)
+	}
+
 	// With strict json_schema mode, the model returns valid JSON directly.
 	// No extractJSON fallback — surface parse failures as typed errors.
 	var parsed aiListingAnalysis
-	if err := json.Unmarshal([]byte(completion.Choices[0].Message.Content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(*choice.Message.Content), &parsed); err != nil {
 		return models.DealAnalysis{}, fmt.Errorf("parse ai json: %w", err)
 	}
 
@@ -658,13 +667,14 @@ func localeInstruction(countryCode string) string {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string  `json:"role"`
+	Content *string `json:"content"` // nullable: null when model refuses or exhausts token budget
 }
 
 type chatCompletionResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message      chatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`

@@ -342,8 +342,8 @@ func TestScorerRequestShape_ModelOverride(t *testing.T) {
 	if _, hasTemp := captured["temperature"]; hasTemp {
 		t.Errorf("expected temperature absent from request (gpt-5 rejects non-default), got %v", captured["temperature"])
 	}
-	if got, _ := captured["max_completion_tokens"].(float64); got != 2048 {
-		t.Errorf("expected max_completion_tokens=2048, got %v", captured["max_completion_tokens"])
+	if got, _ := captured["max_completion_tokens"].(float64); got != 16000 {
+		t.Errorf("expected max_completion_tokens=16000, got %v", captured["max_completion_tokens"])
 	}
 }
 

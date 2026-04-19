@@ -292,7 +292,11 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 		return nil, fmt.Errorf("musthave evaluator: no choices in response")
 	}
 
-	verdicts, err := parseMustHaveResponse(completion.Choices[0].Message.Content)
+	mhChoice := completion.Choices[0]
+	if mhChoice.Message.Content == nil || *mhChoice.Message.Content == "" {
+		return nil, fmt.Errorf("musthave evaluator: empty content (finish_reason=%q)", mhChoice.FinishReason)
+	}
+	verdicts, err := parseMustHaveResponse(*mhChoice.Message.Content)
 	if err != nil {
 		return nil, fmt.Errorf("musthave evaluator: parse verdicts: %w", err)
 	}
