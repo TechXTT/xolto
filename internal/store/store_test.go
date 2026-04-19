@@ -622,3 +622,111 @@ func TestAIUsagePersistsMissionContextAndUserAggregation(t *testing.T) {
 		t.Fatalf("expected ai_tokens=300, got %d", summary.AITokens)
 	}
 }
+
+// TestRecordPriceMarketplaceIsolation verifies that price_history rows are
+// scoped by marketplace_id: GetMarketAverage only returns data for the
+// requested marketplace and does not contaminate across markets.
+func TestRecordPriceMarketplaceIsolation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "price-isolation-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const query = "sony a6400"
+	const catID = 0
+	const minSamples = 3
+
+	// Insert 3 NL prices (average 100_00 = €100).
+	for _, p := range []int{9000, 10000, 11000} {
+		if err := st.RecordPrice(query, catID, "marktplaats", p); err != nil {
+			t.Fatalf("RecordPrice(marktplaats) error = %v", err)
+		}
+	}
+
+	// Insert 3 BG prices (average 60_00 = €60).
+	for _, p := range []int{5000, 6000, 7000} {
+		if err := st.RecordPrice(query, catID, "olxbg", p); err != nil {
+			t.Fatalf("RecordPrice(olxbg) error = %v", err)
+		}
+	}
+
+	// NL market average should be ~10000, not contaminated by BG prices.
+	nlAvg, ok, err := st.GetMarketAverage(query, catID, "marktplaats", minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(marktplaats) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for marktplaats, got false")
+	}
+	if nlAvg != 10000 {
+		t.Errorf("expected marktplaats avg=10000, got %d", nlAvg)
+	}
+
+	// BG market average should be ~6000, not contaminated by NL prices.
+	bgAvg, ok, err := st.GetMarketAverage(query, catID, "olxbg", minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(olxbg) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for olxbg, got false")
+	}
+	if bgAvg != 6000 {
+		t.Errorf("expected olxbg avg=6000, got %d", bgAvg)
+	}
+}
+
+// TestRecordPriceEmptyMarketplaceID verifies that an empty marketplaceID is
+// treated as a valid bucket (legacy rows default to ''). Querying with '' only
+// returns rows recorded with ''.
+func TestRecordPriceEmptyMarketplaceID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "price-empty-mp-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const query = "sony a6400"
+	const catID = 0
+	const minSamples = 2
+
+	// Insert 2 legacy rows (empty marketplace_id).
+	for _, p := range []int{8000, 12000} {
+		if err := st.RecordPrice(query, catID, "", p); err != nil {
+			t.Fatalf("RecordPrice('') error = %v", err)
+		}
+	}
+
+	// Insert 2 rows for a real marketplace.
+	for _, p := range []int{5000, 7000} {
+		if err := st.RecordPrice(query, catID, "olxbg", p); err != nil {
+			t.Fatalf("RecordPrice(olxbg) error = %v", err)
+		}
+	}
+
+	// Querying '' should only return the legacy rows (avg 10000).
+	emptyAvg, ok, err := st.GetMarketAverage(query, catID, "", minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage('') error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for '' marketplace, got false")
+	}
+	if emptyAvg != 10000 {
+		t.Errorf("expected '' avg=10000, got %d", emptyAvg)
+	}
+
+	// Querying 'olxbg' should not see legacy rows (avg 6000).
+	bgAvg, ok, err := st.GetMarketAverage(query, catID, "olxbg", minSamples)
+	if err != nil {
+		t.Fatalf("GetMarketAverage(olxbg) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for olxbg, got false")
+	}
+	if bgAvg != 6000 {
+		t.Errorf("expected olxbg avg=6000, got %d", bgAvg)
+	}
+}

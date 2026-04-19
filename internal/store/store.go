@@ -112,11 +112,12 @@ func migrate(db *sql.DB) error {
 		);
 
 		CREATE TABLE IF NOT EXISTS price_history (
-			id        INTEGER PRIMARY KEY AUTOINCREMENT,
-			query     TEXT NOT NULL,
-			category_id INTEGER NOT NULL DEFAULT 0,
-			price     INTEGER NOT NULL,
-			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			query          TEXT NOT NULL,
+			category_id    INTEGER NOT NULL DEFAULT 0,
+			marketplace_id TEXT NOT NULL DEFAULT '',
+			price          INTEGER NOT NULL,
+			timestamp      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_price_history_query ON price_history(query, timestamp);
@@ -722,6 +723,9 @@ func migrate(db *sql.DB) error {
 
 	// XOL-53 SUP-2: support events intake table.
 	migrateSupportEventsSQLite(db)
+
+	// XOL-71: isolate price_history by marketplace_id.
+	_, _ = db.Exec(`ALTER TABLE price_history ADD COLUMN marketplace_id TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }
@@ -2864,29 +2868,29 @@ func (s *SQLiteStore) fillSQLiteSearchOpsBreakdown(days int, column string, out 
 }
 
 // RecordPrice saves a price data point for market average calculation.
-func (s *SQLiteStore) RecordPrice(query string, categoryID int, price int) error {
+func (s *SQLiteStore) RecordPrice(query string, categoryID int, marketplaceID string, price int) error {
 	_, err := s.db.Exec(
-		"INSERT INTO price_history (query, category_id, price) VALUES (?, ?, ?)",
-		query, categoryID, price,
+		"INSERT INTO price_history (query, category_id, marketplace_id, price) VALUES (?, ?, ?, ?)",
+		query, categoryID, marketplaceID, price,
 	)
 	return err
 }
 
 // GetMarketAverage returns the average price in cents from recent listings for a query.
 // Returns 0 and false if not enough samples are available.
-func (s *SQLiteStore) GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error) {
+func (s *SQLiteStore) GetMarketAverage(query string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
 	var avg sql.NullFloat64
 	var count int
 
 	err := s.db.QueryRow(`
 		SELECT AVG(price), COUNT(*) FROM (
 			SELECT price FROM price_history
-			WHERE query = ? AND category_id = ?
+			WHERE query = ? AND category_id = ? AND marketplace_id = ?
 			AND timestamp > datetime('now', '-7 days')
 			ORDER BY timestamp DESC
 			LIMIT ?
 		)
-	`, query, categoryID, minSamples).Scan(&avg, &count)
+	`, query, categoryID, marketplaceID, minSamples).Scan(&avg, &count)
 	if err != nil {
 		return 0, false, err
 	}

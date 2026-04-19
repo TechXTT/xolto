@@ -145,7 +145,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		}
 	}
 
-	marketAvg, hasMarket, err := sc.store.GetMarketAverage(search.Query, search.CategoryID, sc.scoringCfg.MarketSampleSize)
+	marketAvg, hasMarket, err := sc.store.GetMarketAverage(search.Query, search.CategoryID, search.MarketplaceID, sc.scoringCfg.MarketSampleSize)
 	if err != nil {
 		slog.Warn("failed to load market average", "query", search.Query, "error", err)
 	}

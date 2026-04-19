@@ -123,7 +123,7 @@ func (s *Scheduler) processSearch(ctx context.Context, searchCfg config.SearchCo
 	for _, listing := range listings {
 		listing.ProfileID = spec.ProfileID
 		if listing.Price > 0 {
-			if err := s.store.RecordPrice(spec.Query, spec.CategoryID, listing.Price); err != nil {
+			if err := s.store.RecordPrice(spec.Query, spec.CategoryID, spec.MarketplaceID, listing.Price); err != nil {
 				slog.Warn("failed to record price", "error", err)
 			}
 		}

@@ -675,6 +675,9 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	// XOL-53 SUP-2: support events intake table.
 	migratePostgresSupportEvents(ctx, db)
 
+	// XOL-71: isolate price_history by marketplace_id.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE price_history ADD COLUMN IF NOT EXISTS marketplace_id TEXT NOT NULL DEFAULT ''`)
+
 	return nil
 }
 
@@ -2695,12 +2698,12 @@ func (s *PostgresStore) SetAIScoreCache(cacheKey string, score float64, reasonin
 	return err
 }
 
-func (s *PostgresStore) RecordPrice(query string, categoryID int, price int) error {
-	_, err := s.db.Exec(`INSERT INTO price_history (query, category_id, price) VALUES ($1, $2, $3)`, query, categoryID, price)
+func (s *PostgresStore) RecordPrice(query string, categoryID int, marketplaceID string, price int) error {
+	_, err := s.db.Exec(`INSERT INTO price_history (query, category_id, marketplace_id, price) VALUES ($1, $2, $3, $4)`, query, categoryID, marketplaceID, price)
 	return err
 }
 
-func (s *PostgresStore) GetMarketAverage(query string, categoryID int, minSamples int) (int, bool, error) {
+func (s *PostgresStore) GetMarketAverage(query string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
 	type result struct {
 		Avg   sql.NullFloat64
 		Count int
@@ -2711,12 +2714,12 @@ func (s *PostgresStore) GetMarketAverage(query string, categoryID int, minSample
 		FROM (
 			SELECT price
 			FROM price_history
-			WHERE query = $1 AND category_id = $2
+			WHERE query = $1 AND category_id = $2 AND marketplace_id = $3
 			  AND timestamp > NOW() - INTERVAL '7 days'
 			ORDER BY timestamp DESC
-			LIMIT $3
+			LIMIT $4
 		) recent
-	`, query, categoryID, minSamples).Scan(&res.Avg, &res.Count)
+	`, query, categoryID, marketplaceID, minSamples).Scan(&res.Avg, &res.Count)
 	if err != nil {
 		return 0, false, err
 	}
