@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -728,5 +730,100 @@ func TestRecordPriceEmptyMarketplaceID(t *testing.T) {
 	}
 	if bgAvg != 6000 {
 		t.Errorf("expected olxbg avg=6000, got %d", bgAvg)
+	}
+}
+
+// TestUpdateOutreachStatusValidStatuses verifies that each of the five valid
+// outreach status values can be persisted and read back via GetListing.
+func TestUpdateOutreachStatusValidStatuses(t *testing.T) {
+	validStatuses := []string{"none", "sent", "replied", "won", "lost"}
+
+	for _, status := range validStatuses {
+		t.Run(status, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "outreach-status-test.db")
+			st, err := New(dbPath)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer st.Close()
+
+			userID := "u-" + status
+			itemID := "item-" + status
+
+			l := models.Listing{
+				ItemID:        itemID,
+				Title:         "Test listing " + status,
+				Price:         10000,
+				PriceType:     "fixed",
+				MarketplaceID: "olxbg",
+			}
+			if err := st.SaveListing(userID, l, "query", models.ScoredListing{}); err != nil {
+				t.Fatalf("SaveListing() error = %v", err)
+			}
+
+			if err := st.UpdateOutreachStatus(context.Background(), userID, itemID, status); err != nil {
+				t.Fatalf("UpdateOutreachStatus(%q) error = %v", status, err)
+			}
+
+			got, err := st.GetListing(userID, itemID)
+			if err != nil {
+				t.Fatalf("GetListing() error = %v", err)
+			}
+			if got == nil {
+				t.Fatalf("GetListing() returned nil")
+			}
+			if got.OutreachStatus != status {
+				t.Errorf("expected OutreachStatus=%q, got %q", status, got.OutreachStatus)
+			}
+		})
+	}
+}
+
+// TestUpdateOutreachStatusDefaultIsNone verifies that a freshly saved listing
+// has OutreachStatus == "none" before any PATCH has been applied.
+func TestUpdateOutreachStatusDefaultIsNone(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "outreach-default-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	l := models.Listing{
+		ItemID:        "default-status-item",
+		Title:         "Default status test",
+		Price:         5000,
+		PriceType:     "fixed",
+		MarketplaceID: "olxbg",
+	}
+	if err := st.SaveListing("u1", l, "q", models.ScoredListing{}); err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	got, err := st.GetListing("u1", "default-status-item")
+	if err != nil {
+		t.Fatalf("GetListing() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("GetListing() returned nil")
+	}
+	if got.OutreachStatus != "none" {
+		t.Errorf("expected default OutreachStatus=none, got %q", got.OutreachStatus)
+	}
+}
+
+// TestUpdateOutreachStatusNotFound verifies that UpdateOutreachStatus returns
+// ErrListingNotFound when the listing does not belong to the given user.
+func TestUpdateOutreachStatusNotFound(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "outreach-notfound-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	err = st.UpdateOutreachStatus(context.Background(), "no-such-user", "no-such-item", "sent")
+	if !errors.Is(err, ErrListingNotFound) {
+		t.Fatalf("expected ErrListingNotFound, got %v", err)
 	}
 }

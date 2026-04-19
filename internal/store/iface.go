@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"time"
 
 	"github.com/TechXTT/xolto/internal/models"
@@ -79,6 +80,10 @@ type Writer interface {
 	TouchListing(userID, itemID string) error
 	SetAIScoreCache(cacheKey string, score float64, reasoning string, promptVersion int) error
 	SetListingFeedback(userID, itemID, feedback string) error
+	// UpdateOutreachStatus sets the outreach lifecycle status for a listing
+	// owned by the given user. Valid status values: none, sent, replied, won, lost.
+	// Returns an error when the listing is not found or does not belong to userID.
+	UpdateOutreachStatus(ctx context.Context, userID, itemID, status string) error
 	RecordPrice(query string, categoryID int, marketplaceID string, price int) error
 	MarkOffered(userID, itemID string) error
 	CreateUser(email, hash, name string) (string, error)

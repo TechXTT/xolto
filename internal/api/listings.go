@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,6 +96,8 @@ func normalizeCondition(v string) string {
 
 func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/listings/feed", s.requireAuth(s.handleFeed))
+	// /listings/ must be registered to catch PATCH /listings/:id/outreach-status.
+	mux.HandleFunc("/listings/", s.requireAuth(s.handleListingSubresource))
 	// /matches must be registered before /matches/feedback and /matches/analyze
 	// so that the more-specific sub-paths take priority in the ServeMux.
 	mux.HandleFunc("/matches", s.requireAuth(s.handleMatches))
@@ -777,6 +780,70 @@ func (s *Server) handleShortlistItem(w http.ResponseWriter, r *http.Request, use
 	default:
 		writeMethodNotAllowed(w, http.MethodPost, http.MethodDelete)
 	}
+}
+
+// validOutreachStatuses is the exhaustive allowlist for the outreach_status
+// field (XOL-79 C-6). Any value not in this set is rejected with 400.
+var validOutreachStatuses = map[string]bool{
+	"none":    true,
+	"sent":    true,
+	"replied": true,
+	"won":     true,
+	"lost":    true,
+}
+
+// handleListingSubresource dispatches sub-resource actions on /listings/:id/*.
+//
+// Currently supported:
+//
+//	PATCH /listings/:id/outreach-status   — update outreach lifecycle status
+func (s *Server) handleListingSubresource(w http.ResponseWriter, r *http.Request, user *models.User) {
+	// Path is: /listings/<id>/outreach-status
+	rawPath := strings.TrimPrefix(r.URL.Path, "/listings/")
+	rawPath = strings.Trim(rawPath, "/")
+
+	// Only the outreach-status sub-resource is currently supported.
+	// Path must be exactly "<id>/outreach-status".
+	const suffix = "/outreach-status"
+	if !strings.HasSuffix(rawPath, suffix) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	listingID := strings.TrimSuffix(rawPath, suffix)
+	if strings.TrimSpace(listingID) == "" {
+		writeError(w, http.StatusBadRequest, "listing id is required")
+		return
+	}
+
+	if r.Method != http.MethodPatch {
+		writeMethodNotAllowed(w, http.MethodPatch)
+		return
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := Decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := strings.TrimSpace(body.Status)
+	if !validOutreachStatuses[status] {
+		writeError(w, http.StatusBadRequest, "status must be one of: none, sent, replied, won, lost")
+		return
+	}
+
+	if err := s.db.UpdateOutreachStatus(r.Context(), user.ID, listingID, status); err != nil {
+		if errors.Is(err, store.ErrListingNotFound) {
+			writeError(w, http.StatusNotFound, "listing not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"outreach_status": status})
 }
 
 func (s *Server) handleActions(w http.ResponseWriter, r *http.Request, user *models.User) {

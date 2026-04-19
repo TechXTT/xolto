@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -726,6 +727,9 @@ func migrate(db *sql.DB) error {
 
 	// XOL-71: isolate price_history by marketplace_id.
 	_, _ = db.Exec(`ALTER TABLE price_history ADD COLUMN marketplace_id TEXT NOT NULL DEFAULT ''`)
+
+	// XOL-79 (C-6): outreach lifecycle status per saved listing.
+	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN outreach_status TEXT NOT NULL DEFAULT 'none'`)
 
 	return nil
 }
@@ -1494,7 +1498,8 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
 		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, '')
+		       COALESCE(currency_status, ''),
+		       COALESCE(outreach_status, 'none')
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
@@ -1519,6 +1524,7 @@ func (s *SQLiteStore) ListRecentListings(userID string, limit int, missionID int
 			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 			&lastSeen, &listing.Feedback,
 			&listing.CurrencyStatus,
+			&listing.OutreachStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -1598,7 +1604,8 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
 		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, '')
+		       COALESCE(currency_status, ''),
+		       COALESCE(outreach_status, 'none')
 		FROM listings
 		WHERE item_id LIKE ?
 		  AND (? = 0 OR profile_id = ?)
@@ -1624,6 +1631,7 @@ func (s *SQLiteStore) ListRecentListingsPaginated(userID string, limit, offset i
 			&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 			&lastSeen, &listing.Feedback,
 			&listing.CurrencyStatus,
+			&listing.OutreachStatus,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1669,7 +1677,8 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		       COALESCE(recommended_action, 'ask_seller'),
 		       comparables_count, comparables_median_age_days,
 		       last_seen, COALESCE(feedback, ''),
-		       COALESCE(currency_status, '')
+		       COALESCE(currency_status, ''),
+		       COALESCE(outreach_status, 'none')
 		FROM listings
 		WHERE item_id = ?
 	`, scopedItemID(userID, itemID))
@@ -1684,6 +1693,7 @@ func (s *SQLiteStore) GetListing(userID, itemID string) (*models.Listing, error)
 		&listing.ComparablesCount, &listing.ComparablesMedianAgeDays,
 		&lastSeen, &listing.Feedback,
 		&listing.CurrencyStatus,
+		&listing.OutreachStatus,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1717,6 +1727,25 @@ func (s *SQLiteStore) SetListingFeedback(userID, itemID, feedback string) error 
 		WHERE item_id = ?
 	`, feedback, feedback, scopedItemID(userID, itemID))
 	return err
+}
+
+// UpdateOutreachStatus sets the outreach lifecycle status for a listing owned
+// by the given user. Status must be one of: none, sent, replied, won, lost.
+// Returns ErrListingNotFound when the listing does not exist or is not owned by userID.
+func (s *SQLiteStore) UpdateOutreachStatus(ctx context.Context, userID, itemID, status string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE listings
+		SET outreach_status = ?
+		WHERE item_id = ?
+	`, status, scopedItemID(userID, itemID))
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return ErrListingNotFound
+	}
+	return nil
 }
 
 // GetApprovedComparables returns listings the user has explicitly approved for
@@ -3228,3 +3257,7 @@ func unscopedItemID(value string) string {
 	}
 	return value
 }
+
+// ErrListingNotFound is returned when a listing lookup finds no row for the
+// given (userID, itemID) pair.
+var ErrListingNotFound = fmt.Errorf("listing not found")

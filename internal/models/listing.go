@@ -38,6 +38,10 @@ type Listing struct {
 	//   "unknown"            — currency field missing or unrecognised; BGN fallback used
 	//   ""                   — non-OLX marketplace or field not yet populated
 	CurrencyStatus string
+	// OutreachStatus tracks the user's deal lifecycle for this listing (XOL-79).
+	// Valid values: "none" | "sent" | "replied" | "won" | "lost".
+	// Default is "none" for all rows that predate this field.
+	OutreachStatus string
 }
 
 type Seller struct {
