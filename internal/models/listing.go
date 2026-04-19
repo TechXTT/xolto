@@ -247,6 +247,11 @@ type ShortlistEntry struct {
 	Status              string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+	// Joined from listings table (LEFT JOIN on item_id). Zero-value when no
+	// corresponding listing row exists.
+	Condition      string
+	MarketplaceID  string
+	OutreachStatus string
 }
 
 type ActionDraft struct {

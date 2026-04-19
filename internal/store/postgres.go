@@ -910,11 +910,17 @@ func (s *PostgresStore) SaveShortlistEntry(entry models.ShortlistEntry) error {
 
 func (s *PostgresStore) GetShortlist(userID string) ([]models.ShortlistEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, profile_id, item_id, title, url, recommendation_label, recommendation_score,
-		       ask_price, fair_price, verdict, concerns::text, suggested_questions::text, status, created_at, updated_at
-		FROM shortlist_entries
-		WHERE user_id = $1
-		ORDER BY updated_at DESC
+		SELECT se.id, se.user_id, se.profile_id, se.item_id, se.title, se.url,
+		       se.recommendation_label, se.recommendation_score,
+		       se.ask_price, se.fair_price, se.verdict,
+		       se.concerns::text, se.suggested_questions::text, se.status, se.created_at, se.updated_at,
+		       COALESCE(l.condition, '') AS condition,
+		       COALESCE(l.marketplace_id, '') AS marketplace_id,
+		       COALESCE(l.outreach_status, 'none') AS outreach_status
+		FROM shortlist_entries se
+		LEFT JOIN listings l ON l.item_id = (se.user_id || '::' || se.item_id)
+		WHERE se.user_id = $1
+		ORDER BY se.updated_at DESC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -934,10 +940,16 @@ func (s *PostgresStore) GetShortlist(userID string) ([]models.ShortlistEntry, er
 
 func (s *PostgresStore) GetShortlistEntry(userID, itemID string) (*models.ShortlistEntry, error) {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, profile_id, item_id, title, url, recommendation_label, recommendation_score,
-		       ask_price, fair_price, verdict, concerns::text, suggested_questions::text, status, created_at, updated_at
-		FROM shortlist_entries
-		WHERE user_id = $1 AND item_id = $2
+		SELECT se.id, se.user_id, se.profile_id, se.item_id, se.title, se.url,
+		       se.recommendation_label, se.recommendation_score,
+		       se.ask_price, se.fair_price, se.verdict,
+		       se.concerns::text, se.suggested_questions::text, se.status, se.created_at, se.updated_at,
+		       COALESCE(l.condition, '') AS condition,
+		       COALESCE(l.marketplace_id, '') AS marketplace_id,
+		       COALESCE(l.outreach_status, 'none') AS outreach_status
+		FROM shortlist_entries se
+		LEFT JOIN listings l ON l.item_id = (se.user_id || '::' || se.item_id)
+		WHERE se.user_id = $1 AND se.item_id = $2
 	`, userID, itemID)
 	entry, err := scanShortlistEntry(row)
 	if err == sql.ErrNoRows {
@@ -2950,6 +2962,7 @@ func scanShortlistEntry(scanner interface{ Scan(dest ...any) error }) (models.Sh
 		&entry.ID, &entry.UserID, &entry.MissionID, &entry.ItemID, &entry.Title, &entry.URL,
 		&entry.RecommendationLabel, &entry.RecommendationScore, &entry.AskPrice, &entry.FairPrice,
 		&entry.Verdict, &concernsJSON, &questionsJSON, &entry.Status, &entry.CreatedAt, &entry.UpdatedAt,
+		&entry.Condition, &entry.MarketplaceID, &entry.OutreachStatus,
 	)
 	if err != nil {
 		return entry, err

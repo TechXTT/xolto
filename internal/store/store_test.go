@@ -827,3 +827,102 @@ func TestUpdateOutreachStatusNotFound(t *testing.T) {
 		t.Fatalf("expected ErrListingNotFound, got %v", err)
 	}
 }
+
+// TestListShortlistEntriesIncludesConditionAndOutreachStatus verifies that
+// GetShortlist joins the listings table and surfaces condition and
+// outreach_status on the returned ShortlistEntry structs.
+func TestListShortlistEntriesIncludesConditionAndOutreachStatus(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "shortlist-join-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const userID = "u-join-1"
+	const rawItemID = "item-join-1"
+
+	// Save the listing with condition="used" and marketplace_id="olxbg".
+	err = st.SaveListing(userID, models.Listing{
+		ItemID:        rawItemID,
+		Title:         "Test Phone",
+		Price:         50000,
+		PriceType:     "fixed",
+		Condition:     "used",
+		MarketplaceID: "olxbg",
+	}, "test query", models.ScoredListing{
+		RecommendedAction: "buy",
+	})
+	if err != nil {
+		t.Fatalf("SaveListing() error = %v", err)
+	}
+
+	// Set outreach_status to "sent".
+	if err := st.UpdateOutreachStatus(context.Background(), userID, rawItemID, "sent"); err != nil {
+		t.Fatalf("UpdateOutreachStatus() error = %v", err)
+	}
+
+	// Save a shortlist entry for the same item.
+	if err := st.SaveShortlistEntry(models.ShortlistEntry{
+		UserID:  userID,
+		ItemID:  rawItemID,
+		Title:   "Test Phone",
+		Status:  "watching",
+	}); err != nil {
+		t.Fatalf("SaveShortlistEntry() error = %v", err)
+	}
+
+	entries, err := st.GetShortlist(userID)
+	if err != nil {
+		t.Fatalf("GetShortlist() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	got := entries[0]
+	if got.Condition != "used" {
+		t.Errorf("Condition: got %q, want %q", got.Condition, "used")
+	}
+	if got.OutreachStatus != "sent" {
+		t.Errorf("OutreachStatus: got %q, want %q", got.OutreachStatus, "sent")
+	}
+}
+
+// TestListShortlistEntriesDefaultsWhenNoListing verifies that GetShortlist
+// returns empty string for Condition and "none" for OutreachStatus when there
+// is no corresponding listing row for a shortlist entry.
+func TestListShortlistEntriesDefaultsWhenNoListing(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "shortlist-nolisting-test.db")
+	st, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer st.Close()
+
+	const userID = "u-nolisting-1"
+
+	// Save a shortlist entry WITHOUT a corresponding listing.
+	if err := st.SaveShortlistEntry(models.ShortlistEntry{
+		UserID: userID,
+		ItemID: "orphan-item",
+		Title:  "Orphan Entry",
+		Status: "watching",
+	}); err != nil {
+		t.Fatalf("SaveShortlistEntry() error = %v", err)
+	}
+
+	entries, err := st.GetShortlist(userID)
+	if err != nil {
+		t.Fatalf("GetShortlist() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	got := entries[0]
+	if got.Condition != "" {
+		t.Errorf("Condition: got %q, want %q", got.Condition, "")
+	}
+	if got.OutreachStatus != "none" {
+		t.Errorf("OutreachStatus: got %q, want %q", got.OutreachStatus, "none")
+	}
+}
