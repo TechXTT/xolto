@@ -1,0 +1,27 @@
+{
+  "id": "102",
+  "url": "https://www.olx.bg/ad/macbook-air-2019-CID102.html",
+  "title": "MacBook Air 2019 i5 8GB 256GB",
+  "description": "Лаптоп като нов. Без забележки.",
+  "photos": [
+    {"link": "https://ireland.apollo.olxcdn.com/v1/files/bbb1/image;s=320x240"}
+  ],
+  "location": {
+    "city": {"name": "Пловдив"},
+    "region": {"name": "Пловдив"}
+  },
+  "contact": {"name": "Мария Иванова"},
+  "params": [
+    {
+      "key": "price",
+      "name": "Цена",
+      "value": {"value": 800.0, "currency": "BGN", "type": "price", "negotiable": true}
+    },
+    {
+      "key": "state",
+      "name": "Състояние",
+      "value": {"key": "like_new", "label": "Като нова"}
+    }
+  ],
+  "status": "active"
+}

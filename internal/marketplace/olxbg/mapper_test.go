@@ -1,7 +1,9 @@
 package olxbg
 
 import (
+	"encoding/json"
 	"math"
+	"os"
 	"testing"
 )
 
@@ -270,6 +272,151 @@ func TestNormalizeConditionVagueConditionFlagSuppressed(t *testing.T) {
 	}
 	if listing.Condition != "like_new" {
 		t.Errorf("expected condition like_new, got %q", listing.Condition)
+	}
+}
+
+// TestMapListingFromFixture is a table-driven golden-fixture test for
+// mapListing(). Each sub-test loads a real JSON fixture from testdata/, unmarshals
+// it into apiOffer, and asserts the full set of output fields on the returned
+// models.Listing. The goal is to catch OLX.bg API schema drift immediately rather
+// than having it silently produce zero values in production (XOL-87 C-11).
+func TestMapListingFromFixture(t *testing.T) {
+	// BGN laptop expected EUR cents: 800 BGN → 80000 stotinki → BGNStotinkiToEURCents(80000)
+	bgnLaptopEURCents := BGNStotinkiToEURCents(int(math.Round(800.0 * 100)))
+
+	cases := []struct {
+		name               string
+		fixture            string
+		wantTitle          string
+		wantURL            string
+		wantPriceCents     int
+		wantPriceType      string
+		wantCondition      string
+		wantSellerName     string
+		wantCity           string
+		wantImageCount     int
+		wantCurrency       string
+		wantCurrencyStatus string
+		wantPriceLocal     string
+		wantPriceLocalCcy  string
+	}{
+		{
+			name:               "EUR camera — fixed price, good condition, 2 photos",
+			fixture:            "testdata/olxbg_eur_camera.json",
+			wantTitle:          "Canon EOS R10 body + 18-45 kit",
+			wantURL:            "https://www.olx.bg/ad/canon-eos-r10-CID101.html",
+			wantPriceCents:     70000, // 700 EUR × 100
+			wantPriceType:      "fixed",
+			wantCondition:      "good",
+			wantSellerName:     "Иван Петров",
+			wantCity:           "София",
+			wantImageCount:     2,
+			wantCurrency:       "EUR",
+			wantCurrencyStatus: CurrencyStatusEURNative,
+			wantPriceLocal:     "700.00",
+			wantPriceLocalCcy:  "EUR",
+		},
+		{
+			name:               "BGN laptop — negotiable, like_new, 1 photo",
+			fixture:            "testdata/olxbg_bgn_laptop.json",
+			wantTitle:          "MacBook Air 2019 i5 8GB 256GB",
+			wantURL:            "https://www.olx.bg/ad/macbook-air-2019-CID102.html",
+			wantPriceCents:     bgnLaptopEURCents,
+			wantPriceType:      "negotiable",
+			wantCondition:      "like_new",
+			wantSellerName:     "Мария Иванова",
+			wantCity:           "Пловдив",
+			wantImageCount:     1,
+			wantCurrency:       "EUR",
+			wantCurrencyStatus: CurrencyStatusConvertedFromBGN,
+			wantPriceLocal:     "800.00",
+			wantPriceLocalCcy:  "BGN",
+		},
+		{
+			name:               "EUR for_parts phone — fixed price, for_parts condition, 1 photo",
+			fixture:            "testdata/olxbg_for_parts_phone.json",
+			wantTitle:          "iPhone 13 за части счупен екран",
+			wantURL:            "https://www.olx.bg/ad/iphone-13-za-chasti-CID103.html",
+			wantPriceCents:     30000, // 300 EUR × 100
+			wantPriceType:      "fixed",
+			wantCondition:      "for_parts",
+			wantSellerName:     "Георги Стоянов",
+			wantCity:           "Варна",
+			wantImageCount:     1,
+			wantCurrency:       "EUR",
+			wantCurrencyStatus: CurrencyStatusEURNative,
+			wantPriceLocal:     "300.00",
+			wantPriceLocalCcy:  "EUR",
+		},
+		{
+			name:               "EUR phone — missing photos (empty array)",
+			fixture:            "testdata/olxbg_missing_photos.json",
+			wantTitle:          "Samsung Galaxy S23 256GB",
+			wantURL:            "https://www.olx.bg/ad/samsung-galaxy-s23-CID104.html",
+			wantPriceCents:     55000, // 550 EUR × 100
+			wantPriceType:      "fixed",
+			wantCondition:      "used",
+			wantSellerName:     "Петър Димитров",
+			wantCity:           "Бургас",
+			wantImageCount:     0,
+			wantCurrency:       "EUR",
+			wantCurrencyStatus: CurrencyStatusEURNative,
+			wantPriceLocal:     "550.00",
+			wantPriceLocalCcy:  "EUR",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := os.ReadFile(tc.fixture)
+			if err != nil {
+				t.Fatalf("failed to read fixture %s: %v", tc.fixture, err)
+			}
+
+			var offer apiOffer
+			if err := json.Unmarshal(raw, &offer); err != nil {
+				t.Fatalf("failed to unmarshal fixture %s: %v", tc.fixture, err)
+			}
+
+			listing := mapListing(offer)
+
+			if listing.Title != tc.wantTitle {
+				t.Errorf("Title: got %q, want %q", listing.Title, tc.wantTitle)
+			}
+			if listing.URL != tc.wantURL {
+				t.Errorf("URL: got %q, want %q", listing.URL, tc.wantURL)
+			}
+			if listing.Price != tc.wantPriceCents {
+				t.Errorf("Price: got %d cents, want %d cents", listing.Price, tc.wantPriceCents)
+			}
+			if listing.PriceType != tc.wantPriceType {
+				t.Errorf("PriceType: got %q, want %q", listing.PriceType, tc.wantPriceType)
+			}
+			if listing.Condition != tc.wantCondition {
+				t.Errorf("Condition: got %q, want %q", listing.Condition, tc.wantCondition)
+			}
+			if listing.Seller.Name != tc.wantSellerName {
+				t.Errorf("Seller.Name: got %q, want %q", listing.Seller.Name, tc.wantSellerName)
+			}
+			if got := listing.Attributes["city"]; got != tc.wantCity {
+				t.Errorf("Attributes[city]: got %q, want %q", got, tc.wantCity)
+			}
+			if got := len(listing.ImageURLs); got != tc.wantImageCount {
+				t.Errorf("len(ImageURLs): got %d, want %d", got, tc.wantImageCount)
+			}
+			if got := listing.Attributes["currency"]; got != tc.wantCurrency {
+				t.Errorf("Attributes[currency]: got %q, want %q", got, tc.wantCurrency)
+			}
+			if got := listing.Attributes["currency_status"]; got != tc.wantCurrencyStatus {
+				t.Errorf("Attributes[currency_status]: got %q, want %q", got, tc.wantCurrencyStatus)
+			}
+			if got := listing.Attributes["price_local"]; got != tc.wantPriceLocal {
+				t.Errorf("Attributes[price_local]: got %q, want %q", got, tc.wantPriceLocal)
+			}
+			if got := listing.Attributes["price_local_ccy"]; got != tc.wantPriceLocalCcy {
+				t.Errorf("Attributes[price_local_ccy]: got %q, want %q", got, tc.wantPriceLocalCcy)
+			}
+		})
 	}
 }
 

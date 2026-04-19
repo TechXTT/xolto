@@ -1,0 +1,27 @@
+{
+  "id": "103",
+  "url": "https://www.olx.bg/ad/iphone-13-za-chasti-CID103.html",
+  "title": "iPhone 13 за части счупен екран",
+  "description": "Телефон за части. Счупен дисплей.",
+  "photos": [
+    {"link": "https://ireland.apollo.olxcdn.com/v1/files/ccc1/image;s=320x240"}
+  ],
+  "location": {
+    "city": {"name": "Варна"},
+    "region": {"name": "Варна"}
+  },
+  "contact": {"name": "Георги Стоянов"},
+  "params": [
+    {
+      "key": "price",
+      "name": "Цена",
+      "value": {"value": 300.0, "currency": "EUR", "type": "price", "negotiable": false}
+    },
+    {
+      "key": "state",
+      "name": "Състояние",
+      "value": {"key": "for_parts", "label": "За части"}
+    }
+  ],
+  "status": "active"
+}

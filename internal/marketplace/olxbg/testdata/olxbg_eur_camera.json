@@ -1,0 +1,28 @@
+{
+  "id": "101",
+  "url": "https://www.olx.bg/ad/canon-eos-r10-CID101.html",
+  "title": "Canon EOS R10 body + 18-45 kit",
+  "description": "Фотоапарат в отлично състояние. Използван само 6 месеца.",
+  "photos": [
+    {"link": "https://ireland.apollo.olxcdn.com/v1/files/abc1/image;s=320x240"},
+    {"link": "https://ireland.apollo.olxcdn.com/v1/files/abc2/image;s=320x240"}
+  ],
+  "location": {
+    "city": {"name": "София"},
+    "region": {"name": "София-град"}
+  },
+  "contact": {"name": "Иван Петров"},
+  "params": [
+    {
+      "key": "price",
+      "name": "Цена",
+      "value": {"value": 700.0, "currency": "EUR", "type": "price", "negotiable": false}
+    },
+    {
+      "key": "state",
+      "name": "Състояние",
+      "value": {"key": "good", "label": "Добро"}
+    }
+  ],
+  "status": "active"
+}

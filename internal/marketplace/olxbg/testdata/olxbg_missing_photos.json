@@ -1,0 +1,25 @@
+{
+  "id": "104",
+  "url": "https://www.olx.bg/ad/samsung-galaxy-s23-CID104.html",
+  "title": "Samsung Galaxy S23 256GB",
+  "description": "Телефон без снимки.",
+  "photos": [],
+  "location": {
+    "city": {"name": "Бургас"},
+    "region": {"name": "Бургас"}
+  },
+  "contact": {"name": "Петър Димитров"},
+  "params": [
+    {
+      "key": "price",
+      "name": "Цена",
+      "value": {"value": 550.0, "currency": "EUR", "type": "price", "negotiable": false}
+    },
+    {
+      "key": "state",
+      "name": "Състояние",
+      "value": {"key": "used", "label": "Използван"}
+    }
+  ],
+  "status": "active"
+}
