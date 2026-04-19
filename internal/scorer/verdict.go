@@ -19,9 +19,10 @@ const (
 // hardRiskFlags are fraud/safety signals that disqualify a listing
 // entirely — any match routes to SKIP regardless of other signals.
 var hardRiskFlags = map[string]struct{}{
-	"anomaly_price":    {},
-	"stolen_risk":      {}, // reserved for future scorer signals
-	"identity_suspect": {}, // reserved for future scorer signals
+	"anomaly_price":        {},
+	"off_platform_redirect": {}, // XOL-80: contact redirect = #1 OLX.bg scam vector
+	"stolen_risk":          {}, // reserved for future scorer signals
+	"identity_suspect":     {}, // reserved for future scorer signals
 }
 
 // softRiskFlags are missing-info signals the buyer should resolve by
