@@ -243,6 +243,9 @@ func hasModelPattern(s string) bool {
 // safely and the draft is still useful.
 func Draft(verdict string, listing models.Listing, mission MissionContext) Note {
 	lang := detectLang(listing)
+	if lang != LangBG && strings.ToUpper(mission.CountryCode) == "BG" {
+		lang = LangBG
+	}
 	shape := verdictToShape(verdict)
 	note := buildNote(shape, lang, listing, mission)
 	note.Shape = shape
