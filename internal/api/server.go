@@ -14,6 +14,7 @@ import (
 	"github.com/TechXTT/xolto/internal/marketplace/listingfetcher"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/plain"
+	"github.com/TechXTT/xolto/internal/replycopilot"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
 )
@@ -57,6 +58,9 @@ type Server struct {
 	// matching (XOL-22). When nil the /matches handler uses the tokenizer-only
 	// path via ScoreMustHaves. Set at startup via SetMustHaveEvaluator.
 	mustHaveEvaluator scorer.MustHaveEvaluator
+	// replyClassifier is the LLM classifier for POST /reply-copilot (XOL-73).
+	// When nil the handler returns 503 "classifier not configured".
+	replyClassifier replycopilot.Classifier
 }
 
 type googleTokenResponse struct {
@@ -85,17 +89,22 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 	// environments) the client is still created; callers that require the API
 	// key will return errors rather than panicking.
 	plainClient := plain.New(cfg.PlainAPIKey)
+	var rc replycopilot.Classifier
+	if cfg.AIAPIKey != "" && cfg.AIModel != "" {
+		rc = replycopilot.NewLLMClassifier(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel)
+	}
 	s := &Server{
-		cfg:           cfg,
-		db:            db,
-		assistant:     asst,
-		broker:        broker,
-		runner:        runner,
-		scorer:        sc,
-		fetcher:       listingfetcher.New(),
-		mux:           mux,
-		plainClient:   plainClient,
-		supportEvents: make(chan store.SupportEvent, 64),
+		cfg:             cfg,
+		db:              db,
+		assistant:       asst,
+		broker:          broker,
+		runner:          runner,
+		scorer:          sc,
+		fetcher:         listingfetcher.New(),
+		mux:             mux,
+		plainClient:     plainClient,
+		supportEvents:   make(chan store.SupportEvent, 64),
+		replyClassifier: rc,
 	}
 	return s
 }

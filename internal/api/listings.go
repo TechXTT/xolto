@@ -10,6 +10,7 @@ import (
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/draftnote"
 	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/replycopilot"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
 )
@@ -102,6 +103,7 @@ func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
 	mux.HandleFunc("/shortlist/", s.requireAuth(s.handleShortlistItem))
 	mux.HandleFunc("/draft-note", s.requireAuth(s.handleDraftNote))
+	mux.HandleFunc("/reply-copilot", s.requireAuth(s.handleReplycopilot))
 	mux.HandleFunc("/assistant/converse", s.requireAuth(s.handleConverse))
 	mux.HandleFunc("/assistant/session", s.requireAuth(s.handleAssistantSession))
 	mux.HandleFunc("/actions", s.requireAuth(s.handleActions))
@@ -513,6 +515,84 @@ func (s *Server) handleDraftNote(w http.ResponseWriter, r *http.Request, user *m
 	}
 	note := draftnote.Draft(verdict, *listing, missionCtx)
 	writeJSON(w, http.StatusOK, note)
+}
+
+// handleReplycopilot serves POST /reply-copilot.
+//
+// Interprets a seller reply via LLM and returns a rule-based draft follow-up
+// message. Stateless — no new DB tables, no conversation storage.
+//
+// Request body:
+//
+//	{
+//	  "listing_id":       "<item_id>"   (required)
+//	  "seller_reply":     "<text>"      (required)
+//	  "mission_id":       <int64>       (optional)
+//	  "our_offer_price":  <int>         (optional, EUR cents)
+//	  "verdict":          "<string>"    (optional, original scoring verdict)
+//	}
+//
+// Response: replycopilot.Result JSON object.
+func (s *Server) handleReplycopilot(w http.ResponseWriter, r *http.Request, user *models.User) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	if s.replyClassifier == nil {
+		writeError(w, http.StatusServiceUnavailable, "classifier not configured")
+		return
+	}
+
+	var body struct {
+		ListingID       string `json:"listing_id"`
+		SellerReply     string `json:"seller_reply"`
+		MissionID       int64  `json:"mission_id"`
+		OurOfferPrice   int    `json:"our_offer_price"`
+		OriginalVerdict string `json:"verdict"`
+	}
+	if err := Decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(body.ListingID) == "" {
+		writeError(w, http.StatusBadRequest, "listing_id is required")
+		return
+	}
+	if strings.TrimSpace(body.SellerReply) == "" {
+		writeError(w, http.StatusBadRequest, "seller_reply is required")
+		return
+	}
+
+	listing, err := s.db.GetListing(user.ID, body.ListingID)
+	if err != nil || listing == nil {
+		writeError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+
+	var missionCtx replycopilot.MissionContext
+	if body.MissionID > 0 {
+		mission, mErr := s.db.GetMission(body.MissionID)
+		if mErr == nil && mission != nil && mission.UserID == user.ID {
+			missionCtx = replycopilot.MissionContext{
+				MustHaves:   mission.RequiredFeatures,
+				CountryCode: mission.CountryCode,
+			}
+		}
+	}
+
+	rc := replycopilot.ReplyContext{
+		SellerReply:     body.SellerReply,
+		OurOfferPrice:   body.OurOfferPrice,
+		OriginalVerdict: body.OriginalVerdict,
+	}
+
+	result, err := replycopilot.Interpret(r.Context(), rc, *listing, missionCtx, s.replyClassifier)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "interpretation failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleAnalyzeListing accepts a marketplace URL, fetches the listing
