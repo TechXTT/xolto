@@ -575,3 +575,32 @@ func TestBGNFormatInNegotiateText(t *testing.T) {
 		t.Errorf("NL negotiate text must contain 'EUR', got: %q", noteNL.Text)
 	}
 }
+
+func TestCountryCodeOverridesLang(t *testing.T) {
+	// Listing with no Cyrillic stop-words — would detect as EN without override.
+	listing := models.Listing{
+		Title:     "Laptop Acer aspire ES 13",
+		FairPrice: 100_00,
+	}
+	// Without mission context: EN
+	noteEN := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{})
+	if noteEN.Lang != draftnote.LangEN {
+		t.Errorf("expected EN without country code, got %s", noteEN.Lang)
+	}
+	// With BG mission context: should override to BG
+	noteBG := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{CountryCode: "BG"})
+	if noteBG.Lang != draftnote.LangBG {
+		t.Errorf("expected BG with CountryCode=BG, got %s", noteBG.Lang)
+	}
+	if strings.Contains(noteBG.Text, "EUR") {
+		t.Errorf("BG-overridden draft must not contain EUR, got: %q", noteBG.Text)
+	}
+	if !strings.Contains(noteBG.Text, "лв.") {
+		t.Errorf("BG-overridden draft must contain лв., got: %q", noteBG.Text)
+	}
+	// Lowercase "bg" also works
+	noteBGLower := draftnote.Draft(scorer.ActionNegotiate, listing, draftnote.MissionContext{CountryCode: "bg"})
+	if noteBGLower.Lang != draftnote.LangBG {
+		t.Errorf("expected BG with lowercase country code 'bg', got %s", noteBGLower.Lang)
+	}
+}
