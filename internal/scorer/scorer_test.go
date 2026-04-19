@@ -291,3 +291,147 @@ func containsFlag(flags []string, flag string) bool {
 	}
 	return false
 }
+
+// TestComputeRiskFlagsForPartsConditionField verifies that a listing with
+// Condition="for_parts" and no description text still gets vague_condition (XOL-83, AC-1).
+func TestComputeRiskFlagsForPartsConditionField(t *testing.T) {
+	flags := computeRiskFlags(models.Listing{
+		ItemID:      "test-for-parts",
+		Title:       "Sony A6000",
+		Description: "",
+		Condition:   "for_parts",
+		Price:       10000,
+		PriceType:   "fixed",
+		ImageURLs:   []string{"a", "b", "c"},
+	}, 0)
+	if !containsFlag(flags, "vague_condition") {
+		t.Errorf("expected vague_condition flag for Condition=for_parts, got flags=%v", flags)
+	}
+}
+
+// TestComputeRiskFlagsUnknownConditionField verifies that a listing with
+// Condition="unknown" and no description text still gets vague_condition (XOL-83, AC-2).
+func TestComputeRiskFlagsUnknownConditionField(t *testing.T) {
+	flags := computeRiskFlags(models.Listing{
+		ItemID:      "test-unknown",
+		Title:       "Sony A6000",
+		Description: "",
+		Condition:   "unknown",
+		Price:       10000,
+		PriceType:   "fixed",
+		ImageURLs:   []string{"a", "b", "c"},
+	}, 0)
+	if !containsFlag(flags, "vague_condition") {
+		t.Errorf("expected vague_condition flag for Condition=unknown, got flags=%v", flags)
+	}
+}
+
+// TestComputeRiskFlagsVagueConditionDeduplication verifies that vague_condition
+// appears at most once even when both the condition field and description text trigger it
+// (XOL-83, AC-3).
+func TestComputeRiskFlagsVagueConditionDeduplication(t *testing.T) {
+	flags := computeRiskFlags(models.Listing{
+		ItemID:      "test-dedup",
+		Title:       "Лаптоп Dell",
+		Description: "Продавам за части",
+		Condition:   "for_parts",
+		Price:       10000,
+		PriceType:   "fixed",
+		ImageURLs:   []string{"a", "b", "c"},
+	}, 0)
+	count := 0
+	for _, f := range flags {
+		if f == "vague_condition" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected vague_condition exactly once, got %d times (flags=%v)", count, flags)
+	}
+}
+
+// TestScoreFairConditionPenalty verifies that a fair-condition listing scores
+// 0.3 lower than an identical used-condition listing (XOL-83, AC-4).
+func TestScoreFairConditionPenalty(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer-fair.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	rsn := reasoner.New(config.AIConfig{})
+	sc := New(st, config.ScoringConfig{MinScore: 7, MarketSampleSize: 20}, rsn)
+
+	base := models.Listing{
+		ItemID:    "test-fair-base",
+		Title:     "Sony A6000",
+		Price:     10000,
+		PriceType: "fixed",
+	}
+	search := models.SearchSpec{
+		UserID:          "u1",
+		Query:           "sony a6000",
+		OfferPercentage: 70,
+	}
+
+	usedListing := base
+	usedListing.Condition = "used"
+	scoredUsed := sc.Score(context.Background(), usedListing, search)
+
+	fairListing := base
+	fairListing.ItemID = "test-fair-fair"
+	fairListing.Condition = "fair"
+	scoredFair := sc.Score(context.Background(), fairListing, search)
+
+	diff := scoredUsed.Score - scoredFair.Score
+	const want = 0.3
+	const tol = 0.001
+	if diff < want-tol || diff > want+tol {
+		t.Errorf("expected fair penalty of %.1f, got diff=%.4f (used=%.4f, fair=%.4f)",
+			want, diff, scoredUsed.Score, scoredFair.Score)
+	}
+}
+
+// TestScoreLikeNewBonusRegression verifies that the like_new +0.5 bonus is
+// unchanged relative to a used-condition listing (XOL-83, AC-5).
+func TestScoreLikeNewBonusRegression(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "xolto-scorer-likenew.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	rsn := reasoner.New(config.AIConfig{})
+	sc := New(st, config.ScoringConfig{MinScore: 7, MarketSampleSize: 20}, rsn)
+
+	base := models.Listing{
+		ItemID:    "test-likenew-base",
+		Title:     "Sony A6000",
+		Price:     10000,
+		PriceType: "fixed",
+	}
+	search := models.SearchSpec{
+		UserID:          "u1",
+		Query:           "sony a6000",
+		OfferPercentage: 70,
+	}
+
+	usedListing := base
+	usedListing.Condition = "used"
+	scoredUsed := sc.Score(context.Background(), usedListing, search)
+
+	likeNewListing := base
+	likeNewListing.ItemID = "test-likenew-likenew"
+	likeNewListing.Condition = "like_new"
+	scoredLikeNew := sc.Score(context.Background(), likeNewListing, search)
+
+	diff := scoredLikeNew.Score - scoredUsed.Score
+	const want = 0.5
+	const tol = 0.001
+	if diff < want-tol || diff > want+tol {
+		t.Errorf("expected like_new bonus of %.1f, got diff=%.4f (like_new=%.4f, used=%.4f)",
+			want, diff, scoredLikeNew.Score, scoredUsed.Score)
+	}
+}

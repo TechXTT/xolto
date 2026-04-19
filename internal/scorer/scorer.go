@@ -275,6 +275,15 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	case "new":
 		score += 0.5
 		reason.WriteString(", new condition")
+	case "fair":
+		score -= 0.3
+		reason.WriteString(", fair condition")
+	case "for_parts":
+		score -= 2.0
+		reason.WriteString(", for-parts listing")
+	case "unknown":
+		reason.WriteString(", condition unknown")
+	// "used" and "good": no score adjustment — neutral baseline
 	}
 
 	score = clamp(score, 1, 10)
@@ -473,6 +482,12 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "anomaly_price")
 	}
 
+	// Condition-field check — catches structured OLX.bg params not repeated in description.
+	switch listing.Condition {
+	case "for_parts", "unknown":
+		flags = append(flags, "vague_condition")
+	}
+
 	vagueTerms := []string{
 		// EN/NL terms (existing)
 		"as is", "as-is", "untested", "for parts", "sold as seen", "no returns", "working condition", "not working",
@@ -546,7 +561,15 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "off_platform_redirect")
 	}
 
-	return flags
+	seen := make(map[string]bool, len(flags))
+	deduped := flags[:0]
+	for _, f := range flags {
+		if !seen[f] {
+			seen[f] = true
+			deduped = append(deduped, f)
+		}
+	}
+	return deduped
 }
 
 func isElectronicsListing(text string) bool {
