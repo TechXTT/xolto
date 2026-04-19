@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/models"
@@ -502,6 +503,46 @@ func TestBGRiskFlagPatterns(t *testing.T) {
 			if got != tc.wantPresent {
 				t.Errorf("%s: flag %q present=%v, want present=%v (flags=%v)",
 					tc.name, tc.wantFlag, got, tc.wantPresent, flags)
+			}
+		})
+	}
+}
+
+// TestStaleListing verifies XOL-89 C-10 Phase 1: stale_listing soft risk flag
+// fires when last_seen > 72h and is absent when last_seen < 72h.
+func TestStaleListing(t *testing.T) {
+	cases := []struct {
+		name        string
+		dateOffset  time.Duration
+		wantPresent bool
+	}{
+		{
+			name:        "stale",
+			dateOffset:  -96 * time.Hour,
+			wantPresent: true,
+		},
+		{
+			name:        "fresh",
+			dateOffset:  -24 * time.Hour,
+			wantPresent: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := computeRiskFlags(models.Listing{
+				ItemID:    "test-stale-" + tc.name,
+				Title:     "iPhone 13 128GB",
+				Price:     50000,
+				PriceType: "fixed",
+				Condition: "good",
+				Date:      time.Now().Add(tc.dateOffset),
+				ImageURLs: []string{"a", "b", "c"},
+			}, 60000)
+			got := containsFlag(flags, "stale_listing")
+			if got != tc.wantPresent {
+				t.Errorf("stale_listing present=%v, want present=%v (flags=%v)",
+					got, tc.wantPresent, flags)
 			}
 		})
 	}

@@ -491,6 +491,11 @@ func computeRiskFlags(listing models.Listing, fairPrice int) []string {
 		flags = append(flags, "anomaly_price")
 	}
 
+	// Staleness check — listing not seen in search results for 3+ days.
+	if !listing.Date.IsZero() && time.Since(listing.Date) > 72*time.Hour {
+		flags = append(flags, "stale_listing")
+	}
+
 	// Condition-field check — catches structured OLX.bg params not repeated in description.
 	switch listing.Condition {
 	case "for_parts", "unknown":
