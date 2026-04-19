@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -284,12 +285,7 @@ func TestComputeRiskFlagsVagueConditionBG(t *testing.T) {
 // containsFlag is a test helper that checks whether a named flag appears in a
 // flag slice.
 func containsFlag(flags []string, flag string) bool {
-	for _, f := range flags {
-		if f == flag {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(flags, flag)
 }
 
 // TestComputeRiskFlagsForPartsConditionField verifies that a listing with

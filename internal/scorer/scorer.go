@@ -240,11 +240,11 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	if referencePrice > 0 {
 		ratio := float64(listing.Price) / float64(referencePrice)
 		score = clamp(10.0-10.0*ratio+5.0, 1, 10)
-		reason.WriteString(fmt.Sprintf("%.0f%% of fair value (%s)", ratio*100, format.Euro(referencePrice)))
+		fmt.Fprintf(&reason, "%.0f%% of fair value (%s)", ratio*100, format.Euro(referencePrice))
 	} else if search.MaxPrice > 0 {
 		ratio := float64(listing.Price) / float64(search.MaxPrice)
 		score = clamp(10.0-8.0*ratio, 1, 10)
-		reason.WriteString(fmt.Sprintf("%.0f%% of max budget", ratio*100))
+		fmt.Fprintf(&reason, "%.0f%% of max budget", ratio*100)
 	} else {
 		score = 5.0
 		reason.WriteString("no market data")
@@ -363,10 +363,7 @@ func computeComparableStats(comparables []models.ComparableDeal) (count int, med
 		if c.LastSeen.IsZero() {
 			continue
 		}
-		age := int(now.Sub(c.LastSeen).Hours() / 24)
-		if age < 0 {
-			age = 0
-		}
+		age := max(int(now.Sub(c.LastSeen).Hours()/24), 0)
 		ages = append(ages, age)
 	}
 	n := len(ages)
@@ -439,14 +436,7 @@ func calculateOffer(askingPrice, fairPrice, marketAvg int, hasMarket bool, offer
 		base = marketAvg
 	}
 
-	offer := base * offerPct / 100
-	if offer < minOfferCents {
-		offer = minOfferCents
-	}
-	if offer > askingPrice {
-		offer = askingPrice
-	}
-	return offer
+	return min(max(base*offerPct/100, minOfferCents), askingPrice)
 }
 
 func clamp(v, min, max float64) float64 {
