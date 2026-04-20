@@ -27,7 +27,7 @@ func TestModelKeyMarketAverage(t *testing.T) {
 	defer st.Close()
 
 	const mpID = "olxbg"
-	const minSamples = 3
+	const minSamples = 6
 
 	// Step 1: insert 6 price_history rows for sony:a6000 at various prices.
 	// Average of these 6 = (20000+21000+22000+23000+24000+25000)/6 = 22500.
