@@ -184,6 +184,7 @@ func runDistribution(scenarios []scenario) (buy, negotiate, askSeller, skip int)
 			s.priceRatio,
 			s.condition,
 			s.riskFlags,
+			0, // no must-have context in synthetic distribution scenarios
 		)
 		switch v {
 		case ActionBuy:

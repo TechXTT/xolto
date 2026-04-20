@@ -339,6 +339,14 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		priceRatio = float64(listing.Price) / float64(referencePrice)
 	}
 
+	mustHaveMatches := ScoreMustHaves(listing, search.MustHaves)
+	missedMustHaveCount := 0
+	for _, m := range mustHaveMatches {
+		if m.Status == MustHaveStatusMissed {
+			missedMustHaveCount++
+		}
+	}
+
 	recommendedAction := ComputeVerdict(
 		listing.MarketplaceID,
 		score,
@@ -348,6 +356,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		priceRatio,
 		listing.Condition,
 		riskFlags,
+		missedMustHaveCount,
 	)
 
 	if analysis.Reason != "" {
@@ -371,7 +380,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		RecommendedAction:        recommendedAction,
 		ComparablesCount:         compCount,
 		ComparablesMedianAgeDays: compMedian,
-		MustHaves:                ScoreMustHaves(listing, search.MustHaves),
+		MustHaves:                mustHaveMatches,
 	}
 }
 

@@ -337,7 +337,7 @@ func TestComputeVerdictPrecedence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ComputeVerdict("", tc.score, tc.confidence, tc.comparables, tc.query, tc.priceRatio, tc.condition, tc.riskFlags)
+			got := ComputeVerdict("", tc.score, tc.confidence, tc.comparables, tc.query, tc.priceRatio, tc.condition, tc.riskFlags, 0)
 			if got != tc.wantAction {
 				t.Errorf("ComputeVerdict() = %q, want %q\n  score=%.1f conf=%.2f comps=%d query=%q priceRatio=%.2f condition=%q riskFlags=%v",
 					got, tc.wantAction, tc.score, tc.confidence, len(tc.comparables), tc.query, tc.priceRatio, tc.condition, tc.riskFlags)
@@ -352,7 +352,7 @@ func TestComputeVerdictEdgeCases(t *testing.T) {
 
 	t.Run("edge/zero_comparables_listing", func(t *testing.T) {
 		// Zero-comparable listing → must be ASK SELLER, not Buy or Negotiate.
-		got := ComputeVerdict("", 9.0, 0.80, nil, "sony a6000", 0.90, "good", nil)
+		got := ComputeVerdict("", 9.0, 0.80, nil, "sony a6000", 0.90, "good", nil, 0)
 		if got != ActionAskSeller {
 			t.Errorf("zero comparables: got %q, want %q", got, ActionAskSeller)
 		}
@@ -362,7 +362,7 @@ func TestComputeVerdictEdgeCases(t *testing.T) {
 		// score=9, price_ratio=1.01 → price > 1.00 → NEGOTIATE, not BUY.
 		// BUY requires price_ratio <= 1.00; since 1.01 > 1.00, BUY is blocked.
 		// NEGOTIATE fires because: price_ratio > 1.00, <= 1.30, confidence medium+, no red flags.
-		got := ComputeVerdict("", 9.0, 0.80, enoughComps, "sony a6000", 1.01, "good", nil)
+		got := ComputeVerdict("", 9.0, 0.80, enoughComps, "sony a6000", 1.01, "good", nil, 0)
 		if got != ActionNegotiate {
 			t.Errorf("score=9 priceRatio=1.01: got %q, want %q", got, ActionNegotiate)
 		}
@@ -376,7 +376,7 @@ func TestComputeVerdictEdgeCases(t *testing.T) {
 		// the NEGOTIATE rule also won't fire (price_ratio not > 1.00).
 		// BUY requires condition in {new, like_new, good} — "fair" disqualifies.
 		// Fallthrough → ASK SELLER.
-		got := ComputeVerdict("", 8.0, 0.80, enoughComps, "sony a6000", 1.00, "fair", nil)
+		got := ComputeVerdict("", 8.0, 0.80, enoughComps, "sony a6000", 1.00, "fair", nil, 0)
 		if got == ActionSkip {
 			t.Errorf("fair + priceRatio=1.00 must NOT be Skip; got %q", got)
 		}
@@ -389,7 +389,7 @@ func TestComputeVerdictEdgeCases(t *testing.T) {
 	t.Run("edge/hard_flag_score10_still_skip", func(t *testing.T) {
 		// hard risk flag (anomaly_price) + score=10 → SKIP (hard flags have highest
 		// precedence after price > 1.30, regardless of score).
-		got := ComputeVerdict("", 10.0, 0.95, enoughComps, "sony a6000", 0.80, "new", []string{"anomaly_price"})
+		got := ComputeVerdict("", 10.0, 0.95, enoughComps, "sony a6000", 0.80, "new", []string{"anomaly_price"}, 0)
 		if got != ActionSkip {
 			t.Errorf("hard_flag + score=10: got %q, want %q", got, ActionSkip)
 		}
@@ -404,7 +404,7 @@ func TestComputeVerdictBuyFreshnessGate(t *testing.T) {
 	t.Run("buy/stale_61d_normal_niche_not_buy", func(t *testing.T) {
 		// Standard niche: 61-day-old comparables → freshness > 60d → BUY blocked.
 		comps := staleComparables(6, 61)
-		got := ComputeVerdict("", 9.0, highConf, comps, "sony a6000", 0.90, "good", nil)
+		got := ComputeVerdict("", 9.0, highConf, comps, "sony a6000", 0.90, "good", nil, 0)
 		// 61 days > 60d limit for normal niche; BUY is blocked.
 		// NEGOTIATE: price_ratio=0.90 which is NOT > 1.00 → Negotiate won't fire.
 		// Fallthrough → ASK SELLER.
@@ -416,7 +416,7 @@ func TestComputeVerdictBuyFreshnessGate(t *testing.T) {
 	t.Run("buy/stale_61d_low_liquidity_niche_is_buy", func(t *testing.T) {
 		// Low-liquidity camera body niche: 61-day comparables → within 90d window → BUY.
 		comps := staleComparables(6, 61)
-		got := ComputeVerdict("", 9.0, highConf, comps, "camera body only", 0.90, "good", nil)
+		got := ComputeVerdict("", 9.0, highConf, comps, "camera body only", 0.90, "good", nil, 0)
 		if got != ActionBuy {
 			t.Errorf("stale 61d low-liquidity niche: got %q, want buy", got)
 		}
@@ -425,7 +425,7 @@ func TestComputeVerdictBuyFreshnessGate(t *testing.T) {
 	t.Run("buy/stale_91d_low_liquidity_niche_not_buy", func(t *testing.T) {
 		// Even low-liquidity niche: 91-day comparables → beyond 90d window → BUY blocked.
 		comps := staleComparables(6, 91)
-		got := ComputeVerdict("", 9.0, highConf, comps, "camera body only", 0.90, "good", nil)
+		got := ComputeVerdict("", 9.0, highConf, comps, "camera body only", 0.90, "good", nil, 0)
 		if got == ActionBuy {
 			t.Errorf("stale 91d even low-liquidity: got Buy, should not be Buy")
 		}
@@ -536,7 +536,7 @@ func TestMaxComparableAgeDays(t *testing.T) {
 func TestComputeVerdictNegotiateBoundaryNotSkip(t *testing.T) {
 	comps := freshComparables(6, 20)
 	// price_ratio exactly 1.30: NOT > 1.30, so SKIP branch 1 does not fire.
-	got := ComputeVerdict("", 7.0, 0.80, comps, "sony a6000", 1.30, "good", nil)
+	got := ComputeVerdict("", 7.0, 0.80, comps, "sony a6000", 1.30, "good", nil, 0)
 	if got == ActionSkip {
 		t.Errorf("priceRatio=1.30 must NOT be Skip (boundary is > 1.30); got %q", got)
 	}
@@ -548,7 +548,7 @@ func TestComputeVerdictNegotiateBoundaryNotSkip(t *testing.T) {
 // TestComputeVerdictSkipBoundaryAbove130 verifies price_ratio=1.301 is Skip.
 func TestComputeVerdictSkipBoundaryAbove130(t *testing.T) {
 	comps := freshComparables(6, 20)
-	got := ComputeVerdict("", 7.0, 0.80, comps, "sony a6000", 1.301, "good", nil)
+	got := ComputeVerdict("", 7.0, 0.80, comps, "sony a6000", 1.301, "good", nil, 0)
 	if got != ActionSkip {
 		t.Errorf("priceRatio=1.301: got %q, want skip", got)
 	}
@@ -558,7 +558,7 @@ func TestComputeVerdictSkipBoundaryAbove130(t *testing.T) {
 func TestComputeVerdictBuyConditionGate(t *testing.T) {
 	comps := freshComparables(6, 20)
 	// All other BUY conditions met, but condition="fair" → NOT Buy.
-	got := ComputeVerdict("", 9.0, 0.80, comps, "sony a6000", 0.90, "fair", nil)
+	got := ComputeVerdict("", 9.0, 0.80, comps, "sony a6000", 0.90, "fair", nil, 0)
 	if got == ActionBuy {
 		t.Errorf("condition=fair must not produce Buy; got %q", got)
 	}
@@ -568,9 +568,110 @@ func TestComputeVerdictBuyConditionGate(t *testing.T) {
 func TestComputeVerdictBuyExactlyAtFair(t *testing.T) {
 	comps := freshComparables(6, 30)
 	// price_ratio exactly 1.00 — "at or below fair" → BUY qualifies.
-	got := ComputeVerdict("", 9.0, 0.80, comps, "sony a6000", 1.00, "good", nil)
+	got := ComputeVerdict("", 9.0, 0.80, comps, "sony a6000", 1.00, "good", nil, 0)
 	if got != ActionBuy {
 		t.Errorf("priceRatio=1.00: got %q, want buy", got)
+	}
+}
+
+// TestComputeVerdictMustHaves verifies that missedMustHaveCount feeds into the
+// ASK SELLER section of ComputeVerdict as specified in XOL-103.
+func TestComputeVerdictMustHaves(t *testing.T) {
+	enoughComps := freshComparables(6, 30)
+	highConf := 0.80  // "high" bucket
+	medConf := 0.55   // "medium" bucket
+
+	cases := []struct {
+		name                string
+		score               float64
+		confidence          float64
+		comparables         []models.ComparableDeal
+		query               string
+		priceRatio          float64
+		condition           string
+		riskFlags           []string
+		missedMustHaveCount int
+		wantAction          string
+	}{
+		// Case 1: one missed must-have with strong pricing → ask_seller, not buy.
+		// All BUY conditions are otherwise met; the missed must-have overrides.
+		{
+			name:                "missed_1_strong_pricing_blocked",
+			score:               9.0,
+			confidence:          highConf,
+			comparables:         enoughComps,
+			query:               "sony a6000",
+			priceRatio:          0.80,
+			condition:           "good",
+			riskFlags:           nil,
+			missedMustHaveCount: 1,
+			wantAction:          ActionAskSeller,
+		},
+		// Case 2: two missed must-haves at negotiate-range pricing → ask_seller, not negotiate.
+		{
+			name:                "missed_2_negotiate_range_blocked",
+			score:               7.0,
+			confidence:          medConf,
+			comparables:         enoughComps,
+			query:               "sony a6000",
+			priceRatio:          1.15,
+			condition:           "good",
+			riskFlags:           nil,
+			missedMustHaveCount: 2,
+			wantAction:          ActionAskSeller,
+		},
+		// Case 3: zero missed must-haves with strong pricing → verdict unchanged (buy).
+		// Demonstrates that missedMustHaveCount=0 does not perturb the normal buy path.
+		{
+			name:                "missed_0_strong_pricing_unaffected",
+			score:               9.0,
+			confidence:          highConf,
+			comparables:         enoughComps,
+			query:               "sony a6000",
+			priceRatio:          0.90,
+			condition:           "good",
+			riskFlags:           nil,
+			missedMustHaveCount: 0,
+			wantAction:          ActionBuy,
+		},
+		// Case 4: one missed must-have with a hard risk flag → skip (hard flag takes precedence).
+		// Hard risk flags are evaluated in the SKIP section before must-haves reach ASK SELLER.
+		{
+			name:                "missed_1_hard_flag_skip_wins",
+			score:               9.0,
+			confidence:          highConf,
+			comparables:         enoughComps,
+			query:               "sony a6000",
+			priceRatio:          0.90,
+			condition:           "good",
+			riskFlags:           []string{"anomaly_price"},
+			missedMustHaveCount: 1,
+			wantAction:          ActionSkip,
+		},
+		// Case 5: zero missed must-haves (all unknown) → verdict not affected.
+		// "unknown" status (listing silent) must NOT trigger the missed-must-have check.
+		{
+			name:                "unknown_musthaves_not_missed_not_affected",
+			score:               9.0,
+			confidence:          highConf,
+			comparables:         enoughComps,
+			query:               "sony a6000",
+			priceRatio:          0.90,
+			condition:           "good",
+			riskFlags:           nil,
+			missedMustHaveCount: 0, // all "unknown" must-haves produce count=0
+			wantAction:          ActionBuy,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComputeVerdict("", tc.score, tc.confidence, tc.comparables, tc.query, tc.priceRatio, tc.condition, tc.riskFlags, tc.missedMustHaveCount)
+			if got != tc.wantAction {
+				t.Errorf("ComputeVerdict() = %q, want %q\n  score=%.1f conf=%.2f comps=%d priceRatio=%.2f condition=%q riskFlags=%v missedMustHaveCount=%d",
+					got, tc.wantAction, tc.score, tc.confidence, len(tc.comparables), tc.priceRatio, tc.condition, tc.riskFlags, tc.missedMustHaveCount)
+			}
+		})
 	}
 }
 
@@ -600,7 +701,7 @@ func TestComputeVerdictEnumValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ComputeVerdict("", tc.score, tc.confidence, tc.comparables, "sony a6000", tc.priceRatio, tc.condition, tc.riskFlags)
+			got := ComputeVerdict("", tc.score, tc.confidence, tc.comparables, "sony a6000", tc.priceRatio, tc.condition, tc.riskFlags, 0)
 			if !validActions[got] {
 				t.Errorf("ComputeVerdict emitted invalid action %q (must be one of buy|negotiate|ask_seller|skip)", got)
 			}

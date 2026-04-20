@@ -139,14 +139,15 @@ func maxComparableAgeDays(comparables []models.ComparableDeal) int {
 //
 // Inputs:
 //
-//	marketplaceID   — marketplace identifier (e.g. "olxbg"); selects threshold set
-//	score           — scored value 0–10
-//	confidence      — float64 0–1 (internally bucketed to low/medium/high)
-//	comparables     — slice used to derive count and freshness
-//	query           — used to detect low-liquidity niches for the 90d window
-//	priceRatio      — askingPrice / fairPrice (0 when fairPrice is unknown)
-//	condition       — listing condition string (new/like_new/good/fair/unknown/"")
-//	riskFlags       — trust-signal keys already computed by computeRiskFlags
+//	marketplaceID      — marketplace identifier (e.g. "olxbg"); selects threshold set
+//	score              — scored value 0–10
+//	confidence         — float64 0–1 (internally bucketed to low/medium/high)
+//	comparables        — slice used to derive count and freshness
+//	query              — used to detect low-liquidity niches for the 90d window
+//	priceRatio         — askingPrice / fairPrice (0 when fairPrice is unknown)
+//	condition          — listing condition string (new/like_new/good/fair/unknown/"")
+//	riskFlags          — trust-signal keys already computed by computeRiskFlags
+//	missedMustHaveCount — number of must-haves with status "missed"; "unknown" does not count
 func ComputeVerdict(
 	marketplaceID string,
 	score float64,
@@ -156,6 +157,7 @@ func ComputeVerdict(
 	priceRatio float64,
 	condition string,
 	riskFlags []string,
+	missedMustHaveCount int,
 ) string {
 	t := ThresholdsFor(marketplaceID)
 	confBucket := confidenceBucket(confidence)
@@ -184,6 +186,11 @@ func ComputeVerdict(
 	// ----------------------------------------------------------------
 	// 1. any SOFT risk flag present (or unknown flag — defaults to soft)
 	if hasSoftRiskFlag(riskFlags) {
+		return ActionAskSeller
+	}
+	// 2a. at least one must-have is explicitly missed — stated requirements unconfirmed.
+	// "unknown" (listing silent) does not trigger; only explicit "missed" does.
+	if missedMustHaveCount > 0 {
 		return ActionAskSeller
 	}
 	// 2. fewer than MinComparables comparables
