@@ -2804,7 +2804,7 @@ func (s *PostgresStore) GetMarketAverage(query string, modelKey string, category
 			`model_key = $1 AND marketplace_id = $2`, modelKey, marketplaceID, minSamples,
 		)
 		if err != nil {
-			slog.Debug("market_average_resolved",
+			slog.Info("market_average_resolved",
 				"query", query,
 				"model_key", modelKey,
 				"source", "none",
@@ -2814,7 +2814,7 @@ func (s *PostgresStore) GetMarketAverage(query string, modelKey string, category
 			return 0, false, err
 		}
 		if ok {
-			slog.Debug("market_average_resolved",
+			slog.Info("market_average_resolved",
 				"query", query,
 				"model_key", modelKey,
 				"source", "model_key",
@@ -2831,7 +2831,7 @@ func (s *PostgresStore) GetMarketAverage(query string, modelKey string, category
 		`query = $1 AND marketplace_id = $2`, query, marketplaceID, minSamples,
 	)
 	if err != nil {
-		slog.Debug("market_average_resolved",
+		slog.Info("market_average_resolved",
 			"query", query,
 			"model_key", modelKey,
 			"source", source,
@@ -2844,7 +2844,7 @@ func (s *PostgresStore) GetMarketAverage(query string, modelKey string, category
 		source = "query"
 		avgResult = avg
 	}
-	slog.Debug("market_average_resolved",
+	slog.Info("market_average_resolved",
 		"query", query,
 		"model_key", modelKey,
 		"source", source,
