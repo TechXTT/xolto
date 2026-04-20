@@ -29,6 +29,16 @@ var olxBGCategoryForCanonical = map[string]int{
 	"phone":  276, // Телефони и таблети — verified XOL-97 2026-04-19; 882 was Samsung brand only // XOL-98
 }
 
+// olxBGCanonicalForCategoryID is the reverse of olxBGCategoryForCanonical.
+// Used when spec.Category is empty but spec.CategoryID carries an OLX.bg category ID.
+var olxBGCanonicalForCategoryID = func() map[int]string {
+	m := make(map[int]string, len(olxBGCategoryForCanonical))
+	for k, v := range olxBGCategoryForCanonical {
+		m[v] = k
+	}
+	return m
+}()
+
 type client struct {
 	http *http.Client
 }
@@ -96,9 +106,15 @@ func (c *client) fetchPage(ctx context.Context, spec models.SearchSpec, offset i
 	if spec.MaxPrice > 0 {
 		params.Set("price[to]", strconv.Itoa(EURCentsToBGNWhole(spec.MaxPrice)))
 	}
-	// Resolve OLX.bg category ID from canonical mission category string.
-	// Marktplaats numeric IDs (487, 495, …) are NL-specific and MUST NOT be forwarded.
-	if catID := olxBGCategoryForCanonical[spec.Category]; catID > 0 {
+	// Resolve OLX.bg category ID from canonical category string, or fall back to
+	// the reverse lookup when spec.Category is empty (Category string is not
+	// persisted to DB; CategoryID may carry the OLX.bg ID directly).
+	// Marktplaats IDs (487, 495, …) are NL-specific and must not be forwarded.
+	category := spec.Category
+	if category == "" {
+		category = olxBGCanonicalForCategoryID[spec.CategoryID]
+	}
+	if catID := olxBGCategoryForCanonical[category]; catID > 0 {
 		params.Set("category_id", strconv.Itoa(catID))
 	}
 
