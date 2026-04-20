@@ -689,6 +689,9 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE price_history ADD COLUMN IF NOT EXISTS model_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_price_history_model_key ON price_history(model_key, marketplace_id, timestamp DESC)`)
 
+	// VAL-1a: scoring events for calibration dashboard.
+	migratePostgresCalibration(ctx, db)
+
 	return nil
 }
 

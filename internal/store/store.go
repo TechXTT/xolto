@@ -736,6 +736,9 @@ func migrate(db *sql.DB) error {
 	// XOL-79 (C-6): outreach lifecycle status per saved listing.
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN outreach_status TEXT NOT NULL DEFAULT 'none'`)
 
+	// VAL-1a: scoring events for calibration dashboard.
+	migrateCalibrationSQLite(db)
+
 	return nil
 }
 
