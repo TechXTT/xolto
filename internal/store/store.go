@@ -115,6 +115,7 @@ func migrate(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS price_history (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
 			query          TEXT NOT NULL,
+			model_key      TEXT NOT NULL DEFAULT '',
 			category_id    INTEGER NOT NULL DEFAULT 0,
 			marketplace_id TEXT NOT NULL DEFAULT '',
 			price          INTEGER NOT NULL,
@@ -122,6 +123,7 @@ func migrate(db *sql.DB) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_price_history_query ON price_history(query, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_price_history_model_key ON price_history(model_key, marketplace_id, timestamp);
 
 		CREATE TABLE IF NOT EXISTS shopping_profiles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -727,6 +729,9 @@ func migrate(db *sql.DB) error {
 
 	// XOL-71: isolate price_history by marketplace_id.
 	_, _ = db.Exec(`ALTER TABLE price_history ADD COLUMN marketplace_id TEXT NOT NULL DEFAULT ''`)
+
+	// XOL-105: per-model comparables pool.
+	_, _ = db.Exec(`ALTER TABLE price_history ADD COLUMN model_key TEXT NOT NULL DEFAULT ''`)
 
 	// XOL-79 (C-6): outreach lifecycle status per saved listing.
 	_, _ = db.Exec(`ALTER TABLE listings ADD COLUMN outreach_status TEXT NOT NULL DEFAULT 'none'`)
@@ -2950,37 +2955,55 @@ func (s *SQLiteStore) fillSQLiteSearchOpsBreakdown(days int, column string, out 
 }
 
 // RecordPrice saves a price data point for market average calculation.
-func (s *SQLiteStore) RecordPrice(query string, categoryID int, marketplaceID string, price int) error {
+func (s *SQLiteStore) RecordPrice(query string, modelKey string, categoryID int, marketplaceID string, price int) error {
 	_, err := s.db.Exec(
-		"INSERT INTO price_history (query, category_id, marketplace_id, price) VALUES (?, ?, ?, ?)",
-		query, categoryID, marketplaceID, price,
+		"INSERT INTO price_history (query, model_key, category_id, marketplace_id, price) VALUES (?, ?, ?, ?, ?)",
+		query, modelKey, categoryID, marketplaceID, price,
 	)
 	return err
 }
 
-// GetMarketAverage returns the average price in cents from recent listings for a query.
+// GetMarketAverage returns the average price in cents from recent listings.
+// When modelKey is non-empty, it queries by model_key first; falls back to
+// raw query pool when the model_key pool has insufficient samples.
 // Returns 0 and false if not enough samples are available.
-func (s *SQLiteStore) GetMarketAverage(query string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
+func (s *SQLiteStore) GetMarketAverage(query string, modelKey string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
+	// Try model_key pool first when available.
+	if modelKey != "" {
+		avg, ok, err := s.sqliteMarketAverageByKey(
+			`model_key = ? AND marketplace_id = ?`, modelKey, marketplaceID, minSamples,
+		)
+		if err != nil || ok {
+			return avg, ok, err
+		}
+		// model_key pool insufficient — fall through to query pool.
+	}
+
+	// Fall back to raw query pool.
+	return s.sqliteMarketAverageByKey(
+		`query = ? AND marketplace_id = ?`, query, marketplaceID, minSamples,
+	)
+}
+
+func (s *SQLiteStore) sqliteMarketAverageByKey(whereClause string, keyVal string, marketplaceID string, minSamples int) (int, bool, error) {
 	var avg sql.NullFloat64
 	var count int
 
-	err := s.db.QueryRow(`
+	err := s.db.QueryRow(fmt.Sprintf(`
 		SELECT AVG(price), COUNT(*) FROM (
 			SELECT price FROM price_history
-			WHERE query = ? AND category_id = ? AND marketplace_id = ?
+			WHERE %s
 			AND timestamp > datetime('now', '-30 days')
 			ORDER BY timestamp DESC
 			LIMIT ?
 		)
-	`, query, categoryID, marketplaceID, minSamples).Scan(&avg, &count)
+	`, whereClause), keyVal, marketplaceID, minSamples).Scan(&avg, &count)
 	if err != nil {
 		return 0, false, err
 	}
-
 	if count < minSamples || !avg.Valid {
 		return 0, false, nil
 	}
-
 	return int(avg.Float64), true, nil
 }
 

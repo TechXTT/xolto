@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/modelkey"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/reasoner"
 	"github.com/TechXTT/xolto/internal/store"
@@ -149,7 +150,7 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		}
 	}
 
-	marketAvg, hasMarket, err := sc.store.GetMarketAverage(search.Query, search.CategoryID, search.MarketplaceID, sc.scoringCfg.MarketSampleSize)
+	marketAvg, hasMarket, err := sc.store.GetMarketAverage(search.Query, modelkey.Normalize(search.Query), search.CategoryID, search.MarketplaceID, sc.scoringCfg.MarketSampleSize)
 	if err != nil {
 		slog.Warn("failed to load market average", "query", search.Query, "error", err)
 	}

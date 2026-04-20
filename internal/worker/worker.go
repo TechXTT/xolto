@@ -11,6 +11,7 @@ import (
 
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/marketplace"
+	"github.com/TechXTT/xolto/internal/modelkey"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/notify"
 	"github.com/TechXTT/xolto/internal/scorer"
@@ -348,7 +349,7 @@ func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time
 		logEntry.ResultsFound++
 		listing.ProfileID = spec.ProfileID
 		if listing.Price > 0 {
-			_ = w.db.RecordPrice(spec.Query, spec.CategoryID, spec.MarketplaceID, listing.Price)
+			_ = w.db.RecordPrice(spec.Query, modelkey.Normalize(spec.Query), spec.CategoryID, spec.MarketplaceID, listing.Price)
 		}
 		isNew, _ := w.db.IsNew(spec.UserID, listing.ItemID)
 		prevScore, hadPrev, _ := w.db.GetListingScore(spec.UserID, listing.ItemID)
