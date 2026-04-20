@@ -102,6 +102,13 @@ type MustHaveMatch struct {
 // MustHaves holds one MustHaveMatch per must-have defined in the associated
 // mission, in source order (never alphabetised). An empty must-have mission
 // yields an empty slice (never nil) so callers can iterate without nil guards.
+//
+// ScoreContributions is an internal-only field carrying the signed delta each
+// scorer component contributed to the final Score. It is nil for early-exit
+// paths (no actionable price, accessory pre-filter, AI-irrelevant). It is only
+// populated when the scorer runs the full scoring pipeline.
+// This field MUST NOT be serialised into any public API response shape.
+// See VAL-2 for context.
 type ScoredListing struct {
 	Listing           Listing
 	Score             float64
@@ -118,6 +125,9 @@ type ScoredListing struct {
 	ComparablesCount         int    // number of comparable deals used by the scorer
 	ComparablesMedianAgeDays int    // median age of comparables in days; 0 if none
 	MustHaves                []MustHaveMatch
+	// ScoreContributions is internal-only. See comment above.
+	// Never serialise into public /matches response. VAL-2.
+	ScoreContributions map[string]float64
 }
 
 type PricePoint struct {

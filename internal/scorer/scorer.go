@@ -366,6 +366,23 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 	}
 
 	compCount, compMedian := computeComparableStats(comparables)
+	scoreContribs := computeScoreContributions(listing, search, analysis, referencePrice, score)
+	// Emit attribution into the shadow log (VAL-2). This feeds the VAL-1
+	// calibration dashboard via Railway log aggregation. slog.Info so it
+	// flows in production (LevelInfo is the production floor per XOL-105).
+	slog.Info("score_attribution",
+		"item_id", listing.ItemID,
+		"marketplace", listing.MarketplaceID,
+		"score", score,
+		"verdict", recommendedAction,
+		"comparables", scoreContribs["comparables"],
+		"confidence", scoreContribs["confidence"],
+		"negotiable", scoreContribs["negotiable"],
+		"recency", scoreContribs["recency"],
+		"condition", scoreContribs["condition"],
+		"category_condition", scoreContribs["category_condition"],
+		"reasoning_source", analysis.Source,
+	)
 	return models.ScoredListing{
 		Listing:                  listing,
 		Score:                    score,
@@ -382,7 +399,197 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		ComparablesCount:         compCount,
 		ComparablesMedianAgeDays: compMedian,
 		MustHaves:                mustHaveMatches,
+		ScoreContributions:       scoreContribs,
 	}
+}
+
+// computeScoreContributions re-runs the scoring steps independently of the
+// main scoring loop to produce a signed-delta attribution map for each
+// component. This is internal-only (VAL-2) and must never flow into the public
+// /matches response shape.
+//
+// Components:
+//
+//	"comparables"       — base score derived from reference price vs asking price
+//	                      (or max budget when no reference price is available).
+//	                      Value is the unclamped base score before any adjustments.
+//	"confidence"        — +0.4 (high) / 0.0 (medium) / -0.3 (low) from analysis.Confidence.
+//	"negotiable"        — +1.0 when listing.PriceType == "negotiable"; 0 otherwise.
+//	"recency"           — +0.5 for listings posted within the last hour; 0 otherwise.
+//	"condition"         — condition-tier delta (e.g. like_new: +0.5, for_parts: -2.0).
+//	"category_condition"— XOL-86 category-specific condition penalty/bonus; 0 when n/a.
+//
+// The sum of all component deltas equals the final (clamped) Score within a
+// floating-point tolerance (the clamping means the algebraic sum of deltas may
+// differ from Score when the raw sum was outside [1, 10]).
+//
+// Returns nil when referencePrice == 0 and search.MaxPrice == 0 (no basis for
+// the base score; only the "no market data" flat 5.0 path applies — in that
+// case the contributions are populated with comparables=5.0 and all others 0).
+func computeScoreContributions(
+	listing models.Listing,
+	search models.SearchSpec,
+	analysis models.DealAnalysis,
+	referencePrice int,
+	finalScore float64,
+) map[string]float64 {
+	contribs := map[string]float64{
+		"comparables":        0,
+		"confidence":         0,
+		"negotiable":         0,
+		"recency":            0,
+		"condition":          0,
+		"category_condition": 0,
+	}
+
+	// --- Base score ("comparables") ---
+	var baseScore float64
+	if referencePrice > 0 {
+		ratio := float64(listing.Price) / float64(referencePrice)
+		baseScore = clamp(10.0-10.0*ratio+5.0, 1, 10)
+	} else if search.MaxPrice > 0 {
+		ratio := float64(listing.Price) / float64(search.MaxPrice)
+		baseScore = clamp(10.0-8.0*ratio, 1, 10)
+	} else {
+		baseScore = 5.0
+	}
+	contribs["comparables"] = baseScore
+
+	// --- Confidence delta ---
+	if analysis.Confidence >= 0.75 {
+		contribs["confidence"] = 0.4
+	} else if analysis.Confidence < 0.4 {
+		contribs["confidence"] = -0.3
+	}
+
+	// --- Negotiable delta ---
+	if listing.PriceType == "negotiable" {
+		contribs["negotiable"] = 1.0
+	}
+
+	// --- Recency delta ---
+	if !listing.Date.IsZero() && time.Since(listing.Date) < time.Hour {
+		contribs["recency"] = 0.5
+	}
+
+	// --- Condition delta (base condition tier) ---
+	switch strings.ToLower(listing.Condition) {
+	case "like_new", "new":
+		contribs["condition"] = 0.5
+	case "fair":
+		contribs["condition"] = -0.3
+	case "for_parts":
+		contribs["condition"] = -2.0
+	}
+
+	// --- Category-specific condition delta (XOL-86) ---
+	switch strings.ToLower(listing.Condition) {
+	case "fair":
+		switch search.Category {
+		case "camera":
+			contribs["category_condition"] = -0.3
+		case "phone":
+			contribs["category_condition"] = -0.2
+		case "laptop":
+			contribs["category_condition"] = 0.1
+		}
+	case "used":
+		switch search.Category {
+		case "camera":
+			contribs["category_condition"] = -0.2
+		}
+	}
+
+	// Reconcile: the sum of (comparables + all deltas) may exceed [1,10] before
+	// clamping. Adjust the "comparables" base so the sum of contributions matches
+	// the actual clamped finalScore. This keeps the invariant:
+	//   sum(contribs.values()) == finalScore
+	// within float64 precision.
+	deltaSum := contribs["confidence"] + contribs["negotiable"] +
+		contribs["recency"] + contribs["condition"] + contribs["category_condition"]
+	contribs["comparables"] = finalScore - deltaSum
+
+	return contribs
+}
+
+// ComputeAttributionFromListing reconstructs the score attribution from a
+// stored models.Listing. This is the VAL-2 read-path helper — it is called by
+// the /matches handler when the internal attribution debug gate is open.
+//
+// Because some scoring inputs (market average, original posting date) are not
+// persisted, the reconstruction is approximate:
+//   - "comparables" is derived as: finalScore - sum(all other deltas).
+//     This is always exact because it absorbs any rounding/clamping.
+//   - "recency" is always 0 for stored listings (posting date not persisted
+//     separately from last_seen; will be 0 for listings older than 1 hour).
+//   - "negotiable" is derived from listing.PriceType.
+//   - "condition" and "category_condition" are derived from listing.Condition
+//     and a best-effort search.Category value. Pass searchCategory="" when the
+//     category is unknown at read time (contribution will be 0).
+//
+// The returned map always contains exactly the same component keys as
+// computeScoreContributions:
+//
+//	"comparables", "confidence", "negotiable", "recency",
+//	"condition", "category_condition"
+func ComputeAttributionFromListing(listing models.Listing, searchCategory string) map[string]float64 {
+	contribs := map[string]float64{
+		"comparables":        0,
+		"confidence":         0,
+		"negotiable":         0,
+		"recency":            0,
+		"condition":          0,
+		"category_condition": 0,
+	}
+
+	// --- Confidence delta ---
+	if listing.Confidence >= 0.75 {
+		contribs["confidence"] = 0.4
+	} else if listing.Confidence < 0.4 {
+		contribs["confidence"] = -0.3
+	}
+
+	// --- Negotiable delta ---
+	if listing.PriceType == "negotiable" {
+		contribs["negotiable"] = 1.0
+	}
+
+	// --- Recency: always 0 for stored listings (date not persisted) ---
+
+	// --- Condition delta (base condition tier) ---
+	switch strings.ToLower(listing.Condition) {
+	case "like_new", "new":
+		contribs["condition"] = 0.5
+	case "fair":
+		contribs["condition"] = -0.3
+	case "for_parts":
+		contribs["condition"] = -2.0
+	}
+
+	// --- Category-specific condition delta (XOL-86) ---
+	switch strings.ToLower(listing.Condition) {
+	case "fair":
+		switch searchCategory {
+		case "camera":
+			contribs["category_condition"] = -0.3
+		case "phone":
+			contribs["category_condition"] = -0.2
+		case "laptop":
+			contribs["category_condition"] = 0.1
+		}
+	case "used":
+		switch searchCategory {
+		case "camera":
+			contribs["category_condition"] = -0.2
+		}
+	}
+
+	// --- Base (comparables): final score minus all other deltas ---
+	deltaSum := contribs["confidence"] + contribs["negotiable"] +
+		contribs["recency"] + contribs["condition"] + contribs["category_condition"]
+	contribs["comparables"] = listing.Score - deltaSum
+
+	return contribs
 }
 
 // computeComparableStats returns (count, medianAgeDays) for a slice of

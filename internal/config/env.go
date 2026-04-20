@@ -71,6 +71,11 @@ type ServerConfig struct {
 	// default 200. Both are optional — no Railway provisioning required.
 	AIModelMustHave                    string // AI_MODEL_MUSTHAVE
 	AIMaxMustHaveCallsPerMissionPerHour int    // AI_MAX_MUSTHAVE_CALLS_PER_MISSION_PER_HOUR
+	// DebugScorerAttribution enables the scoreContributions field on /matches
+	// items for users with operator-or-above access. Internal-only for VAL-2
+	// calibration. Default: false (prod-safe). Enable via SCORER_ATTRIBUTION_DEBUG=true.
+	// Fail-safe posture: unset means OFF. Must be explicitly enabled.
+	DebugScorerAttribution bool // SCORER_ATTRIBUTION_DEBUG
 }
 
 func LoadServerConfigFromEnv() (ServerConfig, error) {
@@ -137,6 +142,8 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 	// no Railway provisioning required for safe merge.
 	cfg.AIModelMustHave = getenvDefault("AI_MODEL_MUSTHAVE", getenvDefault("AI_MODEL", "gpt-5-nano"))
 	cfg.AIMaxMustHaveCallsPerMissionPerHour = parseIntDefault(os.Getenv("AI_MAX_MUSTHAVE_CALLS_PER_MISSION_PER_HOUR"), 200)
+	// Fail-safe: attribution debug is OFF unless explicitly set to true.
+	cfg.DebugScorerAttribution = parseBoolDefault(os.Getenv("SCORER_ATTRIBUTION_DEBUG"), false)
 	if cfg.DBMaxOpenConns <= 0 {
 		cfg.DBMaxOpenConns = 25
 	}
