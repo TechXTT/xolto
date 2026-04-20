@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,10 +31,17 @@ type OutreachStateEnvelope struct {
 // optional outreach thread state for the /matches response envelope.
 // MustHaves is always a non-nil slice so that callers can iterate without nil
 // guards. OutreachState is a pointer — null when no thread exists.
+//
+// scoreContributions is present only when the authenticated user has operator-
+// or-above access AND the server's DebugScorerAttribution flag is enabled.
+// It is intentionally omitted (omitempty) so it never appears in public
+// responses. Envelope-drift rule: any change here requires cross-envelope
+// parity assertion to confirm the field is absent in public responses.
 type matchItem struct {
 	models.Listing
-	MustHaves     []models.MustHaveMatch `json:"MustHaves"`
-	OutreachState *OutreachStateEnvelope `json:"OutreachState"`
+	MustHaves          []models.MustHaveMatch  `json:"MustHaves"`
+	OutreachState      *OutreachStateEnvelope  `json:"OutreachState"`
+	ScoreContributions map[string]float64      `json:"scoreContributions,omitempty"`
 }
 
 // matchesSortValues is the set of allowed values for the sort parameter.
@@ -354,11 +362,16 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 
 	now := time.Now()
 
+	// Gate: scoreContributions is only present for operator-or-above users when
+	// attribution debug is explicitly enabled. Fail-safe: default OFF.
+	showAttribution := s.cfg.DebugScorerAttribution && models.HasOperatorAccess(*user)
+
 	// Build the enriched matches slice. Each item carries MustHaves derived
 	// in-memory from the mission's required features checked against the
 	// listing's title and description (no extra DB call per listing), plus
 	// an optional OutreachState when the user has sent an outreach for the
-	// listing.
+	// listing. When showAttribution is true and the listing carries
+	// ScoreContributions, they are included in the response envelope.
 	matches := make([]matchItem, len(listings))
 	for i, l := range listings {
 		var outreachState *OutreachStateEnvelope
@@ -374,10 +387,34 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request, user *mod
 			}
 			outreachState = env
 		}
+		var scoreContribs map[string]float64
+		if showAttribution {
+			// Reconstruct attribution from stored listing fields. The scorer's
+			// ComputeAttributionFromListing function derives each component from
+			// persisted fields (Score, Confidence, Condition, PriceType). The
+			// searchCategory is not stored per-listing; pass empty string so the
+			// category_condition component is 0 when unknown (conservative).
+			scoreContribs = scorer.ComputeAttributionFromListing(l, "")
+			// Emit attribution into the shadow log so the VAL-1 dashboard
+			// can aggregate it from Railway logs without needing to replay requests.
+			slog.Info("score_attribution",
+				"item_id", l.ItemID,
+				"marketplace", l.MarketplaceID,
+				"score", l.Score,
+				"comparables", scoreContribs["comparables"],
+				"confidence", scoreContribs["confidence"],
+				"negotiable", scoreContribs["negotiable"],
+				"recency", scoreContribs["recency"],
+				"condition", scoreContribs["condition"],
+				"category_condition", scoreContribs["category_condition"],
+				"user_id", user.ID,
+			)
+		}
 		matches[i] = matchItem{
-			Listing:       l,
-			MustHaves:     scorer.ScoreMustHavesSemantic(r.Context(), l, missionMustHaves, missionID, s.mustHaveEvaluator),
-			OutreachState: outreachState,
+			Listing:            l,
+			MustHaves:          scorer.ScoreMustHavesSemantic(r.Context(), l, missionMustHaves, missionID, s.mustHaveEvaluator),
+			OutreachState:      outreachState,
+			ScoreContributions: scoreContribs,
 		}
 	}
 
