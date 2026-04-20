@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -683,6 +684,10 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 
 	// XOL-101: manual recheck rate-limit timestamp on missions.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS last_manual_recheck_at TIMESTAMPTZ`)
+
+	// XOL-105: per-model comparables pool key on price_history.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE price_history ADD COLUMN IF NOT EXISTS model_key TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_price_history_model_key ON price_history(model_key, marketplace_id, timestamp DESC)`)
 
 	return nil
 }
@@ -2781,35 +2786,101 @@ func (s *PostgresStore) SetAIScoreCache(cacheKey string, score float64, reasonin
 	return err
 }
 
-func (s *PostgresStore) RecordPrice(query string, categoryID int, marketplaceID string, price int) error {
-	_, err := s.db.Exec(`INSERT INTO price_history (query, category_id, marketplace_id, price) VALUES ($1, $2, $3, $4)`, query, categoryID, marketplaceID, price)
+func (s *PostgresStore) RecordPrice(query string, modelKey string, categoryID int, marketplaceID string, price int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO price_history (query, model_key, category_id, marketplace_id, price) VALUES ($1, $2, $3, $4, $5)`,
+		query, modelKey, categoryID, marketplaceID, price,
+	)
 	return err
 }
 
-func (s *PostgresStore) GetMarketAverage(query string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
-	type result struct {
-		Avg   sql.NullFloat64
-		Count int
+func (s *PostgresStore) GetMarketAverage(query string, modelKey string, categoryID int, marketplaceID string, minSamples int) (int, bool, error) {
+	source := "none"
+	avgResult := 0
+
+	// Try model_key pool first when available.
+	if modelKey != "" {
+		avg, ok, err := s.marketAverageByKey(
+			`model_key = $1 AND marketplace_id = $2`, modelKey, marketplaceID, minSamples,
+		)
+		if err != nil {
+			slog.Debug("market_average_resolved",
+				"query", query,
+				"model_key", modelKey,
+				"source", "none",
+				"avg_cents", 0,
+				"marketplace_id", marketplaceID,
+			)
+			return 0, false, err
+		}
+		if ok {
+			slog.Debug("market_average_resolved",
+				"query", query,
+				"model_key", modelKey,
+				"source", "model_key",
+				"avg_cents", avg,
+				"marketplace_id", marketplaceID,
+			)
+			return avg, true, nil
+		}
+		// model_key pool insufficient — fall through to query pool.
 	}
-	var res result
-	err := s.db.QueryRow(`
+
+	// Fall back to raw query pool (existing behaviour).
+	avg, ok, err := s.marketAverageByKey(
+		`query = $1 AND marketplace_id = $2`, query, marketplaceID, minSamples,
+	)
+	if err != nil {
+		slog.Debug("market_average_resolved",
+			"query", query,
+			"model_key", modelKey,
+			"source", source,
+			"avg_cents", avgResult,
+			"marketplace_id", marketplaceID,
+		)
+		return 0, false, err
+	}
+	if ok {
+		source = "query"
+		avgResult = avg
+	}
+	slog.Debug("market_average_resolved",
+		"query", query,
+		"model_key", modelKey,
+		"source", source,
+		"avg_cents", avgResult,
+		"marketplace_id", marketplaceID,
+	)
+	return avgResult, ok, nil
+}
+
+// marketAverageByKey runs the shared average query with a caller-supplied WHERE
+// clause. whereClause must use $1 and $2 as positional parameters for keyVal
+// and marketplaceID respectively; minSamples is passed as $3.
+//
+// NOTE: category_id filter is intentionally omitted — model_key is already
+// category-specific via brand+model tokens. Including category_id would
+// produce false misses for broad-category missions (category_id=0).
+func (s *PostgresStore) marketAverageByKey(whereClause string, keyVal string, marketplaceID string, minSamples int) (int, bool, error) {
+	var avg sql.NullFloat64
+	var count int
+	err := s.db.QueryRow(fmt.Sprintf(`
 		SELECT AVG(price)::float8, COUNT(*)
 		FROM (
-			SELECT price
-			FROM price_history
-			WHERE query = $1 AND category_id = $2 AND marketplace_id = $3
+			SELECT price FROM price_history
+			WHERE %s
 			  AND timestamp > NOW() - INTERVAL '30 days'
 			ORDER BY timestamp DESC
-			LIMIT $4
+			LIMIT $3
 		) recent
-	`, query, categoryID, marketplaceID, minSamples).Scan(&res.Avg, &res.Count)
+	`, whereClause), keyVal, marketplaceID, minSamples).Scan(&avg, &count)
 	if err != nil {
 		return 0, false, err
 	}
-	if res.Count < minSamples || !res.Avg.Valid {
+	if count < minSamples || !avg.Valid {
 		return 0, false, nil
 	}
-	return int(res.Avg.Float64), true, nil
+	return int(avg.Float64), true, nil
 }
 
 func (s *PostgresStore) MarkOffered(userID, itemID string) error {

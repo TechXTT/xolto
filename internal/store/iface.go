@@ -8,7 +8,7 @@ import (
 )
 
 type Reader interface {
-	GetMarketAverage(query string, categoryID int, marketplaceID string, minSamples int) (int, bool, error)
+	GetMarketAverage(query string, modelKey string, categoryID int, marketplaceID string, minSamples int) (int, bool, error)
 	GetComparableDeals(userID, query, excludeItemID string, limit int) ([]models.ComparableDeal, error)
 	GetApprovedComparables(userID string, missionID int64, limit int) ([]models.ComparableDeal, error)
 	GetListingScoringState(userID, itemID string) (price int, reasoningSource string, comparablesCount int, found bool, err error)
@@ -87,7 +87,7 @@ type Writer interface {
 	// owned by the given user. Valid status values: none, sent, replied, won, lost.
 	// Returns an error when the listing is not found or does not belong to userID.
 	UpdateOutreachStatus(ctx context.Context, userID, itemID, status string) error
-	RecordPrice(query string, categoryID int, marketplaceID string, price int) error
+	RecordPrice(query string, modelKey string, categoryID int, marketplaceID string, price int) error
 	MarkOffered(userID, itemID string) error
 	CreateUser(email, hash, name string) (string, error)
 	UpdateUserProfile(user models.User) error

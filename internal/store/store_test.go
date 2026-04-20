@@ -642,20 +642,20 @@ func TestRecordPriceMarketplaceIsolation(t *testing.T) {
 
 	// Insert 3 NL prices (average 100_00 = €100).
 	for _, p := range []int{9000, 10000, 11000} {
-		if err := st.RecordPrice(query, catID, "marktplaats", p); err != nil {
+		if err := st.RecordPrice(query, "", catID, "marktplaats", p); err != nil {
 			t.Fatalf("RecordPrice(marktplaats) error = %v", err)
 		}
 	}
 
 	// Insert 3 BG prices (average 60_00 = €60).
 	for _, p := range []int{5000, 6000, 7000} {
-		if err := st.RecordPrice(query, catID, "olxbg", p); err != nil {
+		if err := st.RecordPrice(query, "", catID, "olxbg", p); err != nil {
 			t.Fatalf("RecordPrice(olxbg) error = %v", err)
 		}
 	}
 
 	// NL market average should be ~10000, not contaminated by BG prices.
-	nlAvg, ok, err := st.GetMarketAverage(query, catID, "marktplaats", minSamples)
+	nlAvg, ok, err := st.GetMarketAverage(query, "", catID, "marktplaats", minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(marktplaats) error = %v", err)
 	}
@@ -667,7 +667,7 @@ func TestRecordPriceMarketplaceIsolation(t *testing.T) {
 	}
 
 	// BG market average should be ~6000, not contaminated by NL prices.
-	bgAvg, ok, err := st.GetMarketAverage(query, catID, "olxbg", minSamples)
+	bgAvg, ok, err := st.GetMarketAverage(query, "", catID, "olxbg", minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(olxbg) error = %v", err)
 	}
@@ -696,20 +696,20 @@ func TestRecordPriceEmptyMarketplaceID(t *testing.T) {
 
 	// Insert 2 legacy rows (empty marketplace_id).
 	for _, p := range []int{8000, 12000} {
-		if err := st.RecordPrice(query, catID, "", p); err != nil {
+		if err := st.RecordPrice(query, "", catID, "", p); err != nil {
 			t.Fatalf("RecordPrice('') error = %v", err)
 		}
 	}
 
 	// Insert 2 rows for a real marketplace.
 	for _, p := range []int{5000, 7000} {
-		if err := st.RecordPrice(query, catID, "olxbg", p); err != nil {
+		if err := st.RecordPrice(query, "", catID, "olxbg", p); err != nil {
 			t.Fatalf("RecordPrice(olxbg) error = %v", err)
 		}
 	}
 
 	// Querying '' should only return the legacy rows (avg 10000).
-	emptyAvg, ok, err := st.GetMarketAverage(query, catID, "", minSamples)
+	emptyAvg, ok, err := st.GetMarketAverage(query, "", catID, "", minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage('') error = %v", err)
 	}
@@ -721,7 +721,7 @@ func TestRecordPriceEmptyMarketplaceID(t *testing.T) {
 	}
 
 	// Querying 'olxbg' should not see legacy rows (avg 6000).
-	bgAvg, ok, err := st.GetMarketAverage(query, catID, "olxbg", minSamples)
+	bgAvg, ok, err := st.GetMarketAverage(query, "", catID, "olxbg", minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(olxbg) error = %v", err)
 	}
@@ -750,12 +750,12 @@ func TestGetMarketAverageMinSamplesExact(t *testing.T) {
 
 	// Insert 4 prices — one below the minimum threshold.
 	for _, p := range []int{1000, 2000, 3000, 4000} {
-		if err := st.RecordPrice(query, catID, marketplace, p); err != nil {
+		if err := st.RecordPrice(query, "", catID, marketplace, p); err != nil {
 			t.Fatalf("RecordPrice error = %v", err)
 		}
 	}
 
-	_, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	_, ok, err := st.GetMarketAverage(query, "", catID, marketplace, minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(4 samples) error = %v", err)
 	}
@@ -764,11 +764,11 @@ func TestGetMarketAverageMinSamplesExact(t *testing.T) {
 	}
 
 	// Insert a 5th price to reach the exact minimum.
-	if err := st.RecordPrice(query, catID, marketplace, 5000); err != nil {
+	if err := st.RecordPrice(query, "", catID, marketplace, 5000); err != nil {
 		t.Fatalf("RecordPrice error = %v", err)
 	}
 
-	avg, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	avg, ok, err := st.GetMarketAverage(query, "", catID, marketplace, minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(5 samples) error = %v", err)
 	}
@@ -808,7 +808,7 @@ func TestGetMarketAverageWindowExpiry(t *testing.T) {
 		}
 	}
 
-	_, ok, err := st.GetMarketAverage(query, catID, marketplace, minSamples)
+	_, ok, err := st.GetMarketAverage(query, "", catID, marketplace, minSamples)
 	if err != nil {
 		t.Fatalf("GetMarketAverage(expired samples) error = %v", err)
 	}

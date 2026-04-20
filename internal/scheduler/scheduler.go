@@ -10,6 +10,7 @@ import (
 	"github.com/TechXTT/xolto/internal/format"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/messenger"
+	"github.com/TechXTT/xolto/internal/modelkey"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/notify"
 	"github.com/TechXTT/xolto/internal/scorer"
@@ -123,7 +124,7 @@ func (s *Scheduler) processSearch(ctx context.Context, searchCfg config.SearchCo
 	for _, listing := range listings {
 		listing.ProfileID = spec.ProfileID
 		if listing.Price > 0 {
-			if err := s.store.RecordPrice(spec.Query, spec.CategoryID, spec.MarketplaceID, listing.Price); err != nil {
+			if err := s.store.RecordPrice(spec.Query, modelkey.Normalize(spec.Query), spec.CategoryID, spec.MarketplaceID, listing.Price); err != nil {
 				slog.Warn("failed to record price", "error", err)
 			}
 		}
