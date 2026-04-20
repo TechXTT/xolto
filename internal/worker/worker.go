@@ -370,6 +370,27 @@ func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time
 		}
 
 		scored := w.scorer.Score(ctx, listing, spec)
+		// VAL-1a: persist scoring event for calibration dashboard.
+		// Best-effort: a DB failure must not block or fail the scoring path.
+		if scored.ScoreContributions != nil {
+			var missionID *int64
+			if spec.ProfileID > 0 {
+				id := spec.ProfileID
+				missionID = &id
+			}
+			if writeErr := w.db.WriteScoringEvent(ctx, store.ScoringEvent{
+				ListingID:     listing.ItemID,
+				Marketplace:   listing.MarketplaceID,
+				MissionID:     missionID,
+				Score:         scored.Score,
+				Verdict:       scored.RecommendedAction,
+				Confidence:    scored.Confidence,
+				Contributions: scored.ScoreContributions,
+				ScorerVersion: store.ScorerVersionV1,
+			}); writeErr != nil {
+				slog.Warn("calibration: failed to write scoring event", "item", listing.ItemID, "error", writeErr)
+			}
+		}
 		if err := w.db.SaveListing(spec.UserID, listing, spec.Query, scored); err != nil {
 			slog.Warn("failed to save listing", "item", listing.ItemID, "error", err)
 		}

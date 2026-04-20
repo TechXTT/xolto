@@ -119,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 		s.registerAdminRoutes(s.mux)
 		s.registerOutreachRoutes(s.mux)
 		s.registerSupportRoutes(s.mux)
+		s.registerInternalRoutes(s.mux)
 	})
 
 	handler := http.Handler(s.mux)

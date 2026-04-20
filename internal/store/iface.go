@@ -123,4 +123,5 @@ type Store interface {
 	Writer
 	OutreachStore
 	SupportEventStore
+	CalibrationStore
 }
