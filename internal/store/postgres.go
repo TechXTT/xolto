@@ -685,6 +685,10 @@ func migratePostgres(ctx context.Context, db *sql.DB) error {
 	// XOL-101: manual recheck rate-limit timestamp on missions.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE shopping_profiles ADD COLUMN IF NOT EXISTS last_manual_recheck_at TIMESTAMPTZ`)
 
+	// XOL-105: per-model comparables pool key on price_history.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE price_history ADD COLUMN IF NOT EXISTS model_key TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_price_history_model_key ON price_history(model_key, marketplace_id, timestamp DESC)`)
+
 	return nil
 }
 
