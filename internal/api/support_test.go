@@ -19,6 +19,157 @@ import (
 	"github.com/TechXTT/xolto/internal/store"
 )
 
+// ---------------------------------------------------------------------------
+// CORS allowlist tests — glob/wildcard pattern support for preview origins.
+// ---------------------------------------------------------------------------
+
+// newCORSTestServer builds a Server with only CORSAllowedOrigins wired up.
+// The dependencies nil'd out here are not exercised by allowedCORSOrigin.
+func newCORSTestServer(origins []string) *Server {
+	return &Server{cfg: config.ServerConfig{CORSAllowedOrigins: origins}}
+}
+
+func TestAllowedCORSOrigin(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowlist  []string
+		origin     string
+		wantOK     bool
+		wantReturn string
+	}{
+		{
+			name:       "literal match",
+			allowlist:  []string{"http://localhost:3000"},
+			origin:     "http://localhost:3000",
+			wantOK:     true,
+			wantReturn: "http://localhost:3000",
+		},
+		{
+			name:      "literal non-match",
+			allowlist: []string{"http://localhost:3000"},
+			origin:    "http://localhost:3001",
+			wantOK:    false,
+		},
+		{
+			name:       "star alone matches any origin",
+			allowlist:  []string{"*"},
+			origin:     "https://something.example.com",
+			wantOK:     true,
+			wantReturn: "https://something.example.com",
+		},
+		{
+			name:       "glob matches vercel preview host",
+			allowlist:  []string{"https://admin-xolto-app-git-*-techxtts-projects.vercel.app"},
+			origin:     "https://admin-xolto-app-git-val-1b-calibration-fc3a83-techxtts-projects.vercel.app",
+			wantOK:     true,
+			wantReturn: "https://admin-xolto-app-git-val-1b-calibration-fc3a83-techxtts-projects.vercel.app",
+		},
+		{
+			name:       "glob matches short vercel preview host",
+			allowlist:  []string{"https://admin-xolto-app-git-*-techxtts-projects.vercel.app"},
+			origin:     "https://admin-xolto-app-git-foo-techxtts-projects.vercel.app",
+			wantOK:     true,
+			wantReturn: "https://admin-xolto-app-git-foo-techxtts-projects.vercel.app",
+		},
+		{
+			name:      "glob does NOT match substring-appended attacker origin",
+			allowlist: []string{"https://admin-xolto-app-git-*-techxtts-projects.vercel.app"},
+			origin:    "https://admin-xolto-app-git-foo-techxtts-projects.vercel.app.evil.com",
+			wantOK:    false,
+		},
+		{
+			name:      "glob does NOT match origin that embeds pattern as substring",
+			allowlist: []string{"https://admin-xolto-app-git-*-techxtts-projects.vercel.app"},
+			origin:    "https://evil.com/https://admin-xolto-app-git-foo-techxtts-projects.vercel.app",
+			wantOK:    false,
+		},
+		{
+			name:      "glob does NOT match when scheme differs",
+			allowlist: []string{"https://admin-xolto-app-git-*-techxtts-projects.vercel.app"},
+			origin:    "http://admin-xolto-app-git-foo-techxtts-projects.vercel.app",
+			wantOK:    false,
+		},
+		{
+			name:      "empty origin returns false",
+			allowlist: []string{"*"},
+			origin:    "",
+			wantOK:    false,
+		},
+		{
+			name:       "trailing slash on origin is trimmed",
+			allowlist:  []string{"http://localhost:3000"},
+			origin:     "http://localhost:3000/",
+			wantOK:     true,
+			wantReturn: "http://localhost:3000",
+		},
+		{
+			name:       "trailing slash on pattern is trimmed",
+			allowlist:  []string{"http://localhost:3000/"},
+			origin:     "http://localhost:3000",
+			wantOK:     true,
+			wantReturn: "http://localhost:3000",
+		},
+		{
+			name:       "glob returns input origin not pattern",
+			allowlist:  []string{"https://*.xolto.app"},
+			origin:     "https://admin.xolto.app",
+			wantOK:     true,
+			wantReturn: "https://admin.xolto.app",
+		},
+		{
+			name:      "whitespace-only and empty entries are skipped",
+			allowlist: []string{"", "   "},
+			origin:    "https://admin.xolto.app",
+			wantOK:    false,
+		},
+		{
+			name:       "mixed literal and glob entries — literal wins when applicable",
+			allowlist:  []string{"http://localhost:3000", "https://*.xolto.app"},
+			origin:     "http://localhost:3000",
+			wantOK:     true,
+			wantReturn: "http://localhost:3000",
+		},
+		{
+			name:       "mixed literal and glob entries — glob matches when literal does not",
+			allowlist:  []string{"http://localhost:3000", "https://*.xolto.app"},
+			origin:     "https://dash.xolto.app",
+			wantOK:     true,
+			wantReturn: "https://dash.xolto.app",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newCORSTestServer(tc.allowlist)
+			got, ok := srv.allowedCORSOrigin(tc.origin)
+			if ok != tc.wantOK {
+				t.Fatalf("allowedCORSOrigin(%q) ok = %v, want %v (allowlist=%v)", tc.origin, ok, tc.wantOK, tc.allowlist)
+			}
+			if tc.wantOK && got != tc.wantReturn {
+				t.Fatalf("allowedCORSOrigin(%q) returned %q, want %q (allowlist=%v)", tc.origin, got, tc.wantReturn, tc.allowlist)
+			}
+		})
+	}
+}
+
+func TestCompileOriginPatternAnchored(t *testing.T) {
+	re, err := compileOriginPattern("https://*.xolto.app")
+	if err != nil {
+		t.Fatalf("compileOriginPattern() error = %v", err)
+	}
+	// Anchored: must match full string, not substring.
+	if re.MatchString("prefix-https://admin.xolto.app") {
+		t.Fatal("expected anchored pattern to reject prefix-appended origin")
+	}
+	if re.MatchString("https://admin.xolto.app-suffix") {
+		t.Fatal("expected anchored pattern to reject suffix-appended origin")
+	}
+	if !re.MatchString("https://admin.xolto.app") {
+		t.Fatal("expected anchored pattern to match intended origin")
+	}
+}
+
 // flushableRecorder embeds httptest.ResponseRecorder and explicitly implements
 // http.Flusher so we can verify delegation through statusCapturingResponseWriter.
 type flushableRecorder struct {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -180,8 +181,39 @@ func (s *Server) allowedCORSOrigin(origin string) (string, bool) {
 		if candidate == "*" || candidate == origin {
 			return origin, true
 		}
+		if strings.Contains(candidate, "*") {
+			re, err := compileOriginPattern(candidate)
+			if err != nil {
+				// Malformed pattern — skip rather than crash. Next entry may still match.
+				continue
+			}
+			if re.MatchString(origin) {
+				return origin, true
+			}
+		}
 	}
 	return "", false
+}
+
+// compileOriginPattern converts a glob-style origin pattern into an anchored
+// regular expression. All regex metacharacters are escaped except for '*',
+// which is expanded to '.*'. The returned regexp matches the full origin
+// string (anchored with ^...$), preventing substring-based bypasses such as
+// "https://trusted.example.com.evil.com" matching a pattern for
+// "https://trusted.example.com".
+func compileOriginPattern(pattern string) (*regexp.Regexp, error) {
+	var sb strings.Builder
+	sb.Grow(len(pattern) + 4)
+	sb.WriteString("^")
+	for _, r := range pattern {
+		if r == '*' {
+			sb.WriteString(".*")
+			continue
+		}
+		sb.WriteString(regexp.QuoteMeta(string(r)))
+	}
+	sb.WriteString("$")
+	return regexp.Compile(sb.String())
 }
 
 func (s *Server) adminSourceAllowed(r *http.Request) bool {
