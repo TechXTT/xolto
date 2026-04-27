@@ -14,8 +14,26 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 )
+
+// createAIBudgetOverridesTablePostgres is the canonical Postgres DDL for the
+// audit-log table. Kept in sync with migratePostgresCalibration so a self-heal
+// path can recreate the table when an INSERT discovers it is missing — the
+// 2026-04-27 incident showed migratePostgresCalibration's silent error pattern
+// can leave the table absent without any deploy-time signal.
+const createAIBudgetOverridesTablePostgres = `
+CREATE TABLE IF NOT EXISTS ai_budget_overrides (
+	id              BIGSERIAL PRIMARY KEY,
+	set_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	new_cap_usd     DOUBLE PRECISION NOT NULL,
+	reason          TEXT        NOT NULL DEFAULT '',
+	set_by_user_id  TEXT        NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC);
+`
 
 // AIBudgetOverride is one audit row.
 type AIBudgetOverride struct {
@@ -38,16 +56,45 @@ type AIBudgetOverrideStore interface {
 
 func (s *PostgresStore) RecordAIBudgetOverride(ctx context.Context, o AIBudgetOverride) (int64, error) {
 	var id int64
-	err := s.db.QueryRowContext(ctx, `
+	insertSQL := `
 		INSERT INTO ai_budget_overrides (set_at, new_cap_usd, reason, set_by_user_id)
 		VALUES (NOW(), $1, $2, $3)
-		RETURNING id`,
-		o.NewCapUSD, o.Reason, o.SetByUserID,
-	).Scan(&id)
+		RETURNING id`
+	err := s.db.QueryRowContext(ctx, insertSQL, o.NewCapUSD, o.Reason, o.SetByUserID).Scan(&id)
+	if err != nil && isRelationDoesNotExistErr(err) {
+		// Self-heal: migratePostgresCalibration silently swallows DDL errors
+		// (the 2026-04-27 incident proved this). If the table is missing at
+		// INSERT time, run the canonical CREATE inline once with explicit
+		// error-logging, then retry the INSERT. This unblocks the audit-log
+		// without requiring a redeploy and surfaces the original DDL error
+		// (if any) into the slog stream.
+		slog.Warn("ai_budget_overrides table missing at INSERT time; attempting self-heal CREATE",
+			"original_error", err.Error())
+		if _, cerr := s.db.ExecContext(ctx, createAIBudgetOverridesTablePostgres); cerr != nil {
+			slog.Error("ai_budget_overrides self-heal CREATE failed",
+				"create_error", cerr.Error(), "original_error", err.Error())
+			return 0, fmt.Errorf("self-heal create ai_budget_overrides: %w", cerr)
+		}
+		slog.Info("ai_budget_overrides self-heal CREATE succeeded; retrying INSERT")
+		err = s.db.QueryRowContext(ctx, insertSQL, o.NewCapUSD, o.Reason, o.SetByUserID).Scan(&id)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("inserting ai_budget_override: %w", err)
 	}
 	return id, nil
+}
+
+// isRelationDoesNotExistErr returns true when err is the Postgres
+// "relation does not exist" error (SQLSTATE 42P01). The driver wraps it as a
+// pgconn.PgError but the wrapped error string contains the SQLSTATE; matching
+// on the string is robust without taking a hard pgconn dependency at this
+// boundary.
+func isRelationDoesNotExistErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "42P01") || strings.Contains(s, "does not exist")
 }
 
 func (s *PostgresStore) ListRecentAIBudgetOverrides(ctx context.Context, limit int) ([]AIBudgetOverride, error) {
@@ -61,6 +108,14 @@ func (s *PostgresStore) ListRecentAIBudgetOverrides(ctx context.Context, limit i
 		LIMIT $1`, limit,
 	)
 	if err != nil {
+		// If the table is missing (silent migration miss), surface an empty
+		// list rather than an error — the admin tile renders "no recent
+		// overrides" cleanly. The next override INSERT will self-heal.
+		if isRelationDoesNotExistErr(err) {
+			slog.Warn("ai_budget_overrides table missing at SELECT time; returning empty list",
+				"error", err.Error())
+			return nil, nil
+		}
 		return nil, fmt.Errorf("querying ai_budget_overrides: %w", err)
 	}
 	defer rows.Close()
