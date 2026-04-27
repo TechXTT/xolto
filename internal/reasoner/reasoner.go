@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/format"
 	"github.com/TechXTT/xolto/internal/models"
@@ -90,6 +91,14 @@ func (r *Reasoner) Analyze(
 	llmAnalysis, err := r.callLLM(ctx, listing, search, marketAvg, ranked)
 	if err != nil {
 		if errors.Is(err, errRateLimited) {
+			heuristic.Source = "rate-limited"
+			return heuristic, nil
+		}
+		if errors.Is(err, errAIBudgetExhausted) {
+			// Same shape as rate-limited: scorer treats this fall-through
+			// as the heuristic-only path. The scorer-side AIPath tag is
+			// applied by the scorer; here we just pick a Source value
+			// that downstream filters do not treat as paid AI.
 			heuristic.Source = "rate-limited"
 			return heuristic, nil
 		}
@@ -212,6 +221,17 @@ func (r *Reasoner) rankComparables(listing models.Listing, comparables []models.
 
 var errRateLimited = errors.New("reasoner llm rate limited")
 
+// errAIBudgetExhausted is returned when the W19-23 global $3/24h AI-spend
+// cap fires before this reasoner.callLLM invocation could proceed. The
+// scorer treats this as equivalent to the LLM-call failure path: it
+// returns the heuristic analysis tagged with AIPathHeuristicFallback.
+//
+// Defensive layer: the scorer ALSO gates the budget before calling
+// Analyze, so callLLM normally never sees the cap fired. This second gate
+// protects future direct callers of Analyze (currently only the scorer
+// uses Analyze) and keeps the budget honest if a refactor changes that.
+var errAIBudgetExhausted = errors.New("reasoner: global ai budget exhausted")
+
 func (r *Reasoner) callLLM(
 	ctx context.Context,
 	listing models.Listing,
@@ -221,6 +241,17 @@ func (r *Reasoner) callLLM(
 ) (models.DealAnalysis, error) {
 	if r.limiter != nil && !r.limiter.Allow(search.UserID) {
 		return models.DealAnalysis{}, errRateLimited
+	}
+	// W19-23 defensive global-budget check. The primary gate lives in
+	// scorer.Score; this block makes Analyze safe to call directly without
+	// breaching the cap. Note we do NOT pre-spend here because the scorer
+	// already pre-spent — rolling-up an entry here would double-charge.
+	// Instead, we look at the snapshot and reject if already exhausted.
+	if budget := aibudget.Global(); budget != nil {
+		snap := budget.Snapshot()
+		if snap.CapUSD > 0 && snap.Rolling24hSpendUSD >= snap.CapUSD {
+			return models.DealAnalysis{}, errAIBudgetExhausted
+		}
 	}
 	slog.Default().Info(
 		"calling llm scorer",
@@ -355,13 +386,15 @@ func (r *Reasoner) callLLM(
 	parsed.FairPriceCents = normalizeFairPriceCents(parsed.FairPriceCents, listing.Price, marketAvg, selected)
 
 	return models.DealAnalysis{
-		Relevant:        parsed.Relevant,
-		FairPrice:       parsed.FairPriceCents,
-		Confidence:      clamp(parsed.Confidence, 0.05, 0.99),
-		Reason:          strings.TrimSpace(parsed.Reasoning),
-		Source:          "ai",
-		ComparableDeals: selected,
-		SearchAdvice:    strings.TrimSpace(parsed.SearchAdvice),
+		Relevant:         parsed.Relevant,
+		FairPrice:        parsed.FairPriceCents,
+		Confidence:       clamp(parsed.Confidence, 0.05, 0.99),
+		Reason:           strings.TrimSpace(parsed.Reasoning),
+		Source:           "ai",
+		ComparableDeals:  selected,
+		SearchAdvice:     strings.TrimSpace(parsed.SearchAdvice),
+		PromptTokens:     completion.Usage.PromptTokens,
+		CompletionTokens: completion.Usage.CompletionTokens,
 	}, nil
 }
 

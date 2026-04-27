@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/draftnote"
 	"github.com/TechXTT/xolto/internal/models"
@@ -111,6 +112,10 @@ func (s *Server) registerListingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/matches", s.requireAuth(s.handleMatches))
 	mux.HandleFunc("/matches/feedback", s.requireAuth(s.handleMatchFeedback))
 	mux.HandleFunc("/matches/analyze", s.requireAuth(s.handleAnalyzeListing))
+	// W18-2: anonymous variant for the landing-site "Try a verdict" widget.
+	// Guarded by per-IP rate-limit, URL cache, and a daily cost circuit-
+	// breaker. The authenticated path above is intentionally untouched.
+	mux.HandleFunc("/public/matches/analyze", s.handleAnonymousAnalyze)
 	mux.HandleFunc("/shortlist", s.requireAuth(s.handleShortlist))
 	mux.HandleFunc("/shortlist/", s.requireAuth(s.handleShortlistItem))
 	mux.HandleFunc("/draft-note", s.requireAuth(s.handleDraftNote))
@@ -144,6 +149,23 @@ func (s *Server) handleConverse(w http.ResponseWriter, r *http.Request, user *mo
 	}
 	reply, err := s.assistant.Converse(r.Context(), user.ID, req.Message)
 	if err != nil {
+		// W19-23: translate global cap-fire into 503 + Retry-After so the
+		// dash can render an explicit "try again later" state instead of
+		// a 500 error.
+		var qe *assistant.QuotaExhaustedError
+		if errors.As(err, &qe) {
+			retrySec := int(qe.RetryAfter.Seconds())
+			if retrySec < 1 {
+				retrySec = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retrySec))
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"ok":                  false,
+				"error":               "ai_quota_exhausted",
+				"retry_after_seconds": retrySec,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

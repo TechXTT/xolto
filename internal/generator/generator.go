@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
 	"gopkg.in/yaml.v3"
 )
@@ -153,8 +154,21 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		return nil, fmt.Errorf("marshal ai request: %w", err)
 	}
 
+	// W19-23 global AI-spend cap. Pre-spend gate. Search generation is the
+	// least-critical AI path (no real-time UX), so on cap-fire we return
+	// a typed error and the caller falls back to the static preset list.
+	budget := aibudget.Global()
+	if budget != nil {
+		if allowed, _ := budget.Allow(ctx, "generator", aibudget.EstimatedCostPerCallUSD); !allowed {
+			return nil, fmt.Errorf("global ai budget exhausted")
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(g.aiCfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return nil, fmt.Errorf("build ai request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+g.aiCfg.APIKey)
@@ -164,12 +178,18 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 	resp, err := g.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		g.reportUsage("generator", 0, 0, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("call ai provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		errMsg := fmt.Sprintf("ai provider returned status %d", resp.StatusCode)
 		g.reportUsage("generator", 0, 0, latencyMs, false, errMsg)
 		return nil, fmt.Errorf("%s", errMsg)
@@ -177,11 +197,19 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 
 	var completion chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		g.reportUsage("generator", 0, 0, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("decode ai response: %w", err)
 	}
 
 	g.reportUsage("generator", completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	if budget != nil {
+		actualCostUSD := float64(completion.Usage.PromptTokens)*0.25/1_000_000 +
+			float64(completion.Usage.CompletionTokens)*2.00/1_000_000
+		budget.Reconcile(actualCostUSD)
+	}
 
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("ai response contained no choices")

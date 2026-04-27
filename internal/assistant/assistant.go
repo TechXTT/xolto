@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/format"
@@ -22,6 +24,35 @@ import (
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
 )
+
+// ErrAIQuotaExhausted is returned by assistant LLM paths when the W19-23
+// global $3/24h AI-spend cap fires before the call could be made. The
+// /assistant/converse handler translates this into HTTP 503 with a
+// Retry-After header so callers can re-try after the rolling window
+// frees up.
+//
+// QuotaExhaustedError carries the retry-after duration so the API layer
+// can render it accurately.
+var ErrAIQuotaExhausted = errors.New("assistant: ai quota exhausted")
+
+// QuotaExhaustedError is the typed error returned by assistant LLM paths
+// when the global AI-spend cap fires. RetryAfter is the duration until
+// the rolling 24h window's oldest entry rolls off.
+type QuotaExhaustedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *QuotaExhaustedError) Error() string {
+	return fmt.Sprintf("assistant: ai quota exhausted; retry after %s", e.RetryAfter)
+}
+
+func (e *QuotaExhaustedError) Unwrap() error { return ErrAIQuotaExhausted }
+
+// IsAIQuotaExhausted returns true when err (or any wrapped error) is the
+// global cap-fire signal. Used by the API layer to render 503.
+func IsAIQuotaExhausted(err error) bool {
+	return errors.Is(err, ErrAIQuotaExhausted)
+}
 
 // pricePhrasePattern strips natural-language budget qualifiers from search
 // queries. Budget belongs in BudgetMax; leaving phrases like "under 500" in the
@@ -1567,9 +1598,20 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 			},
 		},
 	}
+	// W19-23 global AI-spend cap. Pre-spend gate.
+	budget := aibudget.Global()
+	if budget != nil {
+		if allowed, retry := budget.Allow(ctx, "assistant.brief_parser", aibudget.EstimatedCostPerCallUSD); !allowed {
+			return nil, &QuotaExhaustedError{RetryAfter: retry}
+		}
+	}
+
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.cfg.AI.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AI.APIKey)
@@ -1579,11 +1621,17 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, errMsg)
@@ -1601,10 +1649,18 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		a.reportUsage(userID, 0, "brief_parser", a.modelBrief, 0, 0, latencyMs, false, err.Error())
 		return nil, err
 	}
 	a.reportUsage(userID, 0, "brief_parser", a.modelBrief, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	if budget != nil {
+		actualCostUSD := float64(completion.Usage.PromptTokens)*0.25/1_000_000 +
+			float64(completion.Usage.CompletionTokens)*2.00/1_000_000
+		budget.Reconcile(actualCostUSD)
+	}
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("no ai choices")
 	}
@@ -1739,9 +1795,23 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 	if model == "" {
 		model = a.cfg.AI.Model
 	}
+
+	// W19-23 global AI-spend cap. Pre-spend gate: if the projection would
+	// breach the founder-locked $3/24h ceiling, abort with the typed
+	// quota-exhausted error so the API layer can render 503 + Retry-After.
+	budget := aibudget.Global()
+	if budget != nil {
+		if allowed, retry := budget.Allow(ctx, "assistant."+callType, aibudget.EstimatedCostPerCallUSD); !allowed {
+			return "", &QuotaExhaustedError{RetryAfter: retry}
+		}
+	}
+
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.cfg.AI.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AI.APIKey)
@@ -1750,11 +1820,17 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 	resp, err := a.client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, errMsg)
@@ -1772,10 +1848,22 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		a.reportUsage(userID, missionID, callType, model, 0, 0, latencyMs, false, err.Error())
 		return "", err
 	}
 	a.reportUsage(userID, missionID, callType, model, completion.Usage.PromptTokens, completion.Usage.CompletionTokens, latencyMs, true, "")
+	// Reconcile against the real spend at gpt-5-mini list price. The
+	// constants live in scorer.go; reconcile takes the actual USD so we
+	// inline-compute the same formula here to avoid an scorer ↔ assistant
+	// import cycle. Pricing as-of 2026-04-25.
+	if budget != nil {
+		actualCostUSD := float64(completion.Usage.PromptTokens)*0.25/1_000_000 +
+			float64(completion.Usage.CompletionTokens)*2.00/1_000_000
+		budget.Reconcile(actualCostUSD)
+	}
 	if len(completion.Choices) == 0 {
 		return "", fmt.Errorf("no ai choices")
 	}

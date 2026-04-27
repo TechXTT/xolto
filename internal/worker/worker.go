@@ -387,6 +387,11 @@ func (w *UserWorker) RunTask(ctx context.Context, task candidate, queueWait time
 				Confidence:    scored.Confidence,
 				Contributions: scored.ScoreContributions,
 				ScorerVersion: store.ScorerVersionV1,
+				// W19-23: VAL-1 contamination guard. Empty string is
+				// back-compat with rows that took an early-exit path
+				// (no actionable price, accessory pre-filter, AI-
+				// irrelevant) — the store backfills empty as "ai".
+				AIPath: scored.AIPath,
 			}); writeErr != nil {
 				slog.Warn("calibration: failed to write scoring event", "item", listing.ItemID, "error", writeErr)
 			}

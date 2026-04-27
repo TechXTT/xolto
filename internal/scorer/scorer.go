@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/format"
 	"github.com/TechXTT/xolto/internal/modelkey"
 	"github.com/TechXTT/xolto/internal/models"
@@ -18,6 +19,37 @@ import (
 )
 
 const minOfferCents = 1000 // EUR10 minimum offer
+
+// gpt-5-mini list pricing, as published by OpenAI (verified 2026-04-25).
+// Inputs are tokens; outputs are USD per single token at list price.
+//
+//	input  $0.25 / 1M tokens = $0.00000025 / token
+//	output $2.00 / 1M tokens = $0.00000200 / token
+//
+// These constants are consumed by computeAICostUSD below to derive a per-call
+// USD cost from the OpenAI Usage block returned by the chat-completions API.
+// They feed the W19-3 anonymous-analyze daily-spend circuit-breaker
+// reconciliation: the conservative $0.01/call pre-spend estimate is replaced
+// post-call with this real cost. Update both the constants and the
+// gpt5MiniPricingAsOf date if OpenAI changes list prices.
+const (
+	gpt5MiniInputCostPerToken  = 0.25 / 1_000_000
+	gpt5MiniOutputCostPerToken = 2.00 / 1_000_000
+	gpt5MiniPricingAsOf        = "2026-04-25"
+)
+
+// computeAICostUSD turns an analysis's prompt/completion token counts into a
+// USD cost at the gpt-5-mini list price. Returns 0 when no LLM call was made
+// (heuristic / cache / rate-limited / pre-filter paths report Source != "ai"
+// and zero tokens). The value flows into ScoredListing.CostUSD for downstream
+// daily-spend reconciliation by the anonymous-analyze breaker.
+func computeAICostUSD(analysis models.DealAnalysis) float64 {
+	if analysis.PromptTokens <= 0 && analysis.CompletionTokens <= 0 {
+		return 0
+	}
+	return float64(analysis.PromptTokens)*gpt5MiniInputCostPerToken +
+		float64(analysis.CompletionTokens)*gpt5MiniOutputCostPerToken
+}
 
 // offPlatformPhoneRe matches Bulgarian mobile phone patterns used in scam listings.
 // Compiled once at package level (XOL-80).
@@ -220,13 +252,53 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 				}
 			}
 			if !cacheHit {
-				analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
-				if err != nil {
+				// W19-23 global AI-spend cap. Pre-spend gate: project the
+				// conservative $0.01/call estimate into the rolling 24h
+				// total; if it would breach the founder-locked $3 ceiling
+				// we fall back to heuristic-only and tag the analysis so
+				// VAL-1 calibration can filter the contaminated row out.
+				// Reconcile post-call with the real W19-3 cost so the
+				// rolling sum stays honest.
+				budget := aibudget.Global()
+				budgetGated := false
+				if budget != nil {
+					if allowed, _ := budget.Allow(ctx, "scorer", aibudget.EstimatedCostPerCallUSD); !allowed {
+						budgetGated = true
+					}
+				}
+				if budgetGated {
 					analysis = heuristic
-					slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
-				} else if analysis.Source == "ai" && cacheKey != "" {
-					if cacheErr := sc.store.SetAIScoreCache(cacheKey, float64(analysis.FairPrice), encodeAIScoreCachePayload(analysis), promptVersion); cacheErr != nil {
-						slog.Warn("failed to persist ai score cache", "item", listing.ItemID, "error", cacheErr)
+					analysis.AIPath = models.AIPathHeuristicFallback
+					slog.Warn("global AI budget exhausted; scorer falling back to heuristic", "item", listing.ItemID)
+				} else {
+					analysis, err = sc.reasoner.Analyze(ctx, listing, search, marketAvg, comparables)
+					if err != nil {
+						if budget != nil {
+							budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+						}
+						analysis = heuristic
+						slog.Warn("ai reasoning failed, using heuristic fallback", "item", listing.ItemID, "error", err)
+					} else if analysis.Source == "ai" && cacheKey != "" {
+						if cacheErr := sc.store.SetAIScoreCache(cacheKey, float64(analysis.FairPrice), encodeAIScoreCachePayload(analysis), promptVersion); cacheErr != nil {
+							slog.Warn("failed to persist ai score cache", "item", listing.ItemID, "error", cacheErr)
+						}
+					}
+					// Stamp the per-call USD cost from the LLM response's usage
+					// block. Heuristic / rate-limited fallbacks (Source != "ai")
+					// have zero tokens and therefore zero cost, which is correct.
+					analysis.CostUSD = computeAICostUSD(analysis)
+					if budget != nil {
+						// Reconcile against the real spend (delta-charge or
+						// refund). For non-"ai" sources (rate-limited /
+						// heuristic-confident) CostUSD is 0 → fully refunds
+						// the pre-spend estimate, which is correct because no
+						// LLM call was actually paid for.
+						budget.Reconcile(analysis.CostUSD)
+					}
+					// Successful LLM path: tag the analysis as a real "ai"
+					// row so VAL-1 calibration aggregates it normally.
+					if analysis.Source == "ai" {
+						analysis.AIPath = models.AIPathAI
 					}
 				}
 			}
@@ -324,6 +396,11 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 			ComparablesCount:         compCount,
 			ComparablesMedianAgeDays: compMedian,
 			MustHaves:                ScoreMustHaves(listing, search.MustHaves),
+			// AI did make a paid call to reach an "irrelevant" verdict, so
+			// the cost is non-zero on the "ai" branch. "ai-cache" has zero
+			// tokens (cache hits skip the LLM entirely) and therefore zero
+			// cost, which is what we want.
+			CostUSD: analysis.CostUSD,
 		}
 	}
 
@@ -400,6 +477,8 @@ func (sc *Scorer) Score(ctx context.Context, listing models.Listing, search mode
 		ComparablesMedianAgeDays: compMedian,
 		MustHaves:                mustHaveMatches,
 		ScoreContributions:       scoreContribs,
+		CostUSD:                  analysis.CostUSD,
+		AIPath:                   analysis.AIPath,
 	}
 }
 

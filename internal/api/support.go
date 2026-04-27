@@ -523,12 +523,14 @@ func (s *Server) marketplaceAllowedForTier(marketplaceID string, limits billing.
 }
 
 func (s *Server) subscriptionTier(priceID string) (string, bool) {
+	// Internal slugs are stable: "pro" = mid tier (display "Buyer"),
+	// "power" = top tier (display "Pro"). See internal/billing/limits.go.
 	switch strings.TrimSpace(priceID) {
 	case "":
 		return "", false
-	case strings.TrimSpace(s.cfg.StripeProPriceID):
+	case strings.TrimSpace(s.cfg.StripeBuyerPriceID):
 		return "pro", true
-	case strings.TrimSpace(s.cfg.StripePowerPriceID):
+	case strings.TrimSpace(s.cfg.StripeProPriceID):
 		return "power", true
 	default:
 		return "", false

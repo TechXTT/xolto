@@ -128,6 +128,26 @@ type ScoredListing struct {
 	// ScoreContributions is internal-only. See comment above.
 	// Never serialise into public /matches response. VAL-2.
 	ScoreContributions map[string]float64
+	// CostUSD is the per-call USD spend for the AI invocation that produced
+	// this ScoredListing. Populated only when an LLM call was actually made
+	// (analysis.Source == "ai"); 0 for cache hits, heuristic-only paths,
+	// rate-limited fallbacks, accessory pre-filter, no-actionable-price, and
+	// AI-irrelevant early returns.
+	//
+	// This field is internal-only and is consumed by the anonymous-analyze
+	// daily-spend circuit-breaker (W19-3) to reconcile the conservative
+	// pre-spend estimate against the real spend. It MUST NOT be serialised
+	// into any public API response shape.
+	CostUSD float64
+	// AIPath labels the originating path for VAL-1 calibration filtering
+	// (W19-23). Set to "heuristic_fallback" when the global $3/24h
+	// AI-spend cap forced the scorer onto the heuristic-only path; "ai"
+	// otherwise. Empty string on early-exit paths (no actionable price,
+	// accessory pre-filter, AI-irrelevant) which already have other
+	// filtering signals (Score == 1.0). The worker writes this field into
+	// scoring_events so cap-fire-contaminated rows can be excluded by
+	// default in GetCalibrationSummary.
+	AIPath string
 }
 
 type PricePoint struct {
@@ -146,6 +166,19 @@ type ComparableDeal struct {
 	MatchReason string
 }
 
+// AIPath labels the path that produced a DealAnalysis / ScoringEvent for
+// VAL-1 calibration filtering. The W19-23 global $3/24h AI-spend cap may
+// force the scorer to take the heuristic-only path when LLM enrichment
+// would breach the budget; rows tagged AIPathHeuristicFallback are
+// excluded by GetCalibrationSummary by default so cap-fire incidents do
+// not silently shift the verdict-correctness measurements.
+//
+// AIPathAI is the normal "real LLM call" tag.
+const (
+	AIPathAI                 = "ai"
+	AIPathHeuristicFallback  = "heuristic_fallback"
+)
+
 type DealAnalysis struct {
 	FairPrice       int
 	Confidence      float64
@@ -154,6 +187,22 @@ type DealAnalysis struct {
 	ComparableDeals []ComparableDeal
 	SearchAdvice    string
 	Relevant        bool // false means the AI judged this listing unrelated to the search
+	// PromptTokens / CompletionTokens are the OpenAI usage counts for the LLM
+	// call that produced this analysis. Both are 0 unless Source == "ai"
+	// (heuristic / cache / rate-limited paths skip the LLM call entirely).
+	// Internal-only — do not serialise into public response shapes.
+	PromptTokens     int
+	CompletionTokens int
+	// CostUSD is the per-call USD spend derived from PromptTokens and
+	// CompletionTokens at the gpt-5-mini list price (see scorer.go for the
+	// pricing constants and as-of date). 0 unless Source == "ai".
+	CostUSD float64
+	// AIPath labels the originating path for VAL-1 calibration filtering.
+	// "ai" for real LLM calls, "heuristic_fallback" when the W19-23 global
+	// AI-spend cap forced the heuristic path. Default empty string is
+	// treated as "ai" by downstream code (back-compat with existing rows).
+	// See AIPath* constants above.
+	AIPath string
 }
 
 type RecommendationLabel string

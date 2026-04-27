@@ -61,6 +61,17 @@ type Server struct {
 	// replyClassifier is the LLM classifier for POST /reply-copilot (XOL-73).
 	// When nil the handler returns 503 "classifier not configured".
 	replyClassifier replycopilot.Classifier
+	// W18-2: anonymous /matches/analyze guards. Lazily initialised on first
+	// request to /public/matches/analyze via initAnonymousAnalyze.
+	anonymousAnalyzeOnce         sync.Once
+	anonymousAnalyzeRateLimiter  *anonymousAnalyzeRateLimiter
+	anonymousAnalyzeCache        *anonymousAnalyzeCache
+	anonymousAnalyzeBudget       *anonymousAnalyzeBudget
+	// Test-only overrides. nil in production. Set via SetAnonymousAnalyzeHooks.
+	// The authenticated /matches/analyze path is intentionally untouched —
+	// these hooks are read only by handleAnonymousAnalyze.
+	anonymousFetchOverride func(context.Context, string) (models.Listing, error)
+	anonymousScoreOverride func(context.Context, models.Listing, models.SearchSpec) models.ScoredListing
 }
 
 type googleTokenResponse struct {
@@ -120,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 		s.registerOutreachRoutes(s.mux)
 		s.registerSupportRoutes(s.mux)
 		s.registerInternalRoutes(s.mux)
+		s.registerAIBudgetRoutes(s.mux)
 	})
 
 	handler := http.Handler(s.mux)

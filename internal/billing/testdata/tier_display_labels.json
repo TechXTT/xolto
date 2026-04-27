@@ -1,0 +1,6 @@
+{
+  "_canonical_source": "markt/internal/billing/limits.go::TierDisplayName",
+  "free": "Free",
+  "pro": "Buyer",
+  "power": "Pro"
+}
