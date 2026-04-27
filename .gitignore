@@ -38,3 +38,24 @@ logs/
 # IDEs
 .idea/
 .vscode/
+
+# Claude Code local state (agents, worktrees, local settings)
+.claude/agents/
+.claude/worktrees/
+.claude/settings.local.json
+
+# Test / QA artifacts (screenshots, Playwright MCP runtime, data dumps)
+*.png
+screenshots/
+.playwright-mcp/
+matches-*.yml
+
+# Build artifacts (bare Go binary named `server`, SQL dumps, archive dirs)
+/server
+db/
+**/*.sql.dump
+
+# Stale scratch docs
+BLOCKED-*.md
+plan.md
+xolto-hardening.md
