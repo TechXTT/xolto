@@ -124,4 +124,5 @@ type Store interface {
 	OutreachStore
 	SupportEventStore
 	CalibrationStore
+	AIBudgetOverrideStore
 }

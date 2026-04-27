@@ -8,8 +8,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/draftnote"
 	"github.com/TechXTT/xolto/internal/format"
 	"github.com/TechXTT/xolto/internal/models"
@@ -25,10 +27,14 @@ type Action string
 type Confidence string
 
 const (
-	InterpNegotiable Interpretation = "negotiable"
-	InterpFirm       Interpretation = "firm"
-	InterpLowSignal  Interpretation = "low_signal"
-	InterpRisky      Interpretation = "risky"
+	InterpNegotiable      Interpretation = "negotiable"
+	InterpFirm            Interpretation = "firm"
+	InterpLowSignal       Interpretation = "low_signal"
+	InterpRisky           Interpretation = "risky"
+	// InterpAIQuotaExhausted signals the W19-23 global $3/24h cap fired
+	// before the LLM call could be made. The user-facing draft says so
+	// explicitly so the buyer understands why the assistant is silent.
+	InterpAIQuotaExhausted Interpretation = "ai_quota_exhausted"
 )
 
 const (
@@ -110,12 +116,47 @@ func Interpret(ctx context.Context, rc ReplyContext, listing models.Listing, mis
 	}
 
 	// Step 2: LLM classify. On error, use a safe fallback.
+	//
+	// W19-23: gate on the global $3/24h AI-spend cap before the call. When
+	// the cap is fired we return the explicit ai_quota_exhausted result
+	// (option (a) in the brief) rather than silently degrading to
+	// low_signal — an explicit message is clearer to the user than an
+	// "ask seller" prompt with no context.
 	var classified ClassifyResult
+	if budget := aibudget.Global(); budget != nil && classifier != nil {
+		if allowed, retry := budget.Allow(ctx, "replycopilot", aibudget.EstimatedCostPerCallUSD); !allowed {
+			return Result{
+				Interpretation:    InterpAIQuotaExhausted,
+				RecommendedAction: ActionAskSeller,
+				DraftNextMessage:  buildAIQuotaExhaustedDraft(retry, lang),
+				Confidence:        ConfLow,
+				Signals:           []string{"ai_quota_exhausted"},
+				Lang:              lang,
+			}, nil
+		}
+	}
 	if classifier != nil {
 		var err error
 		classified, err = classifier.Classify(ctx, buildPrompt(rc, listing, mission))
 		if err != nil {
+			// LLM failed after pre-spend; rollback the estimate so the
+			// daily ledger doesn't permanently hold budget for a call
+			// that didn't happen.
+			if budget := aibudget.Global(); budget != nil {
+				budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+			}
 			classified = ClassifyResult{Interpretation: InterpLowSignal, Confidence: ConfLow}
+		} else {
+			// Reconcile post-call. The replycopilot classifier does not
+			// return token usage today (XOL-73 used a minimal struct),
+			// so we report 0 actual cost and the pre-spend estimate is
+			// fully refunded. This is conservative against the daily
+			// ledger but keeps the breaker from holding budget for a
+			// call we can't observe the cost of. If/when the classifier
+			// surfaces token usage, plumb the real cost here.
+			if budget := aibudget.Global(); budget != nil {
+				budget.Reconcile(0)
+			}
 		}
 	} else {
 		classified = ClassifyResult{Interpretation: InterpLowSignal, Confidence: ConfLow}
@@ -255,6 +296,23 @@ func buildDraft(action Action, listing models.Listing, offerPrice int, lang draf
 		}
 	default:
 		return "Thanks! Could you clarify a bit more?"
+	}
+}
+
+// buildAIQuotaExhaustedDraft renders a localised user-facing message for
+// the ai_quota_exhausted result. retry is the duration until the rolling
+// 24h window's oldest entry rolls off; we render it as a wall-clock HH:MM
+// of the daily reset rather than a vague "later" hint so the buyer can
+// retry intentionally.
+func buildAIQuotaExhaustedDraft(retry time.Duration, lang draftnote.Lang) string {
+	resetAt := time.Now().Add(retry).Format("15:04")
+	switch lang {
+	case draftnote.LangBG:
+		return "AI квотата е изчерпана за днес. Дневното нулиране е в " + resetAt + ". Моля, опитайте отново след това."
+	case draftnote.LangNL:
+		return "AI-quotum uitgeput. Dagelijkse reset om " + resetAt + ". Probeer het daarna opnieuw."
+	default:
+		return "AI quota exhausted, daily reset at " + resetAt + ". Please try again after that."
 	}
 }
 

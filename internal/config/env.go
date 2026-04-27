@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -20,8 +21,14 @@ type ServerConfig struct {
 	GoogleRedirectURL   string
 	StripeSecret        string
 	StripeWebhookSecret string
-	StripeProPriceID    string
-	StripePowerPriceID  string
+	// Stripe price IDs after the W18 tier rename (2026-04-25):
+	//   StripeBuyerPriceID = mid tier (display "Buyer", internal slug "pro").
+	//   StripeProPriceID   = top tier (display "Pro",   internal slug "power").
+	// Resolved from env via resolveTierStripePriceIDs which handles the legacy
+	// STRIPE_PRO_PRICE_ID / STRIPE_POWER_PRICE_ID names with a migration-state
+	// detection so the env-var meaning shift can't misroute checkouts.
+	StripeBuyerPriceID string
+	StripeProPriceID   string
 	AppBaseURL          string
 	AdminBaseURL        string
 	CORSAllowedOrigins  []string
@@ -91,8 +98,11 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		GoogleRedirectURL:   os.Getenv("GOOGLE_REDIRECT_URL"),
 		StripeSecret:        os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripeProPriceID:    os.Getenv("STRIPE_PRO_PRICE_ID"),
-		StripePowerPriceID:  os.Getenv("STRIPE_POWER_PRICE_ID"),
+		// W18 (2026-04-25) tier rename: the env var STRIPE_PRO_PRICE_ID changed
+		// meaning (was mid-tier, now top-tier). Use resolveTierStripePriceIDs to
+		// disambiguate legacy vs migrated state safely; see helper for details.
+		StripeBuyerPriceID:  "", // overwritten by resolveTierStripePriceIDs below
+		StripeProPriceID:    "", // overwritten by resolveTierStripePriceIDs below
 		AppBaseURL:          getenvDefault("APP_BASE_URL", "http://localhost:3000"),
 		AdminBaseURL:        getenvDefault("ADMIN_BASE_URL", "http://localhost:3002"),
 		AIAPIKey:            os.Getenv("AI_API_KEY"),
@@ -131,6 +141,8 @@ func LoadServerConfigFromEnv() (ServerConfig, error) {
 		AIModelClassifier:        getenvDefault("AI_MODEL_CLASSIFIER", "gpt-5-nano"),
 		SupportClassifierWorkers: parseIntDefault(os.Getenv("SUPPORT_CLASSIFIER_WORKERS"), 2),
 	}
+	// W18 tier rename Stripe price ID resolution.
+	cfg.StripeBuyerPriceID, cfg.StripeProPriceID = resolveTierStripePriceIDs()
 	// Per-call-site AI model overrides (XOL-60 SUP-9). All default to
 	// AIModel so Railway provisioning can happen post-merge independently.
 	cfg.AIModelScorer = getenvDefault("AI_MODEL_SCORER", cfg.AIModel)
@@ -209,6 +221,45 @@ func (c ServerConfig) IsAdminEmail(email string) bool {
 		}
 	}
 	return false
+}
+
+// resolveTierStripePriceIDs returns (buyerPriceID, proPriceID) for the W18
+// (2026-04-25) tier rename. The env-var rename is semantically tricky because
+// the env var STRIPE_PRO_PRICE_ID changed meaning:
+//
+//	old:  STRIPE_PRO_PRICE_ID   = mid-tier price.   STRIPE_POWER_PRICE_ID = top-tier price.
+//	new:  STRIPE_BUYER_PRICE_ID = mid-tier ("Buyer"). STRIPE_PRO_PRICE_ID = top-tier ("Pro").
+//
+// Migration state is detected by the presence of STRIPE_BUYER_PRICE_ID:
+//
+//   - If STRIPE_BUYER_PRICE_ID is set, the operator has migrated env var names.
+//     Read STRIPE_BUYER_PRICE_ID for mid tier and STRIPE_PRO_PRICE_ID for top tier
+//     under the NEW semantics. STRIPE_POWER_PRICE_ID is ignored and (if set)
+//     warned about as a stale legacy value.
+//
+//   - If STRIPE_BUYER_PRICE_ID is unset, fall back to LEGACY semantics:
+//     STRIPE_PRO_PRICE_ID = mid tier (Buyer), STRIPE_POWER_PRICE_ID = top tier (Pro).
+//     Log a [WARN] line directing the operator to rename Railway env vars.
+//
+// This avoids the "STRIPE_PRO_PRICE_ID was the mid tier; now the new code reads
+// it as the top tier" misroute that a naive per-field fallback would cause.
+func resolveTierStripePriceIDs() (buyerPriceID, proPriceID string) {
+	buyerNew := strings.TrimSpace(os.Getenv("STRIPE_BUYER_PRICE_ID"))
+	proLegacy := strings.TrimSpace(os.Getenv("STRIPE_PRO_PRICE_ID"))   // semantics depend on migration state
+	powerLegacy := strings.TrimSpace(os.Getenv("STRIPE_POWER_PRICE_ID"))
+
+	if buyerNew != "" {
+		// Migrated state: use new env-var meanings.
+		if powerLegacy != "" {
+			log.Printf("[WARN] config: STRIPE_POWER_PRICE_ID is set but ignored after the W18 tier rename. Remove it from Railway; the top-tier price ID now lives in STRIPE_PRO_PRICE_ID.")
+		}
+		return buyerNew, proLegacy
+	}
+	// Legacy state: fall back, warn the operator to rename.
+	if proLegacy != "" || powerLegacy != "" {
+		log.Printf("[WARN] config: STRIPE_BUYER_PRICE_ID is unset; falling back to legacy STRIPE_PRO_PRICE_ID (mid tier) and STRIPE_POWER_PRICE_ID (top tier). Rename Railway env vars: STRIPE_PRO_PRICE_ID -> STRIPE_BUYER_PRICE_ID and STRIPE_POWER_PRICE_ID -> STRIPE_PRO_PRICE_ID. New semantic mapping: display \"Buyer\" = mid tier (internal slug \"pro\"); display \"Pro\" = top tier (internal slug \"power\").")
+	}
+	return proLegacy, powerLegacy
 }
 
 // isProductionEnv returns true when the APP_ENV value should enforce all

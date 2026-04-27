@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/TechXTT/xolto/internal/aibudget"
 )
 
 // mustHavePromptVersion is bumped when the system/user prompt changes.
@@ -258,9 +260,22 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 		return nil, fmt.Errorf("musthave evaluator: marshal request: %w", err)
 	}
 
+	// W19-23 global AI-spend cap. Pre-spend gate; on cap-fire return an
+	// error so the scorer's must-have caller falls back to the tokenizer
+	// result and never emits "missed" (same fail-safe path as rate limit).
+	budget := aibudget.Global()
+	if budget != nil {
+		if allowed, _ := budget.Allow(ctx, "reasoner.musthave", aibudget.EstimatedCostPerCallUSD); !allowed {
+			return nil, fmt.Errorf("musthave evaluator: global ai budget exhausted")
+		}
+	}
+
 	endpoint := strings.TrimRight(e.cfg.BaseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return nil, fmt.Errorf("musthave evaluator: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -270,12 +285,18 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 	resp, err := e.httpClient.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		e.reportUsage(userID, missionID, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("musthave evaluator: HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		msg := fmt.Sprintf("musthave evaluator: HTTP %d from LLM", resp.StatusCode)
 		e.reportUsage(userID, missionID, latencyMs, false, msg)
 		return nil, fmt.Errorf("%s", msg)
@@ -283,10 +304,18 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 
 	var completion chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		e.reportUsage(userID, missionID, latencyMs, false, err.Error())
 		return nil, fmt.Errorf("musthave evaluator: decode response: %w", err)
 	}
 	e.reportUsage(userID, missionID, latencyMs, true, "")
+	if budget != nil {
+		actualCostUSD := float64(completion.Usage.PromptTokens)*0.25/1_000_000 +
+			float64(completion.Usage.CompletionTokens)*2.00/1_000_000
+		budget.Reconcile(actualCostUSD)
+	}
 
 	if len(completion.Choices) == 0 {
 		return nil, fmt.Errorf("musthave evaluator: no choices in response")

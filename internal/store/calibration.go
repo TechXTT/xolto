@@ -20,6 +20,12 @@ import (
 )
 
 // ScoringEvent mirrors one row in the scoring_events table.
+//
+// AIPath labels the originating path for VAL-1 calibration filtering
+// (W19-23). "ai" is the historical default and the value used for real
+// LLM calls. "heuristic_fallback" is set by the scorer when the global
+// $3/24h AI-spend cap forced the heuristic-only path. The default value
+// from the migration is "ai" so legacy rows aggregate normally.
 type ScoringEvent struct {
 	ID            int64
 	ListingID     string
@@ -31,6 +37,10 @@ type ScoringEvent struct {
 	Contributions map[string]float64
 	ScorerVersion string
 	CreatedAt     time.Time
+	// AIPath is one of "ai" | "heuristic_fallback". Defaults to "ai" when
+	// empty (back-compat). See models.AIPath* constants for the canonical
+	// values.
+	AIPath string
 }
 
 // ScorerVersionV1 is the version tag for the current scoring formula.
@@ -58,6 +68,15 @@ type CalibrationQuery struct {
 	// Category is reserved for future use; not yet stored on scoring_events.
 	// Accepted by the handler but currently ignored in queries.
 	Category string
+	// IncludeHeuristicFallback controls whether scoring_events rows tagged
+	// ai_path = "heuristic_fallback" are included in the aggregation. The
+	// default (false) excludes those rows so VAL-0 verdict-correctness
+	// metrics (verdict-to-action >= 50%, verdict-changed >= 30%) are not
+	// silently shifted by W19-23 cap-fire incidents. Ops debugging
+	// (e.g. measuring how much heuristic data was emitted during a
+	// cap-fire) can opt back in via include_heuristic_fallback=true on
+	// the API.
+	IncludeHeuristicFallback bool
 }
 
 // CalibrationSummary is the aggregated response body for GET /internal/calibration/summary.
@@ -88,11 +107,16 @@ func (s *PostgresStore) WriteScoringEvent(ctx context.Context, e ScoringEvent) e
 		missionID = e.MissionID
 	}
 
+	aiPath := e.AIPath
+	if aiPath == "" {
+		aiPath = "ai" // back-compat with rows written before W19-23
+	}
+
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scoring_events
 			(listing_id, marketplace, mission_id, score, verdict, confidence,
-			 contributions, scorer_version, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+			 contributions, scorer_version, ai_path, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
 		e.ListingID,
 		e.Marketplace,
 		missionID,
@@ -101,6 +125,7 @@ func (s *PostgresStore) WriteScoringEvent(ctx context.Context, e ScoringEvent) e
 		e.Confidence,
 		raw,
 		e.ScorerVersion,
+		aiPath,
 	)
 	return err
 }
@@ -148,6 +173,13 @@ func (s *PostgresStore) GetCalibrationSummary(ctx context.Context, q Calibration
 	if q.Marketplace != "" {
 		args = append(args, q.Marketplace)
 		where += fmt.Sprintf(" AND se.marketplace = $%d", len(args))
+	}
+	// W19-23 VAL-1 contamination guard: by default exclude scoring_events
+	// rows produced by the global AI-spend cap heuristic fallback, so
+	// VAL-0 verdict-correctness metrics are not silently shifted by
+	// cap-fire incidents. Ops debugging can opt back in.
+	if !q.IncludeHeuristicFallback {
+		where += " AND se.ai_path = 'ai'"
 	}
 
 	// Query: fetch scoring_events left-joined to outreach_threads for outcome.
@@ -241,11 +273,16 @@ func (s *SQLiteStore) WriteScoringEvent(ctx context.Context, e ScoringEvent) err
 		missionID = e.MissionID
 	}
 
+	aiPath := e.AIPath
+	if aiPath == "" {
+		aiPath = "ai"
+	}
+
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scoring_events
 			(listing_id, marketplace, mission_id, score, verdict, confidence,
-			 contributions, scorer_version, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+			 contributions, scorer_version, ai_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
 		e.ListingID,
 		e.Marketplace,
 		missionID,
@@ -254,6 +291,7 @@ func (s *SQLiteStore) WriteScoringEvent(ctx context.Context, e ScoringEvent) err
 		e.Confidence,
 		raw,
 		e.ScorerVersion,
+		aiPath,
 	)
 	return err
 }
@@ -277,6 +315,10 @@ func (s *SQLiteStore) GetCalibrationSummary(ctx context.Context, q CalibrationQu
 	if q.Marketplace != "" {
 		args = append(args, q.Marketplace)
 		where += " AND se.marketplace = ?"
+	}
+	// W19-23 VAL-1 contamination guard. See PostgresStore docs.
+	if !q.IncludeHeuristicFallback {
+		where += " AND se.ai_path = 'ai'"
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -365,11 +407,28 @@ func migratePostgresCalibration(ctx context.Context, db *sql.DB) {
 			confidence       DOUBLE PRECISION NOT NULL DEFAULT 0,
 			contributions    JSONB            NOT NULL DEFAULT '{}'::jsonb,
 			scorer_version   TEXT             NOT NULL DEFAULT 'v1',
+			ai_path          TEXT             NOT NULL DEFAULT 'ai',
 			created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 		)`)
+	// Idempotent column add for existing deployments — the dedicated
+	// migration file (000015) runs once per env; this ALTER is a safety
+	// net for embedded schema-bootstraps that don't go through the
+	// migrations directory.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE scoring_events ADD COLUMN IF NOT EXISTS ai_path TEXT NOT NULL DEFAULT 'ai'`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_created_at ON scoring_events (created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_marketplace ON scoring_events (marketplace, created_at DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_listing_id ON scoring_events (listing_id)`)
+
+	// W19-23: ai_budget_overrides audit log.
+	_, _ = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS ai_budget_overrides (
+			id              BIGSERIAL PRIMARY KEY,
+			set_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			new_cap_usd     DOUBLE PRECISION NOT NULL,
+			reason          TEXT        NOT NULL DEFAULT '',
+			set_by_user_id  TEXT        NOT NULL DEFAULT ''
+		)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC)`)
 }
 
 // migrateCalibrationSQLite adds the scoring_events table to the SQLite schema.
@@ -385,11 +444,59 @@ func migrateCalibrationSQLite(db *sql.DB) {
 			confidence      REAL    NOT NULL DEFAULT 0,
 			contributions   TEXT    NOT NULL DEFAULT '{}',
 			scorer_version  TEXT    NOT NULL DEFAULT 'v1',
+			ai_path         TEXT    NOT NULL DEFAULT 'ai',
 			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`)
+	// SQLite doesn't support IF NOT EXISTS on ADD COLUMN, but the column
+	// add is idempotent at the table-create level above; existing dev
+	// databases need a manual ALTER (or recreate). The schemaHasColumn
+	// helper protects against duplicate-column errors.
+	if !sqliteHasColumn(db, "scoring_events", "ai_path") {
+		_, _ = db.Exec(`ALTER TABLE scoring_events ADD COLUMN ai_path TEXT NOT NULL DEFAULT 'ai'`)
+	}
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scoring_events_created_at ON scoring_events (created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scoring_events_marketplace ON scoring_events (marketplace, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scoring_events_listing_id ON scoring_events (listing_id)`)
+
+	// W19-23: ai_budget_overrides audit log.
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS ai_budget_overrides (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			set_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			new_cap_usd     REAL NOT NULL,
+			reason          TEXT NOT NULL DEFAULT '',
+			set_by_user_id  TEXT NOT NULL DEFAULT ''
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC)`)
+}
+
+// sqliteHasColumn returns true when the column exists on the table.
+// SQLite ALTER TABLE ADD COLUMN does NOT support IF NOT EXISTS, so we must
+// query the schema first to make schema bootstrapping idempotent on dev
+// databases that already had the table created without ai_path.
+func sqliteHasColumn(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/api"
 	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/config"
@@ -55,6 +56,18 @@ func main() {
 		logger.Error("failed to load server config", "op", "server.config.load", "error", err)
 		os.Exit(1)
 	}
+
+	// W19-23 Phase 1: install the global AI-spend tracker. Founder-locked
+	// $3/24h cap (Decision Log 2026-04-27). Every AI_API_KEY-routed call
+	// site (scorer, reasoner, replycopilot, assistant, generator, support
+	// classifier, must-have evaluator) reads aibudget.Global() for the
+	// pre-spend gate.
+	aibudget.SetGlobal(aibudget.New())
+	logger.Info("ai budget tracker initialised",
+		"op", "aibudget.init",
+		"cap_usd", aibudget.DefaultCapUSD,
+		"window", aibudget.Window.String(),
+	)
 	dbPoolCfg := store.NormalizeDBPoolConfig(store.DBPoolConfig{
 		MaxOpenConns:    cfg.DBMaxOpenConns,
 		MaxIdleConns:    cfg.DBMaxIdleConns,

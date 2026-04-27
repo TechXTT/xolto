@@ -111,8 +111,44 @@ All Stripe vars are optional. When unset the server runs in free-tier-only mode.
 |---|---|
 | `STRIPE_SECRET_KEY` | Stripe secret key (`sk_live_...` or `sk_test_...`) |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (`whsec_...`) |
-| `STRIPE_PRO_PRICE_ID` | Price ID for the Pro plan (`price_...`) |
-| `STRIPE_POWER_PRICE_ID` | Price ID for the Power plan (`price_...`) |
+| `STRIPE_BUYER_PRICE_ID` | Price ID for the **Buyer** plan (mid tier; `price_...`). Backward-compat fallback: `STRIPE_PRO_PRICE_ID` (deprecated). |
+| `STRIPE_PRO_PRICE_ID` | Price ID for the **Pro** plan (top tier; `price_...`). Backward-compat fallback: `STRIPE_POWER_PRICE_ID` (deprecated). |
+
+**W18 tier rename (2026-04-25):** The Stripe price-ID env vars were renamed when the user-facing tier names changed. The startup loader falls back to the legacy variable name when the new one is unset and emits a `[WARN]` log line naming the new variable. Update Railway to the new names to silence the warning.
+
+| Legacy (deprecated) | New | Tier role |
+|---|---|---|
+| `STRIPE_PRO_PRICE_ID` | `STRIPE_BUYER_PRICE_ID` | mid tier (display "Buyer", internal slug `pro`) |
+| `STRIPE_POWER_PRICE_ID` | `STRIPE_PRO_PRICE_ID` | top tier (display "Pro", internal slug `power`) |
+
+### Tiers
+
+Authoritative source: [`internal/billing/limits.go`](internal/billing/limits.go) (`LimitsFor` + `TierDisplayName`). `xolto-landing/components/landing/Pricing.tsx` and the xolto-app `/settings` tier display must mirror these. Update all three when changing tiers.
+
+Tier display labels are also enforced by `internal/billing/tier_display_labels_test.go` against the JSON snapshot at `internal/billing/testdata/tier_display_labels.json`. Frontends mirror this snapshot — see W19-11.
+
+Internal slugs (`free`, `pro`, `power`) are kept stable to avoid a DB migration. User-facing display labels were renamed in W18 (2026-04-25):
+
+| Internal slug | Display label | Position |
+|---|---|---|
+| `free` | Free | starter |
+| `pro` | **Buyer** | mid (renamed from "Pro") |
+| `power` | **Pro** | top (renamed from "Power") |
+
+Tier limits (illustrative; consult `LimitsFor` for the source of truth):
+
+| Limit | Free | Buyer (`pro`) | Pro (`power`) |
+|---|---|---|---|
+| `MaxMissions` | 1 | 10 | 0 (unlimited) |
+| `MaxSearches` | 2 | 10 | 50 |
+| `MaxMarketplaces` | 1 | 2 | 5 |
+| `MinCheckIntervalMins` | 30 | 5 | 1 |
+| `MaxConcurrentSearches` | 1 | 2 | 4 |
+| `MaxDispatchPerTick` | 1 | 3 | 8 |
+| `AIEnabled` | false | true | true |
+| `MaxShortlistEntries` | 10 | 100 | 500 |
+
+Reply copilot is drafts-only across all paid tiers (Phase 3A `deep_link_only` is shipped). Auto-messaging is **not** a tier feature; the `AutoMessagingPerHour` field on the `Limits` struct is retained for compatibility but is `0` on every tier.
 
 ### SMTP / Deal Alerts
 
@@ -201,7 +237,7 @@ Error envelope:
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/assistant/converse` | Required | Send a message to the assistant. Returns structured `AssistantReply`. Requires Pro or Power tier. |
+| POST | `/assistant/converse` | Required | Send a message to the assistant. Returns structured `AssistantReply`. Requires Buyer or Pro tier (internal slugs `pro` or `power`). |
 | GET | `/assistant/session` | Required | Retrieve the current assistant session state. |
 
 ### Billing

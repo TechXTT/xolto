@@ -52,9 +52,16 @@ func (s *Server) handleCalibrationSummary(w http.ResponseWriter, r *http.Request
 	// Parsing it here keeps the API contract stable.
 	// category := strings.TrimSpace(r.URL.Query().Get("category"))
 
+	// W19-23 VAL-1: include_heuristic_fallback opts back in to rows
+	// produced by the W19-23 global AI-spend cap heuristic-fallback path.
+	// Default false — VAL-0 verdict-correctness metrics must not be
+	// silently shifted by cap-fire incidents.
+	includeFallback := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_heuristic_fallback")), "true")
+
 	summary, err := s.db.GetCalibrationSummary(r.Context(), store.CalibrationQuery{
-		Window:      window,
-		Marketplace: marketplace,
+		Window:                   window,
+		Marketplace:              marketplace,
+		IncludeHeuristicFallback: includeFallback,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

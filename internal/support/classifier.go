@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/linear"
 	"github.com/TechXTT/xolto/internal/plain"
 	"github.com/TechXTT/xolto/internal/store"
@@ -132,9 +133,22 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 		return "", fmt.Errorf("openai-compat: marshal request: %w", err)
 	}
 
+	// W19-23 global AI-spend cap. Pre-spend gate; on cap-fire the support
+	// classifier worker logs and skips this event (the SUP processEvent
+	// loop already handles classifier errors gracefully).
+	budget := aibudget.Global()
+	if budget != nil {
+		if allowed, _ := budget.Allow(ctx, "support.classifier", aibudget.EstimatedCostPerCallUSD); !allowed {
+			return "", fmt.Errorf("openai-compat: global ai budget exhausted")
+		}
+	}
+
 	endpoint := c.baseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return "", fmt.Errorf("openai-compat: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -142,6 +156,9 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: %w", ErrClassifierLLMTimeout, ctx.Err())
 		}
@@ -151,10 +168,16 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return "", fmt.Errorf("openai-compat: read response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return "", fmt.Errorf("openai-compat: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
@@ -164,9 +187,21 @@ func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (stri
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		if budget != nil {
+			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
+		}
 		return "", fmt.Errorf("openai-compat: unmarshal response: %w", err)
+	}
+	if budget != nil {
+		actualCostUSD := float64(parsed.Usage.PromptTokens)*0.25/1_000_000 +
+			float64(parsed.Usage.CompletionTokens)*2.00/1_000_000
+		budget.Reconcile(actualCostUSD)
 	}
 	if len(parsed.Choices) == 0 {
 		return "", fmt.Errorf("openai-compat: no choices in response")
