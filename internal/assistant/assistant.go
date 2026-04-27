@@ -1320,6 +1320,13 @@ func (a *Assistant) parseBrief(ctx context.Context, userID, prompt string) (*mod
 
 	aiProfile, err := a.parseBriefWithAI(ctx, userID, prompt)
 	if err != nil {
+		// W19-23 cap-fire must propagate so the API layer renders 503 + Retry-After.
+		// Pro/Buyer tiers paid for AI; silent heuristic fallback would be a billing-trust
+		// regression. Other (network/parse/provider) errors still degrade gracefully to
+		// the heuristic mission per the original design.
+		if IsAIQuotaExhausted(err) {
+			return nil, err
+		}
 		return mission, nil
 	}
 	return aiProfile, nil
