@@ -48,11 +48,27 @@ type AIBudgetOverride struct {
 type AIBudgetOverrideStore interface {
 	RecordAIBudgetOverride(ctx context.Context, o AIBudgetOverride) (int64, error)
 	ListRecentAIBudgetOverrides(ctx context.Context, limit int) ([]AIBudgetOverride, error)
+	// AIBudgetTableReady probes the underlying ai_budget_overrides table without
+	// self-heal — returns nil when the table exists and is queryable, an error
+	// otherwise. Used by /healthz and by the startup assertion in main.go to
+	// fail-loud when migrations did not apply (the 2026-04-27 silent-migration
+	// incident class). Distinct from the read methods which self-heal so the
+	// admin tile keeps rendering even mid-incident.
+	AIBudgetTableReady(ctx context.Context) error
 }
 
 // ---------------------------------------------------------------------------
 // PostgresStore implementation
 // ---------------------------------------------------------------------------
+
+// AIBudgetTableReady runs a SELECT against ai_budget_overrides to confirm the
+// table is queryable. Returns nil when ready, the underlying driver error
+// otherwise. No self-heal — this is the canonical "did the migration apply"
+// probe consumed by /healthz and the startup assertion.
+func (s *PostgresStore) AIBudgetTableReady(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `SELECT 1 FROM ai_budget_overrides LIMIT 0`)
+	return err
+}
 
 func (s *PostgresStore) RecordAIBudgetOverride(ctx context.Context, o AIBudgetOverride) (int64, error) {
 	var id int64
@@ -134,6 +150,14 @@ func (s *PostgresStore) ListRecentAIBudgetOverrides(ctx context.Context, limit i
 // ---------------------------------------------------------------------------
 // SQLiteStore implementation (dev / test path)
 // ---------------------------------------------------------------------------
+
+// AIBudgetTableReady runs a SELECT against ai_budget_overrides on the SQLite
+// store. Mirrors the Postgres semantics for parity. Returns nil when ready,
+// the driver error otherwise.
+func (s *SQLiteStore) AIBudgetTableReady(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `SELECT 1 FROM ai_budget_overrides LIMIT 0`)
+	return err
+}
 
 func (s *SQLiteStore) RecordAIBudgetOverride(ctx context.Context, o AIBudgetOverride) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
