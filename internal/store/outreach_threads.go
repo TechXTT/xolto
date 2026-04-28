@@ -540,32 +540,18 @@ func migrateOutreachThreadsSQLite(db *sql.DB) {
 // PostgresStore migration
 // ---------------------------------------------------------------------------
 
-// migrateOutreachThreadsPostgres adds the outreach_threads table to the
-// Postgres schema. Called from migratePostgres().
-func migrateOutreachThreadsPostgres(ctx context.Context, db *sql.DB) {
-	_, _ = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS outreach_threads (
-			id                          BIGSERIAL PRIMARY KEY,
-			user_id                     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			listing_id                  TEXT NOT NULL,
-			marketplace_id              TEXT NOT NULL,
-			mission_id                  BIGINT,
-			draft_text                  TEXT NOT NULL DEFAULT '',
-			draft_shape                 TEXT NOT NULL DEFAULT '',
-			draft_lang                  TEXT NOT NULL DEFAULT '',
-			sent_at                     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			replied_at                  TIMESTAMPTZ,
-			reply_text                  TEXT,
-			state                       TEXT NOT NULL DEFAULT 'awaiting_reply',
-			last_state_transition_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE (user_id, listing_id, marketplace_id)
-		)
-	`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_outreach_threads_user_state ON outreach_threads (user_id, state)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_outreach_threads_mission ON outreach_threads (mission_id)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_outreach_threads_last_transition ON outreach_threads (last_state_transition_at)`)
+// migrateOutreachThreadsPostgres is now a no-op stub.
+// W19-27: outreach_threads is created by migration file 000010 via the
+// golang-migrate runner (runner.go). The inline CREATE TABLE statements have
+// been removed per the Decision Log 2026-04-28 schema source-of-truth call.
+//
+// W19-26: function signature changed to return error for uniform error propagation.
+//
+// SQLite path (migrateOutreachThreadsSQLite) is unchanged — dev/test only.
+func migrateOutreachThreadsPostgres(ctx context.Context, db *sql.DB) error {
+	_ = ctx
+	_ = db
+	return nil
 }
 
 // ---------------------------------------------------------------------------
