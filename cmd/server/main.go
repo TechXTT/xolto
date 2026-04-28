@@ -80,6 +80,32 @@ func main() {
 	}
 	defer db.Close()
 
+	// W19-24 — fail-loud at deploy time when load-bearing W19-23 wiring is
+	// broken. The 2026-04-27 incident surfaced two silent failure modes:
+	// (a) the global aibudget.Tracker singleton was non-nil (it works) but
+	// (b) the inline CREATE TABLE for ai_budget_overrides errored at startup
+	// and was swallowed by `_, _ = db.ExecContext(...)`, leaving production
+	// running with broken audit logging until a synthetic test caught it
+	// hours later. The assertions below convert that class into a deploy-time
+	// crash so Railway's health-gate refuses to promote the bad container
+	// instead of accepting traffic against half-wired state.
+	if aibudget.Global() == nil {
+		logger.Error("aibudget global tracker is nil after init — the W19-23 cap is not wired",
+			"op", "aibudget.assert")
+		os.Exit(1)
+	}
+	if err := db.AIBudgetTableReady(context.Background()); err != nil {
+		logger.Error(
+			"ai_budget_overrides table is not ready — the W19-23 audit-log migration did not apply. "+
+				"Inspect store.migratePostgresCalibration and migrations/000016_ai_budget_overrides.up.sql; "+
+				"production cannot accept traffic without audit-log persistence.",
+			"op", "aibudget.assert.audit_table",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+	logger.Info("ai budget wiring verified", "op", "aibudget.assert.ok")
+
 	appCfg := &config.Config{
 		Marktplaats: config.MarktplaatsConfig{},
 		Scoring:     config.ScoringConfig{MinScore: 7, MarketSampleSize: 20},
