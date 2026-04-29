@@ -13,7 +13,7 @@
 --   * Lifting the cap above $3 should be temporary and rare. The 100x
 --     hard ceiling above prevents accidental order-of-magnitude lifts.
 
-CREATE TABLE ai_budget_overrides (
+CREATE TABLE IF NOT EXISTS ai_budget_overrides (
   id              BIGSERIAL PRIMARY KEY,
   set_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   new_cap_usd     DOUBLE PRECISION NOT NULL,
@@ -21,4 +21,4 @@ CREATE TABLE ai_budget_overrides (
   set_by_user_id  TEXT        NOT NULL DEFAULT ''
 );
 
-CREATE INDEX idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC);

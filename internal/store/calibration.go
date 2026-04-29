@@ -393,44 +393,6 @@ func (s *SQLiteStore) GetCalibrationSummary(ctx context.Context, q CalibrationQu
 // Migration helpers
 // ---------------------------------------------------------------------------
 
-// migratePostgresCalibration adds the scoring_events table to Postgres.
-// Called from migratePostgres().
-func migratePostgresCalibration(ctx context.Context, db *sql.DB) {
-	_, _ = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS scoring_events (
-			id               BIGSERIAL PRIMARY KEY,
-			listing_id       TEXT             NOT NULL,
-			marketplace      TEXT             NOT NULL DEFAULT '',
-			mission_id       BIGINT,
-			score            DOUBLE PRECISION NOT NULL DEFAULT 0,
-			verdict          TEXT             NOT NULL DEFAULT '',
-			confidence       DOUBLE PRECISION NOT NULL DEFAULT 0,
-			contributions    JSONB            NOT NULL DEFAULT '{}'::jsonb,
-			scorer_version   TEXT             NOT NULL DEFAULT 'v1',
-			ai_path          TEXT             NOT NULL DEFAULT 'ai',
-			created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW()
-		)`)
-	// Idempotent column add for existing deployments — the dedicated
-	// migration file (000015) runs once per env; this ALTER is a safety
-	// net for embedded schema-bootstraps that don't go through the
-	// migrations directory.
-	_, _ = db.ExecContext(ctx, `ALTER TABLE scoring_events ADD COLUMN IF NOT EXISTS ai_path TEXT NOT NULL DEFAULT 'ai'`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_created_at ON scoring_events (created_at DESC)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_marketplace ON scoring_events (marketplace, created_at DESC)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_scoring_events_listing_id ON scoring_events (listing_id)`)
-
-	// W19-23: ai_budget_overrides audit log.
-	_, _ = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS ai_budget_overrides (
-			id              BIGSERIAL PRIMARY KEY,
-			set_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			new_cap_usd     DOUBLE PRECISION NOT NULL,
-			reason          TEXT        NOT NULL DEFAULT '',
-			set_by_user_id  TEXT        NOT NULL DEFAULT ''
-		)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides (set_at DESC)`)
-}
-
 // migrateCalibrationSQLite adds the scoring_events table to the SQLite schema.
 func migrateCalibrationSQLite(db *sql.DB) {
 	_, _ = db.Exec(`

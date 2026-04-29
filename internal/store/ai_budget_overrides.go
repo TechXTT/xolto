@@ -20,10 +20,14 @@ import (
 )
 
 // createAIBudgetOverridesTablePostgres is the canonical Postgres DDL for the
-// audit-log table. Kept in sync with migratePostgresCalibration so a self-heal
-// path can recreate the table when an INSERT discovers it is missing — the
-// 2026-04-27 incident showed migratePostgresCalibration's silent error pattern
-// can leave the table absent without any deploy-time signal.
+// audit-log table. Used by the self-heal path in RecordAIBudgetOverride:
+// if an INSERT discovers the table is missing (e.g. a migration runner failure
+// that was non-fatal), this DDL is run inline with explicit error-logging.
+//
+// W19-26/W19-27: migratePostgresCalibration's silent-discard pattern has been
+// removed. The golang-migrate runner (runner.go) now creates this table via
+// migration file 000016 at startup, making this self-heal path a last-resort
+// safety net rather than the primary schema path.
 const createAIBudgetOverridesTablePostgres = `
 CREATE TABLE IF NOT EXISTS ai_budget_overrides (
 	id              BIGSERIAL PRIMARY KEY,
@@ -78,12 +82,11 @@ func (s *PostgresStore) RecordAIBudgetOverride(ctx context.Context, o AIBudgetOv
 		RETURNING id`
 	err := s.db.QueryRowContext(ctx, insertSQL, o.NewCapUSD, o.Reason, o.SetByUserID).Scan(&id)
 	if err != nil && isRelationDoesNotExistErr(err) {
-		// Self-heal: migratePostgresCalibration silently swallows DDL errors
-		// (the 2026-04-27 incident proved this). If the table is missing at
-		// INSERT time, run the canonical CREATE inline once with explicit
-		// error-logging, then retry the INSERT. This unblocks the audit-log
-		// without requiring a redeploy and surfaces the original DDL error
-		// (if any) into the slog stream.
+		// Self-heal: if the table is missing at INSERT time (e.g. a failed
+		// migration at startup that was somehow not fatal), run the canonical
+		// CREATE inline once with explicit error-logging, then retry the INSERT.
+		// W19-27: the runner now creates the table via 000016 at startup; this
+		// path is a last-resort safety net. See createAIBudgetOverridesTablePostgres.
 		slog.Warn("ai_budget_overrides table missing at INSERT time; attempting self-heal CREATE",
 			"original_error", err.Error())
 		if _, cerr := s.db.ExecContext(ctx, createAIBudgetOverridesTablePostgres); cerr != nil {

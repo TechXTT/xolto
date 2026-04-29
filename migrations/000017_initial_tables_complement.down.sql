@@ -1,0 +1,13 @@
+-- Reversible only for net-new tables; existing tables bootstrapped via the old
+-- inline path are not dropped here to avoid data loss on partial reversal.
+-- The additive ALTER TABLE / CREATE INDEX statements in the up migration are
+-- not reversed because IF NOT EXISTS guards make them idempotent.
+--
+-- 000017's up migration only adds tables/columns/indexes that pre-existed via
+-- the old inline path (W19-26+W19-27 audit). Reverting it is a no-op against
+-- live production data; running `migrate down` here is safe but does nothing.
+--
+-- DO NOT add DROP statements for `listings`, `price_history`, `shopping_profiles`,
+-- `shortlist_entries`, `conversation_artifacts`, `assistant_sessions`,
+-- `action_log`, `stripe_events` — those are bootstrap tables with real production
+-- data and dropping them would be catastrophic.

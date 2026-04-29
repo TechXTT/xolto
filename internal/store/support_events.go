@@ -230,36 +230,6 @@ func (s *PostgresStore) AttachLinearIssue(ctx context.Context, plainThreadID, li
 }
 
 // ---------------------------------------------------------------------------
-// Postgres migration — adds support_events to the Postgres schema.
-// Called from migratePostgres().
-// ---------------------------------------------------------------------------
-
-func migratePostgresSupportEvents(ctx context.Context, db *sql.DB) {
-	_, _ = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS support_events (
-			id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			plain_thread_id  TEXT NOT NULL,
-			user_id          TEXT REFERENCES users(id),
-			intake_source    TEXT NOT NULL,
-			dash_context     JSONB,
-			classified_at    TIMESTAMPTZ,
-			category         TEXT,
-			market           TEXT,
-			product_cat      TEXT,
-			severity         TEXT,
-			action_needed    TEXT,
-			linear_issue     TEXT,
-			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE (plain_thread_id)
-		)
-	`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_support_events_user ON support_events (user_id)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_support_events_classified_at ON support_events (classified_at)`)
-	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_support_events_severity ON support_events (severity)`)
-}
-
-// ---------------------------------------------------------------------------
 // SQLite migration — adds support_events to the local dev schema.
 // ---------------------------------------------------------------------------
 
