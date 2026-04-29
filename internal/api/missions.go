@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -285,10 +286,18 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 				if len(queries) > 0 {
 					mission.SearchQueries = queries
 				}
+			} else if genErr != nil {
+				// VAL-3 cohort attribution: log when cap-fire / generator
+				// failure prevents auto-expand so "missions creating with
+				// empty SearchQueries" can be traced. Mission creation
+				// continues — AutoDeployHunts falls through to
+				// TargetQuery-only single search_config.
+				slog.Warn("mission auto-expand skipped",
+					"op", "handleMissions.autoExpand",
+					"user_id", user.ID,
+					"target_query", mission.TargetQuery,
+					"error", genErr.Error())
 			}
-			// On error (cap-fire / generator failure): silently skip;
-			// AutoDeployHunts falls through to TargetQuery-only single
-			// search_config below, no error to user.
 		}
 
 		limits := billing.LimitsFor(user.Tier)
