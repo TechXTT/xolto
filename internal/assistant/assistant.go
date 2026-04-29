@@ -141,20 +141,22 @@ type Assistant struct {
 	client   *http.Client
 	onUsage  UsageCallback
 	// Per-call-site model overrides (XOL-60 SUP-9); fall through to cfg.AI.Model.
-	modelBrief string // AI_MODEL_ASSISTANT_BRIEF (parseBriefWithAI)
-	modelDraft string // AI_MODEL_ASSISTANT_DRAFT (draftWithAI)
-	modelChat  string // AI_MODEL_ASSISTANT_CHAT  (compareWithAI / chatText)
+	modelBrief     string // AI_MODEL_ASSISTANT_BRIEF (parseBriefWithAI)
+	modelDraft     string // AI_MODEL_ASSISTANT_DRAFT (draftWithAI)
+	modelChat      string // AI_MODEL_ASSISTANT_CHAT  (compareWithAI / chatText)
+	modelGenerator string // AI_MODEL_GENERATOR       (EnsureSearchVariants — W19-32)
 }
 
 func New(cfg *config.Config, st store.Store, searcher marketplace.Marketplace, sc *scorer.Scorer) *Assistant {
 	return &Assistant{
-		cfg:        cfg,
-		store:      st,
-		searcher:   searcher,
-		scorer:     sc,
-		modelBrief: cfg.AI.Model,
-		modelDraft: cfg.AI.Model,
-		modelChat:  cfg.AI.Model,
+		cfg:            cfg,
+		store:          st,
+		searcher:       searcher,
+		scorer:         sc,
+		modelBrief:     cfg.AI.Model,
+		modelDraft:     cfg.AI.Model,
+		modelChat:      cfg.AI.Model,
+		modelGenerator: cfg.AI.Model,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 		},
@@ -174,6 +176,15 @@ func (a *Assistant) SetModels(brief, draft, chat string) {
 	}
 	if chat != "" {
 		a.modelChat = chat
+	}
+}
+
+// SetGeneratorModel sets the AI_MODEL_GENERATOR per-call-site override used
+// by EnsureSearchVariants. Empty string falls through to cfg.AI.Model.
+// Wired alongside SetModels in cmd/server/main.go (XOL-60 SUP-9 / W19-32).
+func (a *Assistant) SetGeneratorModel(model string) {
+	if model != "" {
+		a.modelGenerator = model
 	}
 }
 
@@ -969,6 +980,13 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 		Model:   a.cfg.AI.Model,
 	}
 	gen := generator.New(aiCfg)
+	// Preserve the AI_MODEL_GENERATOR per-call-site override (XOL-60 SUP-9).
+	// PR #48 wired this at the handler call site; the W19-32 refactor lost it
+	// and pr-reviewer flagged the regression. Empty string is fine — generator
+	// falls back to aiCfg.Model.
+	if a.modelGenerator != "" {
+		gen.SetModel(a.modelGenerator)
+	}
 	if a.onUsage != nil {
 		cb := a.onUsage
 		userID := mission.UserID

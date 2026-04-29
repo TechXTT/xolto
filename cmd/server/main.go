@@ -123,6 +123,7 @@ func main() {
 	sc := scorer.New(db, appCfg.Scoring, rsn)
 	asst := assistant.New(appCfg, db, provider, sc)
 	asst.SetModels(cfg.AIModelAssistantBrief, cfg.AIModelAssistantDraft, cfg.AIModelAssistantChat) // XOL-60 SUP-9
+	asst.SetGeneratorModel(cfg.AIModelGenerator)                                                   // XOL-60 SUP-9 / W19-32
 
 	// Wire AI usage tracking: each module reports token counts via a callback,
 	// and we persist them to the ai_usage_log table.
