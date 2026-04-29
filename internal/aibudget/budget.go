@@ -177,7 +177,7 @@ func (t *Tracker) Allow(_ context.Context, callSite string, estimatedCostUSD flo
 		// cap value so the threshold-check sees pct >= 1.0.
 		t.checkAndFireThresholdLocked(t.capUSD, now)
 		t.mu.Unlock()
-			return false, retry
+		return false, retry
 	}
 
 	// Charge the estimate.
