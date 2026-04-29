@@ -310,3 +310,47 @@ func TestEstimatedCostConstantSanity(t *testing.T) {
 			EstimatedCostPerCallUSD, expectedCallSpend)
 	}
 }
+
+func TestSnapshotPerSiteSpendBreakdown(t *testing.T) {
+	clk := newFakeClock(time.Now())
+	tr := &Tracker{
+		capUSD: DefaultCapUSD,
+		now:    clk.Now,
+	}
+
+	callSites := []string{"scorer", "reasoner.musthave", "assistant.brief"}
+	for _, site := range callSites {
+		ok, _ := tr.Allow(context.Background(), site, 0.01)
+		if !ok {
+			t.Fatalf("Allow(%q) returned false unexpectedly", site)
+		}
+	}
+
+	// An Allow with empty callSite should land under "unknown".
+	ok, _ := tr.Allow(context.Background(), "", 0.01)
+	if !ok {
+		t.Fatal("Allow('') returned false unexpectedly")
+	}
+
+	snap := tr.Snapshot()
+
+	for _, site := range callSites {
+		got, exists := snap.PerSiteSpendUSD[site]
+		if !exists {
+			t.Fatalf("PerSiteSpendUSD missing key %q", site)
+		}
+		const want = 0.01
+		if got < want-1e-9 || got > want+1e-9 {
+			t.Fatalf("PerSiteSpendUSD[%q] = %v, want %v", site, got, want)
+		}
+	}
+
+	unknown, exists := snap.PerSiteSpendUSD["unknown"]
+	if !exists {
+		t.Fatal("PerSiteSpendUSD missing key \"unknown\" for empty-callSite Allow")
+	}
+	const wantUnknown = 0.01
+	if unknown < wantUnknown-1e-9 || unknown > wantUnknown+1e-9 {
+		t.Fatalf("PerSiteSpendUSD[\"unknown\"] = %v, want %v", unknown, wantUnknown)
+	}
+}

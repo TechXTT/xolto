@@ -389,8 +389,10 @@ func alertAnonymousAnalyzeBreakerOnce(spent float64, ceiling float64) {
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag(anonymousAnalyzeTagKey, anonymousAnalyzeTagValue)
 		scope.SetTag("anonymous_analyze_outcome", "circuit_breaker_tripped")
-		scope.SetExtra("projected_spend_usd", spent)
-		scope.SetExtra("ceiling_usd", ceiling)
+		scope.SetContext("anonymous_analyze_breaker", map[string]any{
+			"projected_spend_usd": spent,
+			"ceiling_usd":         ceiling,
+		})
 		scope.SetLevel(sentry.LevelError)
 	})
 	hub.CaptureMessage("anonymous_analyze cost circuit-breaker tripped")

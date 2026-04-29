@@ -61,8 +61,9 @@ var alertThresholds = []float64{0.70, 0.90, 1.00}
 // pass. To make Reconcile / Rollback addressable by the originating call we
 // instead bookkeep totals plus an index of "live" entries; see Tracker.
 type entry struct {
-	at   time.Time
-	cost float64
+	at       time.Time
+	cost     float64
+	callSite string
 }
 
 // Tracker is the global AI-spend budget. Concurrent-safe via a single mutex
@@ -176,12 +177,11 @@ func (t *Tracker) Allow(_ context.Context, callSite string, estimatedCostUSD flo
 		// cap value so the threshold-check sees pct >= 1.0.
 		t.checkAndFireThresholdLocked(t.capUSD, now)
 		t.mu.Unlock()
-		_ = callSite
-		return false, retry
+			return false, retry
 	}
 
 	// Charge the estimate.
-	t.entries = append(t.entries, entry{at: now, cost: estimatedCostUSD})
+	t.entries = append(t.entries, entry{at: now, cost: estimatedCostUSD, callSite: callSite})
 	newTotal := currentTotal + estimatedCostUSD
 	t.checkAndFireThresholdLocked(newTotal, now)
 	t.mu.Unlock()
@@ -257,6 +257,10 @@ type Snapshot struct {
 	// OldestEntryAt is the timestamp of the oldest live entry. Zero when
 	// there are no live entries.
 	OldestEntryAt time.Time `json:"oldest_entry_at"`
+	// PerSiteSpendUSD breaks down Rolling24hSpendUSD by call-site identifier.
+	// Keys are the callSite strings passed to Allow(); entries recorded without
+	// a call-site (e.g. Reconcile-only entries) are folded under "unknown".
+	PerSiteSpendUSD map[string]float64 `json:"per_site_spend_usd"`
 	// WarningTiersFired records the last fire time per alert threshold;
 	// zero indicates "not fired in the current cycle". Keys are the
 	// integer percentages "70", "90", "100".
@@ -301,11 +305,21 @@ func (t *Tracker) Snapshot() Snapshot {
 		}
 	}
 
+	perSite := map[string]float64{}
+	for _, e := range t.entries {
+		site := e.callSite
+		if site == "" {
+			site = "unknown"
+		}
+		perSite[site] += e.cost
+	}
+
 	return Snapshot{
 		Rolling24hSpendUSD: total,
 		CapUSD:             cap,
 		Percentage:         pct,
 		OldestEntryAt:      oldest,
+		PerSiteSpendUSD:    perSite,
 		WarningTiersFired:  tiers,
 	}
 }
@@ -397,16 +411,20 @@ func emitSentryThresholdAlert(frac, spent, cap float64) {
 	case 0.90:
 		hub.ConfigureScope(func(scope *sentry.Scope) {
 			scope.SetTag("ai_budget_tier", "warning")
-			scope.SetExtra("spent_usd", spent)
-			scope.SetExtra("cap_usd", cap)
+			scope.SetContext("ai_budget", map[string]any{
+				"spent_usd": spent,
+				"cap_usd":   cap,
+			})
 			scope.SetLevel(sentry.LevelWarning)
 		})
 		hub.CaptureMessage("global AI budget at 90% of $3.00/24h")
 	case 1.00:
 		hub.ConfigureScope(func(scope *sentry.Scope) {
 			scope.SetTag("ai_budget_tier", "exhausted")
-			scope.SetExtra("spent_usd", spent)
-			scope.SetExtra("cap_usd", cap)
+			scope.SetContext("ai_budget", map[string]any{
+				"spent_usd": spent,
+				"cap_usd":   cap,
+			})
 			scope.SetLevel(sentry.LevelError)
 		})
 		hub.CaptureMessage("global AI budget exhausted; cap-fire active. Per-site degradation engaged.")
