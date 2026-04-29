@@ -592,6 +592,118 @@ func TestParseBriefHeuristicPathExpandsVariants(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// W19-33 / XOL-130: Converse routing — help-template false-positive fix
+// ---------------------------------------------------------------------------
+
+// helpTemplatePrefix is the opening string of the generic onboarding reply.
+const helpTemplatePrefix = "I help you find second-hand deals before anyone else does"
+
+// isHelpTemplate reports whether msg is the generic onboarding/help reply.
+func isHelpTemplate(msg string) bool {
+	return strings.HasPrefix(msg, helpTemplatePrefix)
+}
+
+// newConverseTestAssistant builds an Assistant with a real SQLite store and AI
+// disabled so Converse exercises the heuristic branch (no external calls).
+func newConverseTestAssistant(t *testing.T) (*Assistant, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "converse-test.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	userID, err := st.CreateUser("converse-test@example.com", "hash", "Converse Test User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		AI: config.AIConfig{
+			Enabled: false,
+		},
+	}
+	a := &Assistant{
+		cfg:        cfg,
+		store:      st,
+		modelBrief: "gpt-4o-mini",
+		modelDraft: "gpt-4o-mini",
+		modelChat:  "gpt-4o-mini",
+		client:     &http.Client{},
+	}
+	return a, userID
+}
+
+// TestConverseHelpMeFindRoutesToBriefParser — the P1 bug-regression test.
+// Input "Help me find a Sony A7iii in Bulgaria, budget 800 euros" must NOT
+// return the help-template; it must reach startBriefConversation (XOL-130).
+func TestConverseHelpMeFindRoutesToBriefParser(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+	reply, err := a.Converse(context.Background(), userID, "Help me find a Sony A7iii in Bulgaria, budget 800 euros")
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if isHelpTemplate(reply.Message) {
+		t.Errorf("Converse() returned help-template for shopping intent input; original P1 bug is not fixed.\nMessage: %s", reply.Message)
+	}
+}
+
+// TestConverseBareHelpTokenReturnsHelpTemplate — "help" alone must still
+// return the onboarding help-template (regression guard for preserved UX).
+func TestConverseBareHelpTokenReturnsHelpTemplate(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+	reply, err := a.Converse(context.Background(), userID, "help")
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if !isHelpTemplate(reply.Message) {
+		t.Errorf("Converse() did not return help-template for bare 'help' token.\nMessage: %s", reply.Message)
+	}
+}
+
+// TestConverseWhatCanYouDoReturnsHelpTemplate — "what can you do?" must still
+// return the onboarding help-template (regression guard for preserved UX).
+func TestConverseWhatCanYouDoReturnsHelpTemplate(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+	reply, err := a.Converse(context.Background(), userID, "what can you do?")
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if !isHelpTemplate(reply.Message) {
+		t.Errorf("Converse() did not return help-template for 'what can you do?'.\nMessage: %s", reply.Message)
+	}
+}
+
+// TestConverseHowDoIUseThisReturnsHelpTemplate — "how do i use this?" must
+// still return the onboarding help-template (regression guard for preserved UX).
+func TestConverseHowDoIUseThisReturnsHelpTemplate(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+	reply, err := a.Converse(context.Background(), userID, "how do i use this?")
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if !isHelpTemplate(reply.Message) {
+		t.Errorf("Converse() did not return help-template for 'how do i use this?'.\nMessage: %s", reply.Message)
+	}
+}
+
+// TestConverseLongFormHelpButShoppingRoutesToBriefParser — longer-form
+// help-but-actually-shopping input must NOT return the help-template.
+// "Can you help me find a used iPhone?" is 9 words — well above the 3-word
+// gate — and must fall through to startBriefConversation (XOL-130 bug-half).
+func TestConverseLongFormHelpButShoppingRoutesToBriefParser(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+	reply, err := a.Converse(context.Background(), userID, "Can you help me find a used iPhone?")
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if isHelpTemplate(reply.Message) {
+		t.Errorf("Converse() returned help-template for longer shopping-intent input.\nMessage: %s", reply.Message)
+	}
+}
+
 // TestAssistantChatRequestShape_NoResponseFormat verifies compareWithAI
 // (chatText) sends NO response_format key (XOL-60 SUP-9 AC).
 func TestAssistantChatRequestShape_NoResponseFormat(t *testing.T) {

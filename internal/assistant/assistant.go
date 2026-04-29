@@ -259,7 +259,16 @@ func (a *Assistant) Converse(ctx context.Context, userID, message string) (*mode
 	}
 
 	switch {
-	case containsAny(lower, "help", "what can you do", "how do i use"):
+	// W19-33 / XOL-130: split-threshold guard. Bare token "help" is the only
+	// ambiguous match — it false-positives on natural phrases like "Help me
+	// find a Fujifilm X-T4 in Bulgaria, budget around 1200 euros" which would
+	// route to the help-template instead of startBriefConversation. Gate bare
+	// "help" on message brevity (≤ 3 words) so longer messages fall through.
+	// The multi-word phrases "what can you do" and "how do i use" are
+	// unambiguous (complete questions, not partial token matches) and can
+	// fire on any-length input that contains them as substrings.
+	case (len(strings.Fields(message)) <= 3 && containsAny(lower, "help")) ||
+		containsAny(lower, "what can you do", "how do i use"):
 		return &models.AssistantReply{
 			Message: "I help you find second-hand deals before anyone else does. Tell me what you're after — item, budget, condition — and I'll build a buy mission, scan the market, and tell you which listings are actually worth your time. You can also ask me to show current matches or compare your shortlist.",
 			Intent:  models.IntentCreateBrief,
