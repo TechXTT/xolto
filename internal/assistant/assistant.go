@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"regexp"
@@ -19,6 +20,7 @@ import (
 	"github.com/TechXTT/xolto/internal/billing"
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/format"
+	"github.com/TechXTT/xolto/internal/generator"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/scorer"
@@ -59,9 +61,9 @@ func IsAIQuotaExhausted(err error) bool {
 // literal query pollutes marketplace results and defeats title matching.
 // Supports EN, NL, and BG Cyrillic prefixes (XOL-39 M3-E).
 //
-//   EN:  under, below, less than, up to, max, maximum, above, over, more than, min, minimum
-//   NL:  onder, tot, maximaal
-//   BG:  под (under), до (up to), максимум (maximum), над (above), мин (min)
+//	EN:  under, below, less than, up to, max, maximum, above, over, more than, min, minimum
+//	NL:  onder, tot, maximaal
+//	BG:  под (under), до (up to), максимум (maximum), над (above), мин (min)
 //
 // Currency markers: €, $, лв (BGN lev), BGN, EUR, euro, USD.
 // Note: Go RE2 does not support lookbehind — Cyrillic word anchoring relies on
@@ -132,12 +134,12 @@ const (
 type UsageCallback func(userID string, missionID int64, callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
 type Assistant struct {
-	cfg        *config.Config
-	store      store.Store
-	searcher   marketplace.Marketplace
-	scorer     *scorer.Scorer
-	client     *http.Client
-	onUsage    UsageCallback
+	cfg      *config.Config
+	store    store.Store
+	searcher marketplace.Marketplace
+	scorer   *scorer.Scorer
+	client   *http.Client
+	onUsage  UsageCallback
 	// Per-call-site model overrides (XOL-60 SUP-9); fall through to cfg.AI.Model.
 	modelBrief string // AI_MODEL_ASSISTANT_BRIEF (parseBriefWithAI)
 	modelDraft string // AI_MODEL_ASSISTANT_DRAFT (draftWithAI)
@@ -191,6 +193,7 @@ func (a *Assistant) UpsertBrief(ctx context.Context, userID, prompt string) (*mo
 	if user, uerr := a.store.GetUserByID(userID); uerr == nil {
 		a.applyUserMissionDefaults(user, mission)
 	}
+	_ = a.EnsureSearchVariants(ctx, mission)
 
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
@@ -698,6 +701,7 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 			Mission:   mission,
 		}, nil
 	}
+	_ = a.EnsureSearchVariants(ctx, mission)
 
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
@@ -755,6 +759,7 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 			Mission:   mission,
 		}, nil
 	}
+	_ = a.EnsureSearchVariants(ctx, mission)
 
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
@@ -926,6 +931,98 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 
 func intervalForTier(tier string) time.Duration {
 	return time.Duration(billing.LimitsFor(tier).MinCheckIntervalMins) * time.Minute
+}
+
+// EnsureSearchVariants populates mission.SearchQueries with 3-5 variants when
+// adequate coverage is missing. Mutates the mission in-place. Called from both
+// the HTTP handler path (handleMissions POST) and the assistant chat path
+// (parseBrief / startBrief / continueBrief) so all mission-creation paths
+// produce the same auto-expanded shape.
+//
+// Contract:
+//   - If len(mission.SearchQueries) >= 3, return nil (already adequate)
+//   - If mission.TargetQuery == "", return nil (nothing to expand from)
+//   - Else: invoke generator.GenerateSearches(ctx, mission.TargetQuery), dedupe
+//     against existing entries (case-insensitive trim), take up to 5 total
+//   - Hard-cap at 5 (founder-locked, W19-31 directive)
+//   - On error (cap-fire / LLM failure): return nil after slog.Warn for
+//     VAL-3 cohort attribution; mission still creates with whatever
+//     SearchQueries it had (graceful degradation per W19-23 contract)
+//
+// AI-budget gate: handled internally by generator.GenerateSearches via
+// aibudget.Allow("generator", ...) at internal/generator/generator.go:160.
+func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mission) error {
+	if mission == nil {
+		return nil
+	}
+	if len(mission.SearchQueries) >= 3 {
+		return nil
+	}
+	target := strings.TrimSpace(mission.TargetQuery)
+	if target == "" {
+		return nil
+	}
+	aiCfg := config.AIConfig{
+		Enabled: a.cfg.AI.APIKey != "",
+		BaseURL: a.cfg.AI.BaseURL,
+		APIKey:  a.cfg.AI.APIKey,
+		Model:   a.cfg.AI.Model,
+	}
+	gen := generator.New(aiCfg)
+	if a.onUsage != nil {
+		cb := a.onUsage
+		userID := mission.UserID
+		missionID := mission.ID
+		gen.SetUsageCallback(func(callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
+			cb(userID, missionID, callType, model, prompt, completion, latencyMs, success, errMsg)
+		})
+	}
+	genSearches, err := gen.GenerateSearches(ctx, target)
+	if err != nil {
+		slog.Warn("mission auto-expand skipped",
+			"op", "assistant.EnsureSearchVariants",
+			"user_id", mission.UserID,
+			"target_query", target,
+			"error", err.Error())
+		return nil
+	}
+	// Dedupe against existing SearchQueries (case-insensitive trim).
+	seen := make(map[string]bool, len(mission.SearchQueries)+len(genSearches))
+	out := make([]string, 0, 5)
+	for _, q := range mission.SearchQueries {
+		cleaned := strings.TrimSpace(q)
+		if cleaned == "" {
+			continue
+		}
+		key := strings.ToLower(cleaned)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, cleaned)
+	}
+	for _, sc := range genSearches {
+		cleaned := strings.TrimSpace(sc.Query)
+		if cleaned == "" {
+			continue
+		}
+		key := strings.ToLower(cleaned)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, cleaned)
+		if len(out) >= 5 {
+			break
+		}
+	}
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	if len(out) > 0 {
+		mission.SearchQueries = out
+	}
+	return nil
 }
 
 func (a *Assistant) applyUserMissionDefaults(user *models.User, mission *models.Mission) {
@@ -1876,7 +1973,6 @@ func (a *Assistant) chatText(ctx context.Context, userID string, missionID int64
 	}
 	return strings.TrimSpace(completion.Choices[0].Message.Content), nil
 }
-
 
 func mustJSON(v any) string {
 	raw, _ := json.MarshalIndent(v, "", "  ")

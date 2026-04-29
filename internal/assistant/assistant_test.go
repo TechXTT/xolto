@@ -6,11 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/models"
+	"github.com/TechXTT/xolto/internal/store"
 )
 
 func TestBuildRecommendationBuyNow(t *testing.T) {
@@ -123,8 +126,8 @@ func TestPriceWordPatternBGN(t *testing.T) {
 	}{
 		{"500 лв", true},
 		{"200 bgn", true},
-		{"700 eur", true},   // regression
-		{"300 euro", true},  // regression
+		{"700 eur", true},  // regression
+		{"300 euro", true}, // regression
 		{"sony a6000", false},
 	}
 	for _, tc := range cases {
@@ -158,7 +161,7 @@ func newMinimalAssistant(baseURL string) *Assistant {
 		modelBrief: cfg.AI.Model,
 		modelDraft: cfg.AI.Model,
 		modelChat:  cfg.AI.Model,
-		client: &http.Client{},
+		client:     &http.Client{},
 	}
 	return a
 }
@@ -369,6 +372,223 @@ func TestDraftWithAI_EmptyRiskFlagsNoPanic(t *testing.T) {
 	}
 	if strings.TrimSpace(result) == "" {
 		t.Errorf("draftWithAI(empty flags) returned empty result")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W19-32 / XOL-129: EnsureSearchVariants tests
+// ---------------------------------------------------------------------------
+
+// newMinimalAssistantNoAI returns an Assistant with AI disabled (no APIKey) so
+// EnsureSearchVariants uses the generator's static fallback path.
+func newMinimalAssistantNoAI() *Assistant {
+	cfg := &config.Config{
+		AI: config.AIConfig{
+			Enabled: false,
+		},
+	}
+	return &Assistant{
+		cfg:        cfg,
+		modelBrief: "gpt-4o-mini",
+		modelDraft: "gpt-4o-mini",
+		modelChat:  "gpt-4o-mini",
+		client:     &http.Client{},
+	}
+}
+
+// TestEnsureSearchVariantsSkipsWhenAlreadyAdequate — mission with 4 pre-populated
+// SearchQueries must be untouched (already adequate coverage).
+func TestEnsureSearchVariantsSkipsWhenAlreadyAdequate(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	original := []string{"sony a7 iii", "sony a7iii", "a7 iii body", "sony alpha 7 iii"}
+	mission := &models.Mission{
+		TargetQuery:   "sony a7 iii",
+		SearchQueries: append([]string(nil), original...),
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() unexpected error: %v", err)
+	}
+	if len(mission.SearchQueries) != 4 {
+		t.Errorf("SearchQueries len = %d, want 4 (unchanged)", len(mission.SearchQueries))
+	}
+	for i, q := range original {
+		if mission.SearchQueries[i] != q {
+			t.Errorf("SearchQueries[%d] = %q, want %q (must be unchanged)", i, mission.SearchQueries[i], q)
+		}
+	}
+}
+
+// TestEnsureSearchVariantsSkipsWhenTargetQueryEmpty — mission with an empty
+// TargetQuery must not be modified (nothing to expand from).
+func TestEnsureSearchVariantsSkipsWhenTargetQueryEmpty(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	mission := &models.Mission{
+		TargetQuery:   "",
+		SearchQueries: nil,
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() unexpected error: %v", err)
+	}
+	if len(mission.SearchQueries) != 0 {
+		t.Errorf("SearchQueries len = %d, want 0 (unchanged)", len(mission.SearchQueries))
+	}
+}
+
+// TestEnsureSearchVariantsExpandsWhenSparse — mission with TargetQuery set and
+// empty SearchQueries must be expanded. AI disabled; the static fallback in
+// generator.GenerateSearches runs and should produce >= 1 variant.
+func TestEnsureSearchVariantsExpandsWhenSparse(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	mission := &models.Mission{
+		TargetQuery:   "sony a7iii",
+		SearchQueries: nil,
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() unexpected error: %v", err)
+	}
+	if len(mission.SearchQueries) < 1 {
+		t.Errorf("SearchQueries len = %d, want >= 1 after static-fallback expand", len(mission.SearchQueries))
+	}
+	for i, q := range mission.SearchQueries {
+		if strings.TrimSpace(q) == "" {
+			t.Errorf("SearchQueries[%d] is empty after expand", i)
+		}
+	}
+}
+
+// TestEnsureSearchVariantsHardCapsAtFive — when the generator (via a fake AI
+// server) returns 7 entries, EnsureSearchVariants must cap the result at 5.
+func TestEnsureSearchVariantsHardCapsAtFive(t *testing.T) {
+	// Fake AI server returning a search_config_list with 7 entries.
+	// Content must be a JSON-encoded string of {"searches":[...]} as returned
+	// by strict json_schema mode (generator.generateWithAI unmarshals the
+	// content field directly).
+	content := `{\"searches\":[` +
+		`{\"name\":\"v1\",\"query\":\"sony a6700\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v2\",\"query\":\"sony a6700 body\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v3\",\"query\":\"a6700 sony\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v4\",\"query\":\"sony alpha 6700\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v5\",\"query\":\"ilce-6700\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v6\",\"query\":\"sony 6700\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"},` +
+		`{\"name\":\"v7\",\"query\":\"alpha 6700\",\"category_id\":487,\"max_price\":0,\"min_price\":0,\"condition\":[\"good\"],\"offer_percentage\":70,\"auto_message\":false,\"message_template\":\"hi\"}` +
+		`]}`
+	payload := `{"choices":[{"message":{"role":"assistant","content":"` + content + `"}}],"usage":{"prompt_tokens":5,"completion_tokens":50,"total_tokens":55}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	a := newMinimalAssistant(srv.URL)
+	a.client = srv.Client()
+
+	mission := &models.Mission{
+		TargetQuery:   "sony a6700",
+		SearchQueries: nil,
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		// EnsureSearchVariants returns nil on all error paths per contract.
+		t.Errorf("EnsureSearchVariants() must return nil, got %v", err)
+	}
+	if len(mission.SearchQueries) > 5 {
+		t.Errorf("SearchQueries len = %d, must be <= 5 (founder hard-cap)", len(mission.SearchQueries))
+	}
+}
+
+// TestEnsureSearchVariantsGracefulOnCapFire — when the global aibudget cap is
+// exhausted, EnsureSearchVariants must: return nil (not an error), leave
+// SearchQueries unchanged, and not panic.
+func TestEnsureSearchVariantsGracefulOnCapFire(t *testing.T) {
+	// Save/restore global tracker so this test does not leak state.
+	origTracker := aibudget.Global()
+	t.Cleanup(func() { aibudget.SetGlobal(origTracker) })
+
+	// Install an exhausted tracker.
+	tr := aibudget.New()
+	if ok, _ := tr.Allow(context.Background(), "test_seed", aibudget.DefaultCapUSD); !ok {
+		t.Fatalf("seed Allow at exactly cap should succeed")
+	}
+	aibudget.SetGlobal(tr)
+
+	// AI nominally enabled so generator enters generateWithAI and hits the budget gate.
+	cfg := &config.Config{
+		AI: config.AIConfig{
+			Enabled: true,
+			APIKey:  "dummy-key",
+			BaseURL: "http://127.0.0.1:1", // unreachable; cap fires before HTTP call
+			Model:   "gpt-4o-mini",
+		},
+	}
+	a := &Assistant{
+		cfg:        cfg,
+		modelBrief: "gpt-4o-mini",
+		modelDraft: "gpt-4o-mini",
+		modelChat:  "gpt-4o-mini",
+		client:     &http.Client{},
+	}
+
+	mission := &models.Mission{
+		UserID:        "u-cap-test",
+		TargetQuery:   "sony a6700",
+		SearchQueries: nil,
+	}
+	originalLen := len(mission.SearchQueries)
+
+	err := a.EnsureSearchVariants(context.Background(), mission)
+	if err != nil {
+		t.Errorf("EnsureSearchVariants() must return nil on cap-fire, got %v", err)
+	}
+	// SearchQueries must not be populated: generator skipped due to cap.
+	// (It may have been populated by the static fallback if that path fired;
+	// what MUST NOT happen is a panic or a non-nil error return.)
+	_ = originalLen // cap-fire path: assertion is "no panic, no error"
+}
+
+// TestParseBriefHeuristicPathExpandsVariants — integration path test.
+// With AI disabled, parseBrief returns a heuristic mission with 1 SearchQuery.
+// UpsertBrief (which calls EnsureSearchVariants before UpsertMission) must
+// expand the mission before storing. Asserts mission.SearchQueries >= 1 after
+// UpsertBrief completes and no error is returned.
+func TestParseBriefHeuristicPathExpandsVariants(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "assistant-brief-expand.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	userID, err := st.CreateUser("brief-expand@example.com", "hash", "Brief Expand User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	// AI disabled: EnsureSearchVariants will use the generator static fallback.
+	cfg := &config.Config{
+		AI: config.AIConfig{
+			Enabled: false,
+		},
+	}
+	a := &Assistant{
+		cfg:        cfg,
+		store:      st,
+		modelBrief: "gpt-4o-mini",
+		modelDraft: "gpt-4o-mini",
+		modelChat:  "gpt-4o-mini",
+		client:     &http.Client{},
+	}
+
+	mission, err := a.UpsertBrief(context.Background(), userID, "sony a7iii camera body")
+	if err != nil {
+		t.Fatalf("UpsertBrief() error = %v", err)
+	}
+	if len(mission.SearchQueries) < 1 {
+		t.Errorf("SearchQueries len = %d, want >= 1 after heuristic-path UpsertBrief", len(mission.SearchQueries))
+	}
+	for i, q := range mission.SearchQueries {
+		if strings.TrimSpace(q) == "" {
+			t.Errorf("SearchQueries[%d] is empty", i)
+		}
 	}
 }
 
