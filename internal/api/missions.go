@@ -245,6 +245,52 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 		}
 		mission = normalized
 
+		// W19-31 / XOL-128: auto-expand mission.TargetQuery into 3–5 search
+		// variants via the existing generator.GenerateSearches in-process. This
+		// lets a single-input mission deploy multiple search_configs through
+		// AutoDeployHunts (which iterates mission.SearchQueries) so the mission
+		// actually finds inventory across query variants (synonyms, brand vs.
+		// model, Cyrillic ↔ Latin, etc.).
+		//
+		// Tier handling per founder directive 2026-04-29: NO tier gate at this
+		// call site — Free tier gets ONE auto-expand per mission-create
+		// (bounded by limits.MaxMissions); Pro+ gets auto + manual re-invoke
+		// via /searches/generate as today. Cap correctness is enforced inside
+		// generator.GenerateSearches via aibudget.Allow ("generator" callSite);
+		// on cap-fire we fall through silently to single-query mission.
+		//
+		// Variant count hard-cap at 5 (founder-locked).
+		if len(mission.SearchQueries) == 0 && strings.TrimSpace(mission.TargetQuery) != "" {
+			aiCfg := config.AIConfig{
+				Enabled:     s.cfg.AIAPIKey != "",
+				BaseURL:     s.cfg.AIBaseURL,
+				APIKey:      s.cfg.AIAPIKey,
+				Model:       s.cfg.AIModel,
+				Temperature: 0.2,
+			}
+			gen := generator.New(aiCfg)
+			gen.SetModel(s.cfg.AIModelGenerator)
+			gen.SetUsageCallback(s.makeUsageCallback(user.ID, 0))
+			genSearches, genErr := gen.GenerateSearches(r.Context(), mission.TargetQuery)
+			if genErr == nil && len(genSearches) > 0 {
+				if len(genSearches) > 5 {
+					genSearches = genSearches[:5]
+				}
+				queries := make([]string, 0, len(genSearches))
+				for _, sc := range genSearches {
+					if q := strings.TrimSpace(sc.Query); q != "" {
+						queries = append(queries, q)
+					}
+				}
+				if len(queries) > 0 {
+					mission.SearchQueries = queries
+				}
+			}
+			// On error (cap-fire / generator failure): silently skip;
+			// AutoDeployHunts falls through to TargetQuery-only single
+			// search_config below, no error to user.
+		}
+
 		limits := billing.LimitsFor(user.Tier)
 		if limits.MaxMissions > 0 {
 			count, err := s.db.CountActiveMissions(user.ID)
