@@ -6,7 +6,7 @@
 -- scorer_version is a stable identifier for the scoring formula; hardcoded for
 -- now but forward-compatible for future scorer changes.
 
-CREATE TABLE scoring_events (
+CREATE TABLE IF NOT EXISTS scoring_events (
   id               BIGSERIAL PRIMARY KEY,
   listing_id       TEXT        NOT NULL,
   marketplace      TEXT        NOT NULL DEFAULT '',
@@ -19,6 +19,6 @@ CREATE TABLE scoring_events (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_scoring_events_created_at   ON scoring_events (created_at DESC);
-CREATE INDEX idx_scoring_events_marketplace  ON scoring_events (marketplace, created_at DESC);
-CREATE INDEX idx_scoring_events_listing_id   ON scoring_events (listing_id);
+CREATE INDEX IF NOT EXISTS idx_scoring_events_created_at   ON scoring_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scoring_events_marketplace  ON scoring_events (marketplace, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scoring_events_listing_id   ON scoring_events (listing_id);

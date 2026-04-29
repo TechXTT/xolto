@@ -1,7 +1,7 @@
 -- XOL-24 C-5: outreach thread reply-time tracking.
 -- Creates outreach_threads table with full state machine support.
 
-CREATE TABLE outreach_threads (
+CREATE TABLE IF NOT EXISTS outreach_threads (
   id                          BIGSERIAL PRIMARY KEY,
   user_id                     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   listing_id                  TEXT NOT NULL,
@@ -20,6 +20,6 @@ CREATE TABLE outreach_threads (
   UNIQUE (user_id, listing_id, marketplace_id)
 );
 
-CREATE INDEX idx_outreach_threads_user_state ON outreach_threads (user_id, state);
-CREATE INDEX idx_outreach_threads_mission ON outreach_threads (mission_id);
-CREATE INDEX idx_outreach_threads_last_transition ON outreach_threads (last_state_transition_at);
+CREATE INDEX IF NOT EXISTS idx_outreach_threads_user_state ON outreach_threads (user_id, state);
+CREATE INDEX IF NOT EXISTS idx_outreach_threads_mission ON outreach_threads (mission_id);
+CREATE INDEX IF NOT EXISTS idx_outreach_threads_last_transition ON outreach_threads (last_state_transition_at);

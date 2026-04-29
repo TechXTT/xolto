@@ -2,11 +2,12 @@
 -- inline path are not dropped here to avoid data loss on partial reversal.
 -- The additive ALTER TABLE / CREATE INDEX statements in the up migration are
 -- not reversed because IF NOT EXISTS guards make them idempotent.
-DROP TABLE IF EXISTS stripe_events;
-DROP TABLE IF EXISTS action_log;
-DROP TABLE IF EXISTS assistant_sessions;
-DROP TABLE IF EXISTS conversation_artifacts;
-DROP TABLE IF EXISTS shortlist_entries;
-DROP TABLE IF EXISTS shopping_profiles;
-DROP TABLE IF EXISTS price_history;
-DROP TABLE IF EXISTS listings;
+--
+-- 000017's up migration only adds tables/columns/indexes that pre-existed via
+-- the old inline path (W19-26+W19-27 audit). Reverting it is a no-op against
+-- live production data; running `migrate down` here is safe but does nothing.
+--
+-- DO NOT add DROP statements for `listings`, `price_history`, `shopping_profiles`,
+-- `shortlist_entries`, `conversation_artifacts`, `assistant_sessions`,
+-- `action_log`, `stripe_events` — those are bootstrap tables with real production
+-- data and dropping them would be catastrophic.

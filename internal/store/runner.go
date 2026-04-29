@@ -23,9 +23,11 @@ package store
 //	is safe and idempotent. The runner will create schema_migrations and mark
 //	all 17 versions as applied.
 //
-//	If for any reason you need to tell golang-migrate "versions 1-16 are
-//	already applied, only run 17", connect to the production database via
-//	psql or the Railway console and run:
+//	Recommended first-deploy step: pre-seed schema_migrations to version 16
+//	in production (the inline-CREATE bootstrap reached that level) so the
+//	runner skips the IF-NOT-EXISTS replays of versions 1-16 and applies only
+//	version 17 onward. Connect to the production database via psql or the
+//	Railway console and run:
 //	  CREATE TABLE IF NOT EXISTS schema_migrations (version bigint NOT NULL PRIMARY KEY, dirty bool NOT NULL);
 //	  INSERT INTO schema_migrations (version, dirty) VALUES (16, false) ON CONFLICT DO NOTHING;
 //	Then restart the service. The runner will apply only version 17 onward.
