@@ -23,13 +23,16 @@ import (
 	"time"
 
 	"github.com/TechXTT/xolto/internal/aibudget"
+	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/auth"
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/store"
 )
 
 // newMissionsTestServer creates a minimal test server and a regular user.
-// AI is disabled (no APIKey) so GenerateSearches uses the static fallback path.
+// AI is disabled (no APIKey) so EnsureSearchVariants uses the generator static
+// fallback path. The server is wired with a real assistant so that the handler
+// refactor (EnsureSearchVariants via s.assistant) fires correctly.
 // Returns (server, userID, auth-token).
 func newMissionsTestServer(t *testing.T) (*store.SQLiteStore, *Server, string, string) {
 	t.Helper()
@@ -45,11 +48,15 @@ func newMissionsTestServer(t *testing.T) (*store.SQLiteStore, *Server, string, s
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	// AI disabled: empty APIKey → GenerateSearches uses static fallback.
-	srv := NewServer(config.ServerConfig{
+	// AI disabled: empty APIKey → EnsureSearchVariants uses generator static fallback.
+	cfg := config.ServerConfig{
 		JWTSecret:  "test-secret",
 		AppBaseURL: "http://localhost:3000",
-	}, st, nil, nil, nil, nil)
+	}
+	// Build a minimal assistant with AI disabled so EnsureSearchVariants uses
+	// the static fallback path. Marketplace and scorer are nil — not exercised here.
+	asst := assistant.New(&config.Config{AI: config.AIConfig{Enabled: false}}, st, nil, nil)
+	srv := NewServer(cfg, st, asst, nil, nil, nil)
 
 	tok, err := auth.IssueToken("test-secret", auth.Claims{
 		UserID:    userID,
@@ -125,14 +132,15 @@ func TestHandleMissionsPostAutoExpandsTargetQuery(t *testing.T) {
 }
 
 // TestHandleMissionsPostSkipsAutoExpandWhenSearchQueriesProvided — when the
-// caller explicitly provides search_queries, auto-expand must NOT overwrite.
+// caller provides >= 3 search_queries (adequate coverage), EnsureSearchVariants
+// must NOT overwrite them. The skip threshold is >= 3 per W19-32 contract.
 func TestHandleMissionsPostSkipsAutoExpandWhenSearchQueriesProvided(t *testing.T) {
 	_, srv, _, tok := newMissionsTestServer(t)
 
 	res := postMission(srv, tok, map[string]any{
 		"Name":          "Fuji Hunt",
 		"TargetQuery":   "Fujifilm X-T4",
-		"SearchQueries": []string{"foo", "bar"},
+		"SearchQueries": []string{"fuji xt4", "fujifilm x-t4", "xt4 body"},
 		"Status":        "draft",
 		"Urgency":       "flexible",
 		"CountryCode":   "BG",
@@ -151,11 +159,12 @@ func TestHandleMissionsPostSkipsAutoExpandWhenSearchQueriesProvided(t *testing.T
 	if !ok {
 		t.Fatalf("SearchQueries is not an array: %T", raw)
 	}
-	if len(sq) != 2 {
-		t.Fatalf("expected 2 preserved SearchQueries, got %d: %v", len(sq), sq)
+	// All 3 provided queries must be preserved (already adequate: len >= 3).
+	if len(sq) != 3 {
+		t.Fatalf("expected 3 preserved SearchQueries (already adequate), got %d: %v", len(sq), sq)
 	}
-	if sq[0] != "foo" || sq[1] != "bar" {
-		t.Errorf("SearchQueries = %v, want [foo bar]", sq)
+	if sq[0] != "fuji xt4" || sq[1] != "fujifilm x-t4" || sq[2] != "xt4 body" {
+		t.Errorf("SearchQueries = %v, want [fuji xt4 fujifilm x-t4 xt4 body]", sq)
 	}
 }
 
@@ -202,10 +211,10 @@ func TestHandleMissionsPostHardCapsVariantsAtFive(t *testing.T) {
 // exhausted before mission creation, the handler must still return 201 and
 // SearchQueries must be empty (graceful skip, no error surfaced to user).
 //
-// This test uses a server where AI is nominally enabled (dummy APIKey) so the
-// generator enters the generateWithAI code path where the aibudget.Allow gate
-// lives. The cap fires before any HTTP call to the AI provider, so no actual
-// network request is made.
+// This test uses a server where AI is nominally enabled (dummy APIKey) so
+// EnsureSearchVariants → generator enters the generateWithAI code path where
+// the aibudget.Allow gate lives. The cap fires before any HTTP call to the AI
+// provider, so no actual network request is made.
 func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 	// Install a fresh tracker and immediately exhaust it.
 	tr := withGlobalTracker(t)
@@ -214,8 +223,8 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 	}
 	// Budget is now exhausted: next generator.Allow will return false.
 
-	// Use an AI-enabled server config so generator.aiEnabled() returns true and
-	// the budget gate in generateWithAI is reached.
+	// Use an AI-enabled assistant so EnsureSearchVariants enters the generator's
+	// generateWithAI code path where the aibudget.Allow gate is checked.
 	dbPath := filepath.Join(t.TempDir(), "missions-cap-test.db")
 	st, err := store.New(dbPath)
 	if err != nil {
@@ -226,14 +235,19 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
+	// AI nominally enabled; unreachable URL — cap fires before HTTP call.
+	asst := assistant.New(&config.Config{
+		AI: config.AIConfig{
+			Enabled: true,
+			APIKey:  "dummy-key-for-cap-test",
+			BaseURL: "http://127.0.0.1:0",
+			Model:   "gpt-4o",
+		},
+	}, st, nil, nil)
 	srv := NewServer(config.ServerConfig{
-		JWTSecret:        "test-secret",
-		AppBaseURL:       "http://localhost:3000",
-		AIAPIKey:         "dummy-key-for-cap-test",
-		AIBaseURL:        "http://127.0.0.1:0", // unreachable; cap fires before HTTP call
-		AIModel:          "gpt-4o",
-		AIModelGenerator: "gpt-4o",
-	}, st, nil, nil, nil, nil)
+		JWTSecret:  "test-secret",
+		AppBaseURL: "http://localhost:3000",
+	}, st, asst, nil, nil, nil)
 	tok, err := auth.IssueToken("test-secret", auth.Claims{
 		UserID:    userID,
 		Email:     "cap-user@example.com",
