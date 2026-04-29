@@ -19,6 +19,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 func (s *Server) registerAIBudgetRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/ai-budget/override", s.requireOperatorOrOwner(s.handleAIBudgetOverride))
 	mux.HandleFunc("/admin/ai-budget/snapshot", s.requireOperatorOrOwner(s.handleAIBudgetSnapshot))
+	mux.HandleFunc("/admin/ai-budget/overrides", s.requireOperatorOrOwner(s.handleAIBudgetOverridesList))
 }
 
 // handleAIBudgetOverride accepts a POST { new_cap_usd, reason } and
@@ -141,5 +143,71 @@ func (s *Server) handleAIBudgetSnapshot(w http.ResponseWriter, r *http.Request, 
 		"oldest_entry_at":       snap.OldestEntryAt.UTC().Format(time.RFC3339),
 		"warning_tiers_fired":   tiers,
 		"recent_overrides":      overrides,
+	})
+}
+
+// handleAIBudgetOverridesList returns a paginated list of ai_budget_overrides
+// rows ordered id DESC. Supports cursor-based pagination via ?limit and ?cursor
+// query parameters. This backs the admin AIBudgetTab full audit-log disclosure;
+// the 5-row teaser on /snapshot stays for the at-a-glance view.
+func (s *Server) handleAIBudgetOverridesList(w http.ResponseWriter, r *http.Request, _ *models.User) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	q := r.URL.Query()
+
+	limit := 25
+	if raw := q.Get("limit"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit: must be an integer")
+			return
+		}
+		limit = v
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	var cursor int64
+	if raw := q.Get("cursor"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cursor: must be an integer")
+			return
+		}
+		cursor = v
+	}
+
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable")
+		return
+	}
+
+	rows, nextCursor, err := s.db.ListAIBudgetOverridesPage(r.Context(), limit, cursor)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query overrides")
+		return
+	}
+
+	overrides := make([]map[string]any, 0, len(rows))
+	for _, o := range rows {
+		overrides = append(overrides, map[string]any{
+			"id":             o.ID,
+			"set_at":         o.SetAt.UTC().Format(time.RFC3339),
+			"new_cap_usd":    o.NewCapUSD,
+			"reason":         o.Reason,
+			"set_by_user_id": o.SetByUserID,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"overrides":   overrides,
+		"next_cursor": nextCursor,
 	})
 }

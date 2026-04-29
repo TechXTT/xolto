@@ -41,17 +41,25 @@ CREATE INDEX IF NOT EXISTS idx_ai_budget_overrides_set_at ON ai_budget_overrides
 
 // AIBudgetOverride is one audit row.
 type AIBudgetOverride struct {
-	ID           int64
-	SetAt        time.Time
-	NewCapUSD    float64
-	Reason       string
-	SetByUserID  string
+	ID          int64
+	SetAt       time.Time
+	NewCapUSD   float64
+	Reason      string
+	SetByUserID string
 }
 
 // AIBudgetOverrideStore is the interface for ai_budget_overrides persistence.
 type AIBudgetOverrideStore interface {
 	RecordAIBudgetOverride(ctx context.Context, o AIBudgetOverride) (int64, error)
 	ListRecentAIBudgetOverrides(ctx context.Context, limit int) ([]AIBudgetOverride, error)
+	// ListAIBudgetOverridesPage returns a page of override rows ordered id DESC.
+	// Cursor semantics:
+	//   beforeID == 0 → first page (newest entries).
+	//   beforeID > 0  → rows with id < beforeID.
+	//   nextCursor == 0 → no more pages.
+	//   nextCursor > 0 → pass as beforeID for the next page.
+	// limit is clamped to [1, 100]; values <= 0 default to 25.
+	ListAIBudgetOverridesPage(ctx context.Context, limit int, beforeID int64) (rows []AIBudgetOverride, nextCursor int64, err error)
 	// AIBudgetTableReady probes the underlying ai_budget_overrides table without
 	// self-heal — returns nil when the table exists and is queryable, an error
 	// otherwise. Used by /healthz and by the startup assertion in main.go to
@@ -150,6 +158,54 @@ func (s *PostgresStore) ListRecentAIBudgetOverrides(ctx context.Context, limit i
 	return out, rows.Err()
 }
 
+func (s *PostgresStore) ListAIBudgetOverridesPage(ctx context.Context, limit int, beforeID int64) ([]AIBudgetOverride, int64, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	// Fetch limit+1 rows so we can detect whether a next page exists without
+	// a separate COUNT query.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, set_at, new_cap_usd, reason, set_by_user_id
+		FROM ai_budget_overrides
+		WHERE ($1 = 0 OR id < $1)
+		ORDER BY id DESC
+		LIMIT $2`, beforeID, limit+1,
+	)
+	if err != nil {
+		if isRelationDoesNotExistErr(err) {
+			slog.Warn("ai_budget_overrides table missing at SELECT time; returning empty list",
+				"error", err.Error())
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("querying ai_budget_overrides page: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AIBudgetOverride
+	for rows.Next() {
+		var o AIBudgetOverride
+		if err := rows.Scan(&o.ID, &o.SetAt, &o.NewCapUSD, &o.Reason, &o.SetByUserID); err != nil {
+			return nil, 0, fmt.Errorf("scanning ai_budget_override: %w", err)
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var nextCursor int64
+	if len(out) > limit {
+		// We have a next page; return only limit rows and set the cursor to
+		// the last returned row's id.
+		out = out[:limit]
+		nextCursor = out[len(out)-1].ID
+	}
+	return out, nextCursor, nil
+}
+
 // ---------------------------------------------------------------------------
 // SQLiteStore implementation (dev / test path)
 // ---------------------------------------------------------------------------
@@ -192,8 +248,8 @@ func (s *SQLiteStore) ListRecentAIBudgetOverrides(ctx context.Context, limit int
 	var out []AIBudgetOverride
 	for rows.Next() {
 		var (
-			o      AIBudgetOverride
-			setAt  string
+			o     AIBudgetOverride
+			setAt string
 		)
 		if err := rows.Scan(&o.ID, &setAt, &o.NewCapUSD, &o.Reason, &o.SetByUserID); err != nil {
 			return nil, fmt.Errorf("scanning ai_budget_override: %w", err)
@@ -207,4 +263,56 @@ func (s *SQLiteStore) ListRecentAIBudgetOverrides(ctx context.Context, limit int
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ListAIBudgetOverridesPage(ctx context.Context, limit int, beforeID int64) ([]AIBudgetOverride, int64, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	// Fetch limit+1 rows so we can detect whether a next page exists without
+	// a separate COUNT query.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, set_at, new_cap_usd, reason, set_by_user_id
+		FROM ai_budget_overrides
+		WHERE (? = 0 OR id < ?)
+		ORDER BY id DESC
+		LIMIT ?`, beforeID, beforeID, limit+1,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying ai_budget_overrides page: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AIBudgetOverride
+	for rows.Next() {
+		var (
+			o     AIBudgetOverride
+			setAt string
+		)
+		if err := rows.Scan(&o.ID, &setAt, &o.NewCapUSD, &o.Reason, &o.SetByUserID); err != nil {
+			return nil, 0, fmt.Errorf("scanning ai_budget_override: %w", err)
+		}
+		// SQLite stores datetimes as text; parse to time.Time.
+		if t, perr := time.Parse("2006-01-02 15:04:05", setAt); perr == nil {
+			o.SetAt = t
+		} else if t, perr := time.Parse(time.RFC3339, setAt); perr == nil {
+			o.SetAt = t
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var nextCursor int64
+	if len(out) > limit {
+		// We have a next page; return only limit rows and set the cursor to
+		// the last returned row's id.
+		out = out[:limit]
+		nextCursor = out[len(out)-1].ID
+	}
+	return out, nextCursor, nil
 }

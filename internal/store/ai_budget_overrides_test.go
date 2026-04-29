@@ -75,3 +75,90 @@ func TestListRecentAIBudgetOverridesOrdering(t *testing.T) {
 		t.Errorf("expected 3 distinct caps, got %v", got)
 	}
 }
+
+func TestListAIBudgetOverridesPagePagination(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+
+	// Insert 6 overrides; IDs will be 1..6 (SQLite auto-increment).
+	var insertedIDs []int64
+	for i := 1; i <= 6; i++ {
+		id, err := st.RecordAIBudgetOverride(ctx, AIBudgetOverride{
+			NewCapUSD:   float64(i),
+			Reason:      "page-test",
+			SetByUserID: "user",
+		})
+		if err != nil {
+			t.Fatalf("RecordAIBudgetOverride iter %d: %v", i, err)
+		}
+		insertedIDs = append(insertedIDs, id)
+	}
+
+	// Page 1: limit=2, cursor=0 — should return the 2 highest ids in DESC order.
+	p1, nc1, err := st.ListAIBudgetOverridesPage(ctx, 2, 0)
+	if err != nil {
+		t.Fatalf("page1 err: %v", err)
+	}
+	if len(p1) != 2 {
+		t.Fatalf("page1: expected 2 rows, got %d", len(p1))
+	}
+	if p1[0].ID <= p1[1].ID {
+		t.Fatalf("page1: rows not in id DESC order: %d, %d", p1[0].ID, p1[1].ID)
+	}
+	if nc1 == 0 {
+		t.Fatalf("page1: next_cursor should be non-zero (more rows exist)")
+	}
+	if nc1 != p1[1].ID {
+		t.Fatalf("page1: next_cursor=%d want last row id=%d", nc1, p1[1].ID)
+	}
+
+	// Page 2: limit=2, cursor=nc1.
+	p2, nc2, err := st.ListAIBudgetOverridesPage(ctx, 2, nc1)
+	if err != nil {
+		t.Fatalf("page2 err: %v", err)
+	}
+	if len(p2) != 2 {
+		t.Fatalf("page2: expected 2 rows, got %d", len(p2))
+	}
+	// All page2 ids must be < nc1 (cursor boundary).
+	for _, r := range p2 {
+		if r.ID >= nc1 {
+			t.Fatalf("page2: row id %d not < cursor %d", r.ID, nc1)
+		}
+	}
+	if nc2 == 0 {
+		t.Fatalf("page2: next_cursor should be non-zero (more rows exist)")
+	}
+
+	// Page 3: limit=2, cursor=nc2 — should return 2 remaining rows + next_cursor=0.
+	p3, nc3, err := st.ListAIBudgetOverridesPage(ctx, 2, nc2)
+	if err != nil {
+		t.Fatalf("page3 err: %v", err)
+	}
+	if len(p3) != 2 {
+		t.Fatalf("page3: expected 2 rows, got %d", len(p3))
+	}
+	if nc3 != 0 {
+		t.Fatalf("page3: next_cursor = %d, want 0 (end of history)", nc3)
+	}
+
+	// Verify all 6 unique ids were returned across pages.
+	seen := map[int64]bool{}
+	for _, r := range append(append(p1, p2...), p3...) {
+		seen[r.ID] = true
+	}
+	if len(seen) != 6 {
+		t.Fatalf("expected 6 unique ids across 3 pages, got %d: %v", len(seen), seen)
+	}
+
+	// Verify all ids are from our inserted set.
+	insertedSet := map[int64]bool{}
+	for _, id := range insertedIDs {
+		insertedSet[id] = true
+	}
+	for id := range seen {
+		if !insertedSet[id] {
+			t.Fatalf("got unexpected id %d not in inserted set %v", id, insertedIDs)
+		}
+	}
+}

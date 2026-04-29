@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -273,6 +274,169 @@ func TestAnonymousAnalyzeReturns503OnGlobalCapFire(t *testing.T) {
 }
 
 // (helper removed — we use scorer.New with stub hooks instead).
+
+// ---------------------------------------------------------------------------
+// W19-28: paginated GET /admin/ai-budget/overrides
+// ---------------------------------------------------------------------------
+
+func TestAIBudgetOverridesListReturnsEmptyWhenNoRows(t *testing.T) {
+	withGlobalTracker(t)
+	_, srv, operatorID, _ := newCalibrationTestServer(t)
+	tok := issueTokenForUser(t, operatorID, "operator@example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", res.Code, res.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() err: %v", err)
+	}
+	overrides, ok := body["overrides"].([]any)
+	if !ok {
+		t.Fatalf("overrides field missing or wrong type: %v", body)
+	}
+	if len(overrides) != 0 {
+		t.Fatalf("expected 0 overrides, got %d", len(overrides))
+	}
+	if nc, _ := body["next_cursor"].(float64); nc != 0 {
+		t.Fatalf("next_cursor = %v, want 0", body["next_cursor"])
+	}
+}
+
+func TestAIBudgetOverridesListPaginatesViaCursor(t *testing.T) {
+	withGlobalTracker(t)
+	st, srv, operatorID, _ := newCalibrationTestServer(t)
+	ctx := context.Background()
+	tok := issueTokenForUser(t, operatorID, "operator@example.com")
+
+	// Insert 7 overrides.
+	for i := 1; i <= 7; i++ {
+		_, err := st.RecordAIBudgetOverride(ctx, store.AIBudgetOverride{
+			NewCapUSD:   float64(i),
+			Reason:      "page-test",
+			SetByUserID: operatorID,
+		})
+		if err != nil {
+			t.Fatalf("RecordAIBudgetOverride iter %d: %v", i, err)
+		}
+	}
+
+	// Page 1: limit=3, cursor=0.
+	req := httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides?limit=3", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("page1 status = %d; body = %s", res.Code, res.Body.String())
+	}
+	var p1 map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&p1)
+	p1Rows := p1["overrides"].([]any)
+	if len(p1Rows) != 3 {
+		t.Fatalf("page1: expected 3 rows, got %d", len(p1Rows))
+	}
+	nc1 := int64(p1["next_cursor"].(float64))
+	if nc1 == 0 {
+		t.Fatalf("page1: next_cursor should be non-zero")
+	}
+	// Rows must be id DESC (first row has highest id).
+	firstID := int64(p1Rows[0].(map[string]any)["id"].(float64))
+	lastID := int64(p1Rows[2].(map[string]any)["id"].(float64))
+	if firstID <= lastID {
+		t.Fatalf("page1: rows not in id DESC order: firstID=%d lastID=%d", firstID, lastID)
+	}
+	if nc1 != lastID {
+		t.Fatalf("page1: next_cursor=%d want last row id=%d", nc1, lastID)
+	}
+
+	// Page 2: limit=3, cursor=nc1.
+	req = httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides?limit=3&cursor="+strconv.FormatInt(nc1, 10), nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("page2 status = %d; body = %s", res.Code, res.Body.String())
+	}
+	var p2 map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&p2)
+	p2Rows := p2["overrides"].([]any)
+	if len(p2Rows) != 3 {
+		t.Fatalf("page2: expected 3 rows, got %d", len(p2Rows))
+	}
+	nc2 := int64(p2["next_cursor"].(float64))
+	if nc2 == 0 {
+		t.Fatalf("page2: next_cursor should be non-zero")
+	}
+
+	// Page 3: limit=3, cursor=nc2 — should have 1 row and next_cursor=0.
+	req = httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides?limit=3&cursor="+strconv.FormatInt(nc2, 10), nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("page3 status = %d; body = %s", res.Code, res.Body.String())
+	}
+	var p3 map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&p3)
+	p3Rows := p3["overrides"].([]any)
+	if len(p3Rows) != 1 {
+		t.Fatalf("page3: expected 1 row, got %d", len(p3Rows))
+	}
+	if nc3 := int64(p3["next_cursor"].(float64)); nc3 != 0 {
+		t.Fatalf("page3: next_cursor = %d, want 0 (end of history)", nc3)
+	}
+}
+
+func TestAIBudgetOverridesListEnforcesLimitCap(t *testing.T) {
+	withGlobalTracker(t)
+	_, srv, operatorID, _ := newCalibrationTestServer(t)
+	tok := issueTokenForUser(t, operatorID, "operator@example.com")
+
+	// limit=999 should be silently clamped to 100; no error.
+	req := httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides?limit=999", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", res.Code, res.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() err: %v", err)
+	}
+	if _, ok := body["overrides"]; !ok {
+		t.Fatalf("overrides key missing in response")
+	}
+}
+
+func TestAIBudgetOverridesListRequiresAuth(t *testing.T) {
+	withGlobalTracker(t)
+	_, srv, _, regularID := newCalibrationTestServer(t)
+
+	// Unauthenticated request should be rejected.
+	req := httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides", nil)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated: status = %d, want 401", res.Code)
+	}
+
+	// Regular user (non-operator) should be forbidden.
+	tok := issueTokenForUser(t, regularID, "user@example.com")
+	req = httptest.NewRequest(http.MethodGet, "/admin/ai-budget/overrides", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	res = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("regular user: status = %d, want 403", res.Code)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Global cap precedence over local sub-cap when global is more restrictive
