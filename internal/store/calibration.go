@@ -393,22 +393,6 @@ func (s *SQLiteStore) GetCalibrationSummary(ctx context.Context, q CalibrationQu
 // Migration helpers
 // ---------------------------------------------------------------------------
 
-// migratePostgresCalibration is now a no-op stub.
-// W19-27: scoring_events and ai_budget_overrides are created by migration files
-// 000014, 000015, 000016 via the golang-migrate runner (runner.go).
-// The inline CREATE TABLE / ALTER TABLE statements have been removed per the
-// Decision Log 2026-04-28 schema source-of-truth call.
-//
-// W19-26: function signature changed to return error so callers can propagate
-// startup failures. The body is empty; no error path exists.
-//
-// SQLite path (migrateCalibrationSQLite) is unchanged — dev/test only.
-func migratePostgresCalibration(ctx context.Context, db *sql.DB) error {
-	_ = ctx
-	_ = db
-	return nil
-}
-
 // migrateCalibrationSQLite adds the scoring_events table to the SQLite schema.
 func migrateCalibrationSQLite(db *sql.DB) {
 	_, _ = db.Exec(`

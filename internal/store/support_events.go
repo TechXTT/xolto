@@ -230,24 +230,6 @@ func (s *PostgresStore) AttachLinearIssue(ctx context.Context, plainThreadID, li
 }
 
 // ---------------------------------------------------------------------------
-// Postgres migration helper — now a no-op stub.
-// ---------------------------------------------------------------------------
-
-// migratePostgresSupportEvents is now a no-op stub.
-// W19-27: support_events is created by migration file 000011 via the
-// golang-migrate runner (runner.go). The inline CREATE TABLE statements have
-// been removed per the Decision Log 2026-04-28 schema source-of-truth call.
-//
-// W19-26: function signature changed to return error for uniform error propagation.
-//
-// SQLite path (migrateSupportEventsSQLite) is unchanged — dev/test only.
-func migratePostgresSupportEvents(ctx context.Context, db *sql.DB) error {
-	_ = ctx
-	_ = db
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // SQLite migration — adds support_events to the local dev schema.
 // ---------------------------------------------------------------------------
 

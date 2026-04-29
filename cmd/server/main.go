@@ -97,7 +97,7 @@ func main() {
 	if err := db.AIBudgetTableReady(context.Background()); err != nil {
 		logger.Error(
 			"ai_budget_overrides table is not ready — the W19-23 audit-log migration did not apply. "+
-				"Inspect store.migratePostgresCalibration and migrations/000016_ai_budget_overrides.up.sql; "+
+				"Inspect internal/store/runner.go (golang-migrate runner) and migrations/000016_ai_budget_overrides.up.sql; "+
 				"production cannot accept traffic without audit-log persistence.",
 			"op", "aibudget.assert.audit_table",
 			"error", err,

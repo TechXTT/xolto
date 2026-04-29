@@ -540,20 +540,6 @@ func migrateOutreachThreadsSQLite(db *sql.DB) {
 // PostgresStore migration
 // ---------------------------------------------------------------------------
 
-// migrateOutreachThreadsPostgres is now a no-op stub.
-// W19-27: outreach_threads is created by migration file 000010 via the
-// golang-migrate runner (runner.go). The inline CREATE TABLE statements have
-// been removed per the Decision Log 2026-04-28 schema source-of-truth call.
-//
-// W19-26: function signature changed to return error for uniform error propagation.
-//
-// SQLite path (migrateOutreachThreadsSQLite) is unchanged — dev/test only.
-func migrateOutreachThreadsPostgres(ctx context.Context, db *sql.DB) error {
-	_ = ctx
-	_ = db
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Sentinel errors
 // ---------------------------------------------------------------------------
