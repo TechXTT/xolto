@@ -807,6 +807,32 @@ func TestAdminSearchRunsEndpointFilters(t *testing.T) {
 	}
 }
 
+func TestCORSExposeRetryAfterHeader(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "api-cors-expose-test.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	const allowedOrigin = "http://localhost:3000"
+	srv := NewServer(config.ServerConfig{
+		JWTSecret:          "test-secret",
+		AppBaseURL:         "http://localhost:3000",
+		CORSAllowedOrigins: []string{allowedOrigin},
+	}, st, nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("Origin", allowedOrigin)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+
+	got := res.Header().Get("Access-Control-Expose-Headers")
+	if got != "Retry-After" {
+		t.Fatalf("expected Access-Control-Expose-Headers: Retry-After, got %q", got)
+	}
+}
+
 func TestAdminIPAllowlist(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "api-admin-ip-allowlist.db")
 	st, err := store.New(dbPath)
