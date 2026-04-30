@@ -77,9 +77,18 @@ var pricePhrasePattern = regexp.MustCompile(`(?i)(under|below|less\s+than|up\s+t
 // uses ASCII-only word boundaries — Cyrillic is not a word character.
 var priceWordPattern = regexp.MustCompile(`(?i)\b\d+([.,]\d+)?\s*(лв|bgn|eur|euro|euros|usd|\$|€)`)
 
-// conditionWordPattern removes condition qualifiers — those belong in the
-// Condition filter, not the free-text query.
-var conditionWordPattern = regexp.MustCompile(`(?i)\b(brand\s+new|like\s+new|new\s+in\s+box|nib|mint|used|second\s*hand|refurbished|fair|good)\b`)
+// conditionWordPattern removes condition-quality qualifiers — those belong
+// in the Condition filter, not the free-text query.
+//
+// W19-40 / XOL-137 (2026-04-30): "used" and "second hand" are NOT in this
+// pattern even though they look like condition words. They are market-
+// segment qualifiers on OLX BG ("Nikon Z6 II used" and "Nikon Z6 II"
+// return different listing sets — the former targets sellers explicitly
+// marketing the listing as used). Preserving them lets generator.go
+// fallbackSearches deploy the "<topic> used" variant as a distinct
+// search_config rather than collapsing into the bare-topic entry via
+// AutoDeployHunts dedup.
+var conditionWordPattern = regexp.MustCompile(`(?i)\b(brand\s+new|like\s+new|new\s+in\s+box|nib|mint|refurbished|fair|good)\b`)
 
 // sanitizeSearchQuery trims price/condition qualifiers and collapses whitespace.
 // Returns "" if nothing meaningful remains.

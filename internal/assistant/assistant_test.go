@@ -92,6 +92,57 @@ func TestSanitizeSearchQueryBGPricePhrases(t *testing.T) {
 	}
 }
 
+// TestSanitizeSearchQueryPreservesUsedAndSecondHand verifies that "used" and
+// "second hand" are NOT stripped — they're market-segment qualifiers on OLX
+// BG, not condition-quality words. Stripping them caused W19-40 chip-collapse:
+// "<topic> used" → "<topic>" → dedupes against bare-topic entry → 2 chips
+// instead of 3 for genericSearches output. (XOL-137)
+func TestSanitizeSearchQueryPreservesUsedAndSecondHand(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"nikon z6 ii used", "nikon z6 ii used"},
+		{"sony a7 iii used", "sony a7 iii used"},
+		{"macbook pro second hand", "macbook pro second hand"},
+		{"macbook pro secondhand", "macbook pro secondhand"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := sanitizeSearchQuery(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeSearchQuery(%q): expected %q (preserved); got %q", tc.input, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestSanitizeSearchQueryStripsConditionQualityWords verifies that the
+// remaining condition-quality qualifiers (mint, refurbished, like new,
+// brand new, fair, good) ARE still stripped — preserved behavior from before
+// the W19-40 fix. (XOL-137 regression guard)
+func TestSanitizeSearchQueryStripsConditionQualityWords(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"nikon z6 ii like new", "nikon z6 ii"},
+		{"nikon z6 ii brand new", "nikon z6 ii"},
+		{"macbook pro refurbished", "macbook pro"},
+		{"sony a7 mint", "sony a7"},
+		{"camera in fair condition", "camera in condition"}, // "fair" stripped, "condition" remains as a noun
+		{"laptop in good shape", "laptop in shape"},         // "good" stripped
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := sanitizeSearchQuery(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeSearchQuery(%q): expected %q (stripped); got %q", tc.input, tc.want, got)
+			}
+		})
+	}
+}
+
 // TestExtractBudgetBG verifies that BG Cyrillic budget markers are extracted
 // correctly from natural-language budget specifications (XOL-39 M3-E).
 func TestExtractBudgetBG(t *testing.T) {
