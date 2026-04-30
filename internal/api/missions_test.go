@@ -283,3 +283,146 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 		t.Errorf("expected empty SearchQueries on cap-fire, got %v", sq)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W19-35 / XOL-132: idempotency key tests
+// ---------------------------------------------------------------------------
+
+// postMissionWithKey fires POST /missions with the given body and Idempotency-Key header.
+func postMissionWithKey(srv *Server, tok, idempKey string, body map[string]any) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/missions", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	if idempKey != "" {
+		req.Header.Set("Idempotency-Key", idempKey)
+	}
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	return res
+}
+
+// TestHandleMissionsPostIdempotencyHitReturnsExistingMission — POST with an
+// Idempotency-Key creates a mission; second POST with the same key within 30s
+// returns the same response and does NOT insert a second mission.
+func TestHandleMissionsPostIdempotencyHitReturnsExistingMission(t *testing.T) {
+	st, srv, _, tok := newMissionsTestServer(t)
+
+	body := map[string]any{
+		"Name":        "Canon EOS R6 Hunt",
+		"TargetQuery": "Canon EOS R6",
+		"Status":      "draft",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	}
+
+	res1 := postMissionWithKey(srv, tok, "key-abc-123", body)
+	if res1.Code != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201; body = %s", res1.Code, res1.Body.String())
+	}
+	var m1 map[string]any
+	if err := json.NewDecoder(res1.Body).Decode(&m1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	id1 := m1["ID"]
+
+	res2 := postMissionWithKey(srv, tok, "key-abc-123", body)
+	if res2.Code != http.StatusCreated {
+		t.Fatalf("second POST status = %d, want 201; body = %s", res2.Code, res2.Body.String())
+	}
+	var m2 map[string]any
+	if err := json.NewDecoder(res2.Body).Decode(&m2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	id2 := m2["ID"]
+
+	// Both responses must carry the same mission ID.
+	if id1 != id2 {
+		t.Errorf("idempotency hit: id1=%v != id2=%v — duplicate mission was created", id1, id2)
+	}
+
+	// Only one mission must exist in the store.
+	missions, err := st.ListMissions(m1["UserID"].(string))
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) != 1 {
+		t.Errorf("expected 1 mission in store after idempotent POST, got %d", len(missions))
+	}
+}
+
+// TestHandleMissionsPostIdempotencyMissAfterTTL — POST with Idempotency-Key=X
+// creates a mission; after the cache TTL is manually expired by replacing the
+// entry, a second POST with the same key creates a NEW mission.
+func TestHandleMissionsPostIdempotencyMissAfterTTL(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	body := map[string]any{
+		"Name":        "TTL Miss Mission",
+		"TargetQuery": "Canon EOS R5",
+		"Status":      "draft",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	}
+
+	res1 := postMissionWithKey(srv, tok, "key-ttl-miss", body)
+	if res1.Code != http.StatusCreated {
+		t.Fatalf("first POST status = %d; body = %s", res1.Code, res1.Body.String())
+	}
+
+	// Manually expire the cache entry by backdating its createdAt > 30s.
+	cacheKey := userID + "|key-ttl-miss"
+	srv.idempMu.Lock()
+	if entry, ok := srv.idempCache[cacheKey]; ok {
+		entry.createdAt = time.Now().Add(-31 * time.Second)
+		srv.idempCache[cacheKey] = entry
+	}
+	srv.idempMu.Unlock()
+
+	res2 := postMissionWithKey(srv, tok, "key-ttl-miss", body)
+	if res2.Code != http.StatusCreated {
+		t.Fatalf("second POST (after TTL) status = %d; body = %s", res2.Code, res2.Body.String())
+	}
+
+	// A new mission must have been created: store should have 2.
+	missions, err := st.ListMissions(userID)
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) != 2 {
+		t.Errorf("expected 2 missions after TTL expiry, got %d", len(missions))
+	}
+}
+
+// TestHandleMissionsPostNoIdempotencyKeyAllowsDuplicates — POST without an
+// Idempotency-Key always proceeds regardless of prior POSTs (legacy behavior).
+func TestHandleMissionsPostNoIdempotencyKeyAllowsDuplicates(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	body := map[string]any{
+		"Name":        "No Key Mission",
+		"TargetQuery": "Nikon Z6",
+		"Status":      "draft",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	}
+
+	res1 := postMission(srv, tok, body)
+	if res1.Code != http.StatusCreated {
+		t.Fatalf("first POST status = %d; body = %s", res1.Code, res1.Body.String())
+	}
+
+	res2 := postMission(srv, tok, body)
+	if res2.Code != http.StatusCreated {
+		t.Fatalf("second POST status = %d; body = %s", res2.Code, res2.Body.String())
+	}
+
+	// Both missions must exist: no dedup gate without Idempotency-Key.
+	missions, err := st.ListMissions(userID)
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) != 2 {
+		t.Errorf("expected 2 missions (no dedup without key), got %d", len(missions))
+	}
+}

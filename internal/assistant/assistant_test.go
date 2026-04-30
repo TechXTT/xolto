@@ -835,3 +835,147 @@ func TestStartBriefConversationParsesFullInput(t *testing.T) {
 		t.Errorf("Mission.BudgetMax = %d, want 1200 (budget was in input)", reply.Mission.BudgetMax)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W19-35 / XOL-132: AutoDeployHunts dedup-scope tests
+// ---------------------------------------------------------------------------
+
+// newAutoDeployTestAssistant creates an Assistant backed by a real SQLite store
+// with AI disabled. Returns (assistant, store, userID).
+func newAutoDeployTestAssistant(t *testing.T) (*Assistant, *store.SQLiteStore, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "autodeployhunts-test.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	userID, err := st.CreateUser("autodeployhunts@example.com", "hash", "AutoDeploy Test User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		AI: config.AIConfig{Enabled: false},
+	}
+	a := New(cfg, st, nil, nil)
+	return a, st, userID
+}
+
+// TestAutoDeployHuntsDedupScopedToMission — mission_1 and mission_2 for the
+// same user both use "canon eos r6" as their query. AutoDeployHunts must create
+// a search_config for EACH mission independently; mission_2's search_config
+// must NOT be suppressed by mission_1's existing one.
+//
+// This is the regression test for the dedup-scope fix (XOL-132): the old
+// user-wide dedup left mission_2 with zero search_configs.
+func TestAutoDeployHuntsDedupScopedToMission(t *testing.T) {
+	a, st, userID := newAutoDeployTestAssistant(t)
+
+	// Create mission_1.
+	mission1ID, err := st.UpsertMission(models.Mission{
+		UserID:           userID,
+		Name:             "Canon EOS R6 Hunt 1",
+		TargetQuery:      "canon eos r6",
+		SearchQueries:    []string{"canon eos r6"},
+		Status:           "active",
+		CountryCode:      "BG",
+		MarketplaceScope: []string{"olx_bg"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission(1) error = %v", err)
+	}
+	mission1, _ := st.GetMission(mission1ID)
+
+	// Deploy hunts for mission_1.
+	count1, err := a.AutoDeployHunts(context.Background(), userID, *mission1)
+	if err != nil {
+		t.Fatalf("AutoDeployHunts(mission1) error = %v", err)
+	}
+	if count1 == 0 {
+		t.Fatalf("AutoDeployHunts(mission1): expected >= 1 search_config created, got 0")
+	}
+
+	// Create mission_2 with the same query.
+	mission2ID, err := st.UpsertMission(models.Mission{
+		UserID:           userID,
+		Name:             "Canon EOS R6 Hunt 2",
+		TargetQuery:      "canon eos r6",
+		SearchQueries:    []string{"canon eos r6"},
+		Status:           "active",
+		CountryCode:      "BG",
+		MarketplaceScope: []string{"olx_bg"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission(2) error = %v", err)
+	}
+	mission2, _ := st.GetMission(mission2ID)
+
+	// Deploy hunts for mission_2 — must NOT be blocked by mission_1's configs.
+	count2, err := a.AutoDeployHunts(context.Background(), userID, *mission2)
+	if err != nil {
+		t.Fatalf("AutoDeployHunts(mission2) error = %v", err)
+	}
+	if count2 == 0 {
+		t.Errorf("AutoDeployHunts(mission2): expected >= 1 search_config created (dedup must be mission-scoped, not user-wide), got 0")
+	}
+
+	// Total: both missions must have search_configs.
+	all, err := st.GetSearchConfigs(userID)
+	if err != nil {
+		t.Fatalf("GetSearchConfigs error = %v", err)
+	}
+	if len(all) < 2 {
+		t.Errorf("expected >= 2 total search_configs across both missions, got %d", len(all))
+	}
+}
+
+// TestAutoDeployHuntsDedupSameMissionTwice — calling AutoDeployHunts on the
+// SAME mission twice must NOT create duplicate search_configs on the second
+// call. This confirms the scoped dedup still works for its intended purpose
+// (mission edit + re-deploy idempotency).
+func TestAutoDeployHuntsDedupSameMissionTwice(t *testing.T) {
+	a, st, userID := newAutoDeployTestAssistant(t)
+
+	missionID, err := st.UpsertMission(models.Mission{
+		UserID:           userID,
+		Name:             "Sony A7 III Hunt",
+		TargetQuery:      "sony a7 iii",
+		SearchQueries:    []string{"sony a7 iii"},
+		Status:           "active",
+		CountryCode:      "BG",
+		MarketplaceScope: []string{"olx_bg"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertMission error = %v", err)
+	}
+	mission, _ := st.GetMission(missionID)
+
+	// First deploy.
+	count1, err := a.AutoDeployHunts(context.Background(), userID, *mission)
+	if err != nil {
+		t.Fatalf("AutoDeployHunts(first) error = %v", err)
+	}
+	if count1 == 0 {
+		t.Fatalf("AutoDeployHunts(first): expected >= 1 search_config, got 0")
+	}
+
+	// Second deploy of the SAME mission — no duplicates must be created.
+	count2, err := a.AutoDeployHunts(context.Background(), userID, *mission)
+	if err != nil {
+		t.Fatalf("AutoDeployHunts(second) error = %v", err)
+	}
+	if count2 != 0 {
+		t.Errorf("AutoDeployHunts(second same mission): expected 0 new search_configs (already exists), got %d", count2)
+	}
+
+	// Total configs must equal first-deploy count only.
+	all, err := st.GetSearchConfigs(userID)
+	if err != nil {
+		t.Fatalf("GetSearchConfigs error = %v", err)
+	}
+	if len(all) != count1 {
+		t.Errorf("expected %d total search_configs (no duplicates), got %d", count1, len(all))
+	}
+}
