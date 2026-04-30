@@ -744,3 +744,94 @@ func TestAssistantChatRequestShape_NoResponseFormat(t *testing.T) {
 		t.Errorf("compareWithAI must not send response_format, but it was present: %#v", captured["response_format"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W19-34 / XOL-131: extractBudget regex fix regression tests
+// ---------------------------------------------------------------------------
+
+// budgetQuestion is the exact string nextProfileQuestion returns when budget
+// is missing — used to assert the brief parser is NOT asking for budget.
+const budgetQuestion = "What's your budget?"
+
+// TestExtractBudgetHandlesAroundBeforeInteger — the exact founder live-verify
+// failure: "budget around 1200 euros" returned 0 before the regex fix.
+func TestExtractBudgetHandlesAroundBeforeInteger(t *testing.T) {
+	got := extractBudget("Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros")
+	if got != 1200 {
+		t.Errorf("extractBudget(budget around 1200 euros) = %d, want 1200", got)
+	}
+}
+
+// TestExtractBudgetHandlesUnderMarker — "under N" variant.
+func TestExtractBudgetHandlesUnderMarker(t *testing.T) {
+	got := extractBudget("Sony A7iii under 1500 EUR")
+	if got != 1500 {
+		t.Errorf("extractBudget(under 1500) = %d, want 1500", got)
+	}
+}
+
+// TestExtractBudgetHandlesMaxMarker — "max N" variant.
+func TestExtractBudgetHandlesMaxMarker(t *testing.T) {
+	got := extractBudget("max 800 euro for a laptop")
+	if got != 800 {
+		t.Errorf("extractBudget(max 800) = %d, want 800", got)
+	}
+}
+
+// TestExtractBudgetHandlesIntegerBeforeMarker — integer precedes the marker
+// ("1200 euro budget") — the before-window scan path.
+func TestExtractBudgetHandlesIntegerBeforeMarker(t *testing.T) {
+	got := extractBudget("looking for a camera, 1200 euro budget")
+	if got != 1200 {
+		t.Errorf("extractBudget(1200 euro budget) = %d, want 1200", got)
+	}
+}
+
+// TestExtractBudgetHandlesBGCyrillic — "под N лв" BG Cyrillic marker.
+func TestExtractBudgetHandlesBGCyrillic(t *testing.T) {
+	got := extractBudget("под 1500 лв за камера")
+	if got != 1500 {
+		t.Errorf("extractBudget(под 1500) = %d, want 1500", got)
+	}
+}
+
+// TestExtractBudgetReturnsZeroWhenNoBudget — defensive: no marker present.
+func TestExtractBudgetReturnsZeroWhenNoBudget(t *testing.T) {
+	got := extractBudget("Help me find a Sony")
+	if got != 0 {
+		t.Errorf("extractBudget(no budget) = %d, want 0", got)
+	}
+}
+
+// TestStartBriefConversationParsesFullInput — end-to-end contract test.
+// Input explicitly contains: item (Fujifilm X-T4), location (Bulgaria), and
+// budget (1200 euros). The brief parser must NOT ask "What's your budget?".
+// The reply must NOT start with the budget question, and SOME mission state
+// must have been written (session saved OR mission upserted without error).
+//
+// This is the P0 regression test for XOL-131. Failure here means the bug
+// is not fixed end-to-end on the heuristic path.
+func TestStartBriefConversationParsesFullInput(t *testing.T) {
+	a, userID := newConverseTestAssistant(t)
+
+	const input = "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	reply, err := a.Converse(context.Background(), userID, input)
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+
+	// The brief parser must NOT ask for budget when budget was explicit.
+	if strings.HasPrefix(reply.Message, budgetQuestion) {
+		t.Errorf("Converse() asked 'What's your budget?' even though budget was explicit in input.\nMessage: %s", reply.Message)
+	}
+
+	// Some mission state must exist: either a session was saved (Expecting==true
+	// asking for condition) or a mission was upserted (Expecting==false).
+	// In both cases reply.Mission must be non-nil and contain the budget.
+	if reply.Mission == nil {
+		t.Fatalf("Converse() returned nil Mission — no state was persisted")
+	}
+	if reply.Mission.BudgetMax != 1200 {
+		t.Errorf("Mission.BudgetMax = %d, want 1200 (budget was in input)", reply.Mission.BudgetMax)
+	}
+}
