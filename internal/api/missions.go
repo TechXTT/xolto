@@ -324,11 +324,21 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 
 		// W19-35 / XOL-132: store in idempotency cache after successful upsert
 		// so any duplicate POST within the 30s window returns this response.
+		// GC pass: drop expired entries on every write (mirrors the existing
+		// pattern in internal/api/anonymous_analyze.go ~285 — pr-reviewer
+		// flagged unbounded growth as the original cache lacked any
+		// eviction strategy).
 		if idempKey != "" {
 			cacheKey := user.ID + "|" + idempKey
 			missionCopy := mission
+			now := time.Now()
 			s.idempMu.Lock()
-			s.idempCache[cacheKey] = idempEntry{createdAt: time.Now(), missionResp: &missionCopy}
+			for k, e := range s.idempCache {
+				if now.Sub(e.createdAt) > 30*time.Second {
+					delete(s.idempCache, k)
+				}
+			}
+			s.idempCache[cacheKey] = idempEntry{createdAt: now, missionResp: &missionCopy}
 			s.idempMu.Unlock()
 		}
 
