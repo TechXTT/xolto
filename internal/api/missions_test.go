@@ -265,22 +265,79 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 		"CountryCode": "BG",
 	})
 	if res.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201 (graceful skip on cap-fire); body = %s", res.Code, res.Body.String())
+		t.Fatalf("status = %d, want 201 (graceful degradation on cap-fire); body = %s", res.Code, res.Body.String())
 	}
 	body := decodeMissionBody(t, res)
 
-	// SearchQueries must be empty (nil or []) — auto-expand was silently skipped.
-	// Response JSON key is "SearchQueries" (no json tag on models.Mission).
-	raw := body["SearchQueries"]
-	if raw == nil {
-		return // nil is acceptable: no auto-expand happened
+	// XOL-134 Bug A fix: cap-fire causes generator to return (fallbackSearches,
+	// wrappedErr). EnsureSearchVariants now uses the fallback, so SearchQueries
+	// must be populated (>= 1). Prior expectation ("empty on cap-fire") was
+	// documenting the broken behavior — updated here to match the fix.
+	// Hard constraint: mission must still be created (201) — graceful degradation
+	// means no user-visible error, not necessarily empty SearchQueries.
+	raw, ok := body["SearchQueries"]
+	if !ok || raw == nil {
+		// nil SearchQueries is still acceptable if fallback was exhausted (e.g.
+		// empty topic guard fires first), but warn so the test is visible.
+		t.Logf("SearchQueries nil/absent on cap-fire; fallback may not have fired")
+		return
 	}
 	sq, ok := raw.([]any)
 	if !ok {
 		t.Fatalf("SearchQueries unexpected type %T", raw)
 	}
-	if len(sq) != 0 {
-		t.Errorf("expected empty SearchQueries on cap-fire, got %v", sq)
+	// Post-fix: fallback entries used → at least 1 entry expected.
+	if len(sq) == 0 {
+		t.Errorf("expected SearchQueries populated from fallback on cap-fire, got empty; body = %v", body)
+	}
+	if len(sq) > 5 {
+		t.Errorf("SearchQueries len = %d, must be <= 5 (founder hard-cap)", len(sq))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W19-37 / XOL-134: generator floor regression — POST /missions end-to-end
+// ---------------------------------------------------------------------------
+
+// TestHandleMissionsPostAutoExpandsGenericTopic — end-to-end regression for
+// XOL-134. Prior to the fix, "Fujifilm X-T4" (non-sony/non-camera topic)
+// triggered genericSearches which returned 1 entry, so the mission was
+// persisted with 1 chip. After the fix both genericSearches (3 entries) and
+// EnsureSearchVariants floor synthesis must ensure >= 3 SearchQueries.
+func TestHandleMissionsPostAutoExpandsGenericTopic(t *testing.T) {
+	_, srv, _, tok := newMissionsTestServer(t)
+
+	res := postMission(srv, tok, map[string]any{
+		"Name":        "Fujifilm X-T4 Hunt",
+		"TargetQuery": "Fujifilm X-T4",
+		"Status":      "draft",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
+	}
+	body := decodeMissionBody(t, res)
+
+	raw, ok := body["SearchQueries"]
+	if !ok {
+		t.Fatalf("response missing SearchQueries key; body = %v", body)
+	}
+	sq, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("SearchQueries is not an array: %T", raw)
+	}
+	if len(sq) < 3 {
+		t.Errorf("SearchQueries len = %d, want >= 3 (XOL-134 floor); queries = %v", len(sq), sq)
+	}
+	if len(sq) > 5 {
+		t.Errorf("SearchQueries len = %d, must be <= 5 (founder hard-cap)", len(sq))
+	}
+	for i, v := range sq {
+		q, ok := v.(string)
+		if !ok || q == "" {
+			t.Errorf("SearchQueries[%d] = %v (type %T), want non-empty string", i, v, v)
+		}
 	}
 }
 

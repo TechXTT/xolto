@@ -382,8 +382,15 @@ func genericCameraSearches(topic string) []config.SearchConfig {
 }
 
 func genericSearches(topic string) []config.SearchConfig {
+	// W19-37 / XOL-134: broaden the static floor from 1 to 3 entries.
+	// The prior single-entry shape produced 1 chip on missions for
+	// non-sony/non-camera inputs (e.g. "Fujifilm X-T4", "MacBook Pro 14"),
+	// violating the W19-31-locked 3-5 floor. Three deterministic
+	// permutations cover the common buying-context shapes without
+	// invoking the LLM.
 	base := cleanName(topic)
 	query := strings.ToLower(strings.TrimSpace(topic))
+	template := "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?"
 	return []config.SearchConfig{
 		{
 			Name:            base + " Deals",
@@ -394,7 +401,29 @@ func genericSearches(topic string) []config.SearchConfig {
 			Condition:       []string{"good", "like_new"},
 			OfferPercentage: 72,
 			AutoMessage:     false,
-			MessageTemplate: "Hi, I'm interested in {{.Title}}. Would you accept EUR {{.OfferPrice}}?",
+			MessageTemplate: template,
+		},
+		{
+			Name:            base + " Used",
+			Query:           query + " used",
+			CategoryID:      defaultCategoryID,
+			MaxPrice:        1000,
+			MinPrice:        50,
+			Condition:       []string{"good", "like_new"},
+			OfferPercentage: 72,
+			AutoMessage:     false,
+			MessageTemplate: template,
+		},
+		{
+			Name:            base + " For Sale",
+			Query:           query + " for sale",
+			CategoryID:      defaultCategoryID,
+			MaxPrice:        1000,
+			MinPrice:        50,
+			Condition:       []string{"good", "like_new"},
+			OfferPercentage: 72,
+			AutoMessage:     false,
+			MessageTemplate: template,
 		},
 	}
 }
