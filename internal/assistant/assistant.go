@@ -1097,7 +1097,7 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 	// no LLM call, no aibudget cost. Skip synthesis when target is empty
 	// (defensive: shouldn't happen since we checked at function entry).
 	if len(out) < 3 && target != "" {
-		floorTokens := []string{"used", "for sale", "buy"}
+		floorTokens := []string{"used", "for sale", "deals"}
 		for _, token := range floorTokens {
 			if len(out) >= 3 {
 				break
