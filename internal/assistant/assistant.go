@@ -1042,12 +1042,23 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 	}
 	genSearches, err := gen.GenerateSearches(ctx, target)
 	if err != nil {
-		slog.Warn("mission auto-expand skipped",
+		// W19-37 / XOL-134: gen.GenerateSearches returns BOTH the fallback
+		// entries AND a wrapped error when AI fails (see generator.go:62-67).
+		// The prior implementation discarded the fallback — leaving missions
+		// with 1 chip when AI was flaky. Now: log the warning, then USE the
+		// fallback if it's non-empty. Only skip when there's truly nothing
+		// to expand from (genSearches is nil or empty).
+		slog.Warn("mission auto-expand AI path failed; using fallback",
 			"op", "assistant.EnsureSearchVariants",
 			"user_id", mission.UserID,
 			"target_query", target,
+			"fallback_count", len(genSearches),
 			"error", err.Error())
-		return nil
+		if len(genSearches) == 0 {
+			return nil
+		}
+		// Fall through to the dedup loop below — fallback entries get
+		// merged into out the same way AI-success entries would.
 	}
 	// Dedupe against existing SearchQueries (case-insensitive trim).
 	seen := make(map[string]bool, len(mission.SearchQueries)+len(genSearches))
@@ -1077,6 +1088,27 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 		out = append(out, cleaned)
 		if len(out) >= 5 {
 			break
+		}
+	}
+	// W19-37 / XOL-134: floor enforcement. Brief locks 3-5 variants per
+	// mission. If dedup left us with <3 entries (common when generator
+	// returns 1 generic entry, or fallback returned a small set), synthesize
+	// trailing variants from common buying-context tokens. Deterministic,
+	// no LLM call, no aibudget cost. Skip synthesis when target is empty
+	// (defensive: shouldn't happen since we checked at function entry).
+	if len(out) < 3 && target != "" {
+		floorTokens := []string{"used", "for sale", "deals"}
+		for _, token := range floorTokens {
+			if len(out) >= 3 {
+				break
+			}
+			candidate := strings.TrimSpace(target + " " + token)
+			key := strings.ToLower(candidate)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, candidate)
 		}
 	}
 	if len(out) > 5 {

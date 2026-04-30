@@ -89,6 +89,28 @@ func TestGeneratorRequestShape_ModelOverride(t *testing.T) {
 	}
 }
 
+// TestGenericSearchesReturnsThreeEntries — W19-37 / XOL-134 regression.
+// Before the fix, genericSearches returned 1 entry for non-sony/non-camera
+// inputs. After the fix it must return exactly 3 deterministic entries.
+// Uses AI-disabled config so GenerateSearches follows the static fallback path.
+func TestGenericSearchesReturnsThreeEntries(t *testing.T) {
+	gen := New(config.AIConfig{
+		Enabled: false,
+	})
+	// "Fujifilm X-T4" is not matched by sonyCameraSearches or canonSearches,
+	// so it falls through to genericSearches.
+	searches, err := gen.GenerateSearches(context.Background(), "Fujifilm X-T4")
+	if err != nil {
+		t.Fatalf("GenerateSearches() unexpected error: %v", err)
+	}
+	if len(searches) < 3 {
+		t.Errorf("GenerateSearches(Fujifilm X-T4) returned %d entries, want >= 3 (XOL-134 floor)", len(searches))
+		for i, s := range searches {
+			t.Logf("  searches[%d]: name=%q query=%q", i, s.Name, s.Query)
+		}
+	}
+}
+
 // TestGeneratorRequestShape_ModelFallthrough verifies that when SetModel is NOT
 // called, the outgoing request uses cfg.Model (XOL-60 SUP-9 AC).
 func TestGeneratorRequestShape_ModelFallthrough(t *testing.T) {
