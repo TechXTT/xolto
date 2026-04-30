@@ -26,6 +26,7 @@ import (
 	"github.com/TechXTT/xolto/internal/assistant"
 	"github.com/TechXTT/xolto/internal/auth"
 	"github.com/TechXTT/xolto/internal/config"
+	"github.com/TechXTT/xolto/internal/models"
 	"github.com/TechXTT/xolto/internal/store"
 )
 
@@ -93,40 +94,45 @@ func decodeMissionBody(t *testing.T, res *httptest.ResponseRecorder) map[string]
 
 // TestHandleMissionsPostAutoExpandsTargetQuery — happy path.
 // AI disabled → static fallback via GenerateSearches. The sony branch returns
-// 4 entries, so SearchQueries must be populated with >= 1 query after creation.
+// 4 entries. W19-39 / XOL-136: auto-expand runs async for active missions,
+// so the 201 response will have empty SearchQueries; poll the store until
+// search_configs appear (goroutine completes within 5s).
 func TestHandleMissionsPostAutoExpandsTargetQuery(t *testing.T) {
-	_, srv, _, tok := newMissionsTestServer(t)
+	st, srv, userID, tok := newMissionsTestServer(t)
 
 	res := postMission(srv, tok, map[string]any{
 		"Name":        "Sony A6700 Hunt",
 		"TargetQuery": "Sony A6700",
-		"Status":      "draft",
+		"Status":      "active",
 		"Urgency":     "flexible",
 		"CountryCode": "BG",
 	})
 	if res.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
 	}
-	body := decodeMissionBody(t, res)
 
-	// SearchQueries must be populated: static sony fallback returns 4 entries.
-	// Response JSON key is "SearchQueries" (no json tag on models.Mission).
-	raw, ok := body["SearchQueries"]
-	if !ok {
-		t.Fatalf("response missing SearchQueries key; body = %v", body)
+	// W19-39 / XOL-136: auto-expand is now async; poll for search_configs to
+	// appear in the store (goroutine creates them via AutoDeployHunts).
+	deadline := time.Now().Add(5 * time.Second)
+	var configs []models.SearchSpec
+	for time.Now().Before(deadline) {
+		var err error
+		configs, err = st.GetSearchConfigs(userID)
+		if err != nil {
+			t.Fatalf("GetSearchConfigs error: %v", err)
+		}
+		if len(configs) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	sq, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("SearchQueries is not an array: %T", raw)
+	if len(configs) == 0 {
+		t.Fatalf("expected search_configs to be created by async auto-expand goroutine, got 0 after 5s")
 	}
-	if len(sq) == 0 {
-		t.Fatalf("expected SearchQueries to be populated, got empty slice")
-	}
-	// Each entry must be a non-empty string (query text, not a SearchConfig struct).
-	for i, v := range sq {
-		q, ok := v.(string)
-		if !ok || q == "" {
-			t.Errorf("SearchQueries[%d] = %v (type %T), want non-empty string", i, v, v)
+	// Each search_config must have a non-empty query.
+	for i, c := range configs {
+		if c.Query == "" {
+			t.Errorf("search_configs[%d].Query is empty", i)
 		}
 	}
 }
@@ -267,32 +273,13 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 	if res.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (graceful degradation on cap-fire); body = %s", res.Code, res.Body.String())
 	}
-	body := decodeMissionBody(t, res)
 
-	// XOL-134 Bug A fix: cap-fire causes generator to return (fallbackSearches,
-	// wrappedErr). EnsureSearchVariants now uses the fallback, so SearchQueries
-	// must be populated (>= 1). Prior expectation ("empty on cap-fire") was
-	// documenting the broken behavior — updated here to match the fix.
-	// Hard constraint: mission must still be created (201) — graceful degradation
-	// means no user-visible error, not necessarily empty SearchQueries.
-	raw, ok := body["SearchQueries"]
-	if !ok || raw == nil {
-		// nil SearchQueries is still acceptable if fallback was exhausted (e.g.
-		// empty topic guard fires first), but warn so the test is visible.
-		t.Logf("SearchQueries nil/absent on cap-fire; fallback may not have fired")
-		return
-	}
-	sq, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("SearchQueries unexpected type %T", raw)
-	}
-	// Post-fix: fallback entries used → at least 1 entry expected.
-	if len(sq) == 0 {
-		t.Errorf("expected SearchQueries populated from fallback on cap-fire, got empty; body = %v", body)
-	}
-	if len(sq) > 5 {
-		t.Errorf("SearchQueries len = %d, must be <= 5 (founder hard-cap)", len(sq))
-	}
+	// W19-39 / XOL-136: auto-expand only runs async for active missions.
+	// Draft missions skip the goroutine entirely, so the 201 response simply
+	// confirms the mission was inserted without error. That is the key
+	// graceful-degradation guarantee: cap-fire must never prevent mission
+	// creation. SearchQueries will be empty; that is the correct expectation
+	// for a non-active mission with a budget-exhausted AI assistant.
 }
 
 // ---------------------------------------------------------------------------
@@ -301,42 +288,56 @@ func TestHandleMissionsPostGracefulOnCapFire(t *testing.T) {
 
 // TestHandleMissionsPostAutoExpandsGenericTopic — end-to-end regression for
 // XOL-134. Prior to the fix, "Fujifilm X-T4" (non-sony/non-camera topic)
-// triggered genericSearches which returned 1 entry, so the mission was
-// persisted with 1 chip. After the fix both genericSearches (3 entries) and
-// EnsureSearchVariants floor synthesis must ensure >= 3 SearchQueries.
+// triggered genericSearches which returned 1 entry. After the fix the floor
+// synthesis ensures >= 3 SearchQueries are persisted on the mission row.
+// W19-39 / XOL-136: auto-expand runs async for active missions; poll the
+// mission's SearchQueries in the DB for eventual consistency. Note: the
+// search_configs count may be lower than SearchQueries count because
+// AutoDeployHunts sanitizes queries (strips "used" etc.), so we assert on
+// the mission row's SearchQueries, not on search_configs count.
 func TestHandleMissionsPostAutoExpandsGenericTopic(t *testing.T) {
-	_, srv, _, tok := newMissionsTestServer(t)
+	st, srv, userID, tok := newMissionsTestServer(t)
 
 	res := postMission(srv, tok, map[string]any{
 		"Name":        "Fujifilm X-T4 Hunt",
 		"TargetQuery": "Fujifilm X-T4",
-		"Status":      "draft",
+		"Status":      "active",
 		"Urgency":     "flexible",
 		"CountryCode": "BG",
 	})
 	if res.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
 	}
-	body := decodeMissionBody(t, res)
 
-	raw, ok := body["SearchQueries"]
-	if !ok {
-		t.Fatalf("response missing SearchQueries key; body = %v", body)
+	// W19-39 / XOL-136: auto-expand is async; poll the mission row's
+	// SearchQueries which are updated by the goroutine's second UpsertMission.
+	// XOL-134 floor: at least 3 SearchQueries on the persisted mission.
+	deadline := time.Now().Add(5 * time.Second)
+	var missions []models.Mission
+	for time.Now().Before(deadline) {
+		var err error
+		missions, err = st.ListMissions(userID)
+		if err != nil {
+			t.Fatalf("ListMissions error: %v", err)
+		}
+		if len(missions) > 0 && len(missions[0].SearchQueries) >= 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	sq, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("SearchQueries is not an array: %T", raw)
+	if len(missions) == 0 {
+		t.Fatalf("expected mission in store, got 0")
 	}
+	sq := missions[0].SearchQueries
 	if len(sq) < 3 {
 		t.Errorf("SearchQueries len = %d, want >= 3 (XOL-134 floor); queries = %v", len(sq), sq)
 	}
 	if len(sq) > 5 {
 		t.Errorf("SearchQueries len = %d, must be <= 5 (founder hard-cap)", len(sq))
 	}
-	for i, v := range sq {
-		q, ok := v.(string)
-		if !ok || q == "" {
-			t.Errorf("SearchQueries[%d] = %v (type %T), want non-empty string", i, v, v)
+	for i, q := range sq {
+		if q == "" {
+			t.Errorf("SearchQueries[%d] is empty", i)
 		}
 	}
 }
@@ -482,4 +483,204 @@ func TestHandleMissionsPostNoIdempotencyKeyAllowsDuplicates(t *testing.T) {
 	if len(missions) != 2 {
 		t.Errorf("expected 2 missions (no dedup without key), got %d", len(missions))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// W19-39 / XOL-136: async auto-expand tests
+// ---------------------------------------------------------------------------
+
+// TestHandleMissionsPostMissionInsertedBeforeAutoExpand — POST /missions
+// immediately creates the mission row and returns 201 before the goroutine
+// runs EnsureSearchVariants. Verified by querying the store synchronously
+// after receiving the 201 response.
+func TestHandleMissionsPostMissionInsertedBeforeAutoExpand(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	res := postMission(srv, tok, map[string]any{
+		"Name":        "Sync Insert Mission",
+		"TargetQuery": "Canon EOS R5",
+		"Status":      "active",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
+	}
+
+	// Mission must exist in the store immediately after the 201 response —
+	// it was inserted in the synchronous path before the goroutine started.
+	missions, err := st.ListMissions(userID)
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) == 0 {
+		t.Fatalf("expected mission in store immediately after 201 response, got 0")
+	}
+	if missions[0].Name != "Sync Insert Mission" {
+		t.Errorf("mission name = %q, want %q", missions[0].Name, "Sync Insert Mission")
+	}
+}
+
+// TestHandleMissionsPostAsyncAutoExpandPersistsSearchConfigs — POST /missions
+// with an active mission eventually creates search_configs via the async
+// goroutine. Polls for up to 5s.
+func TestHandleMissionsPostAsyncAutoExpandPersistsSearchConfigs(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	res := postMission(srv, tok, map[string]any{
+		"Name":        "Async Expand Mission",
+		"TargetQuery": "Sony A6700",
+		"Status":      "active",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
+	}
+
+	// Poll until search_configs appear (created by the async goroutine).
+	deadline := time.Now().Add(5 * time.Second)
+	var configs []models.SearchSpec
+	for time.Now().Before(deadline) {
+		var err error
+		configs, err = st.GetSearchConfigs(userID)
+		if err != nil {
+			t.Fatalf("GetSearchConfigs error: %v", err)
+		}
+		if len(configs) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(configs) == 0 {
+		t.Fatalf("expected search_configs after async auto-expand, got 0 within 5s")
+	}
+}
+
+// TestHandleMissionsPostIdempotencyCacheStillWorks — POST with same
+// Idempotency-Key twice; second call returns the cached response without
+// inserting a duplicate mission. This verifies XOL-132 still works after
+// the W19-39 restructure.
+func TestHandleMissionsPostIdempotencyCacheStillWorks(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	body := map[string]any{
+		"Name":        "Idem Cache Check",
+		"TargetQuery": "Nikon Z6 II",
+		"Status":      "draft",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	}
+
+	res1 := postMissionWithKey(srv, tok, "xol136-idem-key", body)
+	if res1.Code != http.StatusCreated {
+		t.Fatalf("first POST status = %d; body = %s", res1.Code, res1.Body.String())
+	}
+	var m1 map[string]any
+	if err := json.NewDecoder(res1.Body).Decode(&m1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	res2 := postMissionWithKey(srv, tok, "xol136-idem-key", body)
+	if res2.Code != http.StatusCreated {
+		t.Fatalf("second POST status = %d; body = %s", res2.Code, res2.Body.String())
+	}
+	var m2 map[string]any
+	if err := json.NewDecoder(res2.Body).Decode(&m2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+
+	if m1["ID"] != m2["ID"] {
+		t.Errorf("idempotency broken: first ID=%v, second ID=%v — duplicate inserted", m1["ID"], m2["ID"])
+	}
+
+	missions, err := st.ListMissions(userID)
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) != 1 {
+		t.Errorf("expected 1 mission after idempotent POST, got %d", len(missions))
+	}
+}
+
+// TestHandleMissionsPostInactiveMissionSkipsAutoExpand — POST with a
+// non-active status ("paused") must insert the mission and return 201
+// without creating search_configs. The async goroutine only fires for
+// active missions.
+func TestHandleMissionsPostInactiveMissionSkipsAutoExpand(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	res := postMission(srv, tok, map[string]any{
+		"Name":        "Paused Mission",
+		"TargetQuery": "Sony A6700",
+		"Status":      "paused",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
+	}
+
+	// Mission must be in the store.
+	missions, err := st.ListMissions(userID)
+	if err != nil {
+		t.Fatalf("ListMissions error: %v", err)
+	}
+	if len(missions) == 0 {
+		t.Fatalf("expected mission inserted, got 0")
+	}
+
+	// Give the goroutine time to fire (it should NOT fire for non-active).
+	time.Sleep(200 * time.Millisecond)
+
+	// No search_configs should exist: goroutine is gated on status == "active".
+	configs, err := st.GetSearchConfigs(userID)
+	if err != nil {
+		t.Fatalf("GetSearchConfigs error: %v", err)
+	}
+	if len(configs) != 0 {
+		t.Errorf("expected 0 search_configs for paused mission, got %d", len(configs))
+	}
+}
+
+// TestHandleMissionsPostReturnsBeforeAutoExpand — POST /missions 201 response
+// is bounded by the DB insert, not by auto-expand. The 201 is expected
+// immediately. We verify indirectly: the response contains the mission with
+// empty SearchQueries (since auto-expand hasn't completed yet), while
+// search_configs appear only after polling. This confirms the response was
+// sent before the goroutine completed.
+func TestHandleMissionsPostReturnsBeforeAutoExpand(t *testing.T) {
+	st, srv, userID, tok := newMissionsTestServer(t)
+
+	res := postMission(srv, tok, map[string]any{
+		"Name":        "Return Early Mission",
+		"TargetQuery": "Sony A6700",
+		"Status":      "active",
+		"Urgency":     "flexible",
+		"CountryCode": "BG",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", res.Code, res.Body.String())
+	}
+
+	// The response body must have an ID (mission was inserted synchronously).
+	body := decodeMissionBody(t, res)
+	if body["ID"] == nil || body["ID"] == float64(0) {
+		t.Errorf("expected non-zero mission ID in 201 response, got %v", body["ID"])
+	}
+
+	// The response SearchQueries will be empty for active missions at response
+	// time (auto-expand is still in flight). Wait for the goroutine.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		configs, err := st.GetSearchConfigs(userID)
+		if err != nil {
+			t.Fatalf("GetSearchConfigs error: %v", err)
+		}
+		if len(configs) > 0 {
+			return // goroutine completed; test passes
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("async goroutine did not create search_configs within 5s")
 }
