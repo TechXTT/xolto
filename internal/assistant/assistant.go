@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -702,7 +703,19 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 		mission.BudgetStretch = mission.BudgetMax
 	}
 
-	if question, key := nextProfileQuestion(*mission); question != "" {
+	// W19-34 / XOL-131: diagnostic for slot-extraction failures during VAL-3
+	// cohort. When the brief parser asks for a slot the user already provided
+	// in the raw input, we need attribution signal in production logs.
+	question, key := nextProfileQuestion(*mission)
+	if question != "" {
+		slog.Info("brief parser asking for missing slot",
+			"op", "assistant.startBriefConversation.slot_missing",
+			"user_id", userID,
+			"missing_slot", key,
+			"raw_input_chars", len(prompt),
+			"extracted_budget_max", mission.BudgetMax,
+			"extracted_target_query", mission.TargetQuery,
+			"ai_path_used", a.aiEnabled())
 		session := models.AssistantSession{
 			UserID:           userID,
 			PendingIntent:    models.IntentCreateBrief,
@@ -764,7 +777,19 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 	if user, uerr := a.store.GetUserByID(session.UserID); uerr == nil {
 		a.applyUserMissionDefaults(user, mission)
 	}
-	if question, key := nextProfileQuestion(*mission); question != "" {
+	// W19-34 / XOL-131: diagnostic for slot-extraction failures during VAL-3
+	// cohort. When the brief parser asks for a slot the user already provided
+	// in the raw input, we need attribution signal in production logs.
+	question, key := nextProfileQuestion(*mission)
+	if question != "" {
+		slog.Info("brief parser asking for missing slot",
+			"op", "assistant.continueBriefConversation.slot_missing",
+			"user_id", session.UserID,
+			"missing_slot", key,
+			"raw_input_chars", len(answer),
+			"extracted_budget_max", mission.BudgetMax,
+			"extracted_target_query", mission.TargetQuery,
+			"ai_path_used", a.aiEnabled())
 		session.PendingQuestion = key
 		session.DraftMission = mission
 		session.LastAssistantMsg = question
@@ -1613,18 +1638,62 @@ func parseConditions(text string) []string {
 	return dedupeStrings(conditions)
 }
 
+// extractBudget pulls a budget integer out of natural-language buying input.
+// W19-34 / XOL-131: rewritten 2026-04-30 to handle natural phrasings like
+// "budget around 1200 euros" — the prior implementation used Sscanf("%d")
+// which required the integer at position 0 of `after`. Founder live-verify
+// caught the brief parser asking "What's your budget?" for an input that
+// explicitly stated 1200 EUR.
+//
+// Strategy: find any of the budget markers (EN + BG/Cyrillic) and scan the
+// 30-character window AFTER the marker for the first 2-5 digit integer.
+// Also scans the 30-character window BEFORE the marker so phrasings like
+// "1200 euro budget" / "1500 лв бюджет" work. Returns 0 if no marker is
+// present in the text or if no plausible budget integer is found within
+// any marker's window.
 func extractBudget(text string) int {
 	// EN, NL, and BG Cyrillic budget markers (XOL-39 M3-E).
 	// "под" = under, "до" = up to, "максимум" = maximum, "бюджет" = budget.
-	for _, marker := range []string{
+	markers := []string{
 		"under ", "max ", "budget ",
 		"под ", "до ", "максимум ", "бюджет ",
-	} {
-		if _, after, ok := strings.Cut(text, marker); ok {
-			var value int
-			fmt.Sscanf(after, "%d", &value)
-			if value > 0 {
-				return value
+	}
+	// Match 2-5 digit integers (€10 minimum to €99,999 maximum — typical
+	// used-electronics budget range). Anchored on word boundaries so we
+	// don't pick up partial digits from larger numbers.
+	intRe := budgetIntRegex
+	for _, marker := range markers {
+		// Search for the marker without its trailing space so phrasings like
+		// "1200 euro budget" (marker at end of string, no trailing space) are
+		// also detected by the before-window path.
+		searchMarker := strings.TrimRight(marker, " ")
+		idx := strings.Index(text, searchMarker)
+		if idx < 0 {
+			continue
+		}
+		afterStart := idx + len(searchMarker)
+		// Skip any whitespace between the marker and the next token.
+		for afterStart < len(text) && text[afterStart] == ' ' {
+			afterStart++
+		}
+		afterEnd := afterStart + 30
+		if afterEnd > len(text) {
+			afterEnd = len(text)
+		}
+		if match := intRe.FindString(text[afterStart:afterEnd]); match != "" {
+			if v, err := strconv.Atoi(match); err == nil && v > 0 {
+				return v
+			}
+		}
+		// Also check the 30-character window BEFORE the marker for phrasings
+		// like "1200 euro budget" or "1500 лв бюджет".
+		beforeStart := idx - 30
+		if beforeStart < 0 {
+			beforeStart = 0
+		}
+		if match := intRe.FindString(text[beforeStart:idx]); match != "" {
+			if v, err := strconv.Atoi(match); err == nil && v > 0 {
+				return v
 			}
 		}
 	}
@@ -1634,6 +1703,11 @@ func extractBudget(text string) int {
 func extractStretchBudget(text string) int {
 	return extractBudget(text)
 }
+
+// budgetIntRegex matches a 2-5 digit positive integer with word boundaries.
+// Pre-compiled at package init so the hot path doesn't repay compilation cost
+// on every call.
+var budgetIntRegex = regexp.MustCompile(`\b\d{2,5}\b`)
 
 func containsAny(value string, needles ...string) bool {
 	for _, needle := range needles {
