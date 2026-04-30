@@ -1125,3 +1125,124 @@ func TestAutoDeployHuntsDedupSameMissionTwice(t *testing.T) {
 		t.Errorf("expected %d total search_configs (no duplicates), got %d", count1, len(all))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W19-38 / XOL-135: extractItemName + heuristicProfileFromPrompt clean-item tests
+// ---------------------------------------------------------------------------
+
+// TestExtractItemNameStripsLeadingFiller — the exact founder live-verify failure:
+// raw prompt used as Mission.Name truncated to "Help me find a used Fujifilm X-T4
+// in Bul". extractItemName must produce "Fujifilm X-T4".
+func TestExtractItemNameStripsLeadingFiller(t *testing.T) {
+	input := "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	got := extractItemName(input)
+	if !strings.Contains(got, "Fujifilm X-T4") {
+		t.Errorf("extractItemName(%q) = %q; want result containing 'Fujifilm X-T4'", input, got)
+	}
+	if strings.Contains(strings.ToLower(got), "help me find") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain 'help me find'", input, got)
+	}
+}
+
+// TestExtractItemNameStripsTrailingBudget — "Sony A7 III under 1500 EUR" must
+// strip the trailing budget clause, leaving "Sony A7 III".
+func TestExtractItemNameStripsTrailingBudget(t *testing.T) {
+	input := "Sony A7 III under 1500 EUR"
+	got := extractItemName(input)
+	if !strings.Contains(got, "Sony A7 III") {
+		t.Errorf("extractItemName(%q) = %q; want result containing 'Sony A7 III'", input, got)
+	}
+	// The trailing budget clause must be stripped.
+	if strings.Contains(strings.ToLower(got), "1500") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain the budget amount '1500'", input, got)
+	}
+}
+
+// TestExtractItemNameStripsTrailingLocation — "Looking for a Canon EOS R6 in Sofia"
+// must strip the trailing location clause. Result must contain "Canon EOS R6"
+// and must NOT contain "Sofia" or the dangling " in ".
+func TestExtractItemNameStripsTrailingLocation(t *testing.T) {
+	input := "Looking for a Canon EOS R6 in Sofia"
+	got := extractItemName(input)
+	if !strings.Contains(got, "Canon EOS R6") {
+		t.Errorf("extractItemName(%q) = %q; want result containing 'Canon EOS R6'", input, got)
+	}
+	if strings.Contains(got, "Sofia") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain 'Sofia'", input, got)
+	}
+	if strings.Contains(got, " in ") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain trailing ' in '", input, got)
+	}
+}
+
+// TestExtractItemNameHandlesBGCyrillic — BG Cyrillic input "Търся Sony A7 III под 1500 лв"
+// must strip leading "Търся" and trailing "под 1500". Result must contain "Sony A7 III".
+func TestExtractItemNameHandlesBGCyrillic(t *testing.T) {
+	input := "Търся Sony A7 III под 1500 лв"
+	got := extractItemName(input)
+	if !strings.Contains(got, "Sony A7 III") {
+		t.Errorf("extractItemName(%q) = %q; want result containing 'Sony A7 III'", input, got)
+	}
+	if strings.Contains(got, "Търся") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain 'Търся'", input, got)
+	}
+	if strings.Contains(got, "под") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain 'под'", input, got)
+	}
+	if strings.Contains(got, "1500") {
+		t.Errorf("extractItemName(%q) = %q; must NOT contain '1500'", input, got)
+	}
+}
+
+// TestExtractItemNameDefensiveFallback — very short input that would be collapsed
+// to <3 chars must fall back to the raw text unchanged.
+func TestExtractItemNameDefensiveFallback(t *testing.T) {
+	input := "aaa"
+	got := extractItemName(input)
+	if got != input {
+		t.Errorf("extractItemName(%q) = %q; want %q (defensive fallback)", input, got, input)
+	}
+}
+
+// TestExtractItemNameEmptyInput — empty string must return empty string.
+func TestExtractItemNameEmptyInput(t *testing.T) {
+	got := extractItemName("")
+	if got != "" {
+		t.Errorf("extractItemName('') = %q; want ''", got)
+	}
+}
+
+// TestHeuristicProfileFromPromptCleansItemName — end-to-end integration test.
+// heuristicProfileFromPrompt with the exact founder live-verify input must
+// produce a Mission where Name + TargetQuery + SearchQueries[0] are the clean
+// item name — NOT the raw user prompt.
+//
+// This is the primary regression test for XOL-135.
+func TestHeuristicProfileFromPromptCleansItemName(t *testing.T) {
+	const userID = "u-xol135"
+	const rawPrompt = "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	mission := heuristicProfileFromPrompt(userID, rawPrompt, config.MarktplaatsConfig{})
+
+	// Mission.Name must NOT start with the raw filler.
+	if strings.HasPrefix(strings.ToLower(mission.Name), "help me find") {
+		t.Errorf("Mission.Name = %q; must NOT start with 'help me find' (raw-prompt truncation bug)", mission.Name)
+	}
+	// Mission.TargetQuery must NOT start with the raw filler.
+	if strings.HasPrefix(strings.ToLower(mission.TargetQuery), "help me find") {
+		t.Errorf("Mission.TargetQuery = %q; must NOT start with 'help me find'", mission.TargetQuery)
+	}
+	// SearchQueries[0] must be the cleaned item name (NOT the raw prompt).
+	if len(mission.SearchQueries) == 0 {
+		t.Fatalf("Mission.SearchQueries is empty")
+	}
+	if strings.HasPrefix(strings.ToLower(mission.SearchQueries[0]), "help me find") {
+		t.Errorf("Mission.SearchQueries[0] = %q; must NOT start with 'help me find'", mission.SearchQueries[0])
+	}
+	// The clean item name must contain the core model identifier.
+	if !strings.Contains(mission.Name, "Fujifilm X-T4") && !strings.Contains(mission.Name, "fujifilm x-t4") {
+		// Case-insensitive check — either form is acceptable.
+		if !strings.Contains(strings.ToLower(mission.Name), "fujifilm") {
+			t.Errorf("Mission.Name = %q; expected to contain 'fujifilm' (clean item name)", mission.Name)
+		}
+	}
+}

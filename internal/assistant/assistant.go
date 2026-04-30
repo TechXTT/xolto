@@ -1535,14 +1535,20 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 		}
 	}
 
-	name := text
+	// W19-38 / XOL-135: extract a clean item name from the raw prompt so
+	// downstream Mission.Name + TargetQuery + SearchQueries don't carry
+	// the user's filler ("help me find a used") + price/location context.
+	// Falls back to raw text on degenerate input (defensive guard inside
+	// extractItemName).
+	cleanItem := extractItemName(text)
+	name := cleanItem
 	if len(name) > 40 {
 		name = name[:40]
 	}
 	return &models.Mission{
 		UserID:             userID,
 		Name:               name,
-		TargetQuery:        text,
+		TargetQuery:        cleanItem,
 		CategoryID:         categoryID,
 		BudgetMax:          extractBudget(lower),
 		BudgetStretch:      extractStretchBudget(lower),
@@ -1552,7 +1558,7 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 		RiskTolerance:      "balanced",
 		ZipCode:            mpCfg.ZipCode,
 		Distance:           mpCfg.Distance,
-		SearchQueries:      []string{text},
+		SearchQueries:      []string{cleanItem},
 		Status:             "active",
 		Urgency:            "flexible",
 		TravelRadius:       mpCfg.Distance / 1000,
@@ -1679,6 +1685,102 @@ func parseConditions(text string) []string {
 		conditions = []string{"good", "like_new"}
 	}
 	return dedupeStrings(conditions)
+}
+
+// extractItemName pulls a clean item name from a natural-language buying
+// prompt. Strips leading filler ("help me find", "looking for", etc.),
+// trailing budget/location context (", budget around X EUR", " in Sofia"),
+// and condition words ("used", "new", "like new"). Returns the cleaned
+// candidate, or the original text if cleaning would produce <3 chars.
+//
+// W19-38 / XOL-135: heuristicProfileFromPrompt previously used the raw
+// user prompt as Mission.Name + TargetQuery, producing names like
+// "Help me find a used Fujifilm X-T4 in Bul" on the chat path. With this
+// helper, "Help me find a used Fujifilm X-T4 in Bulgaria, budget around
+// 1200 euros" → "Fujifilm X-T4".
+//
+// Defensive fallback to raw text on degenerate input (≤3 chars after
+// cleaning) so missions never end up with empty Name.
+func extractItemName(rawPrompt string) string {
+	text := strings.TrimSpace(rawPrompt)
+	if text == "" {
+		return ""
+	}
+	cleaned := text
+
+	// Strip leading filler (case-insensitive). EN + BG.
+	leadingPatterns := []string{
+		"help me find a used ", "help me find a ", "help me find ",
+		"can you help me find ", "can you find ", "can you find me ",
+		"looking for a used ", "looking for a ", "looking for ",
+		"i need a used ", "i need a ", "i need ",
+		"i want a used ", "i want a ", "i want ",
+		"show me ", "find me a ", "find me ", "find a ", "find ",
+		"търся ",     // BG: "I'm looking for"
+		"трябва ми ", // BG: "I need"
+		"искам ",     // BG: "I want"
+	}
+	lower := strings.ToLower(cleaned)
+	for _, pat := range leadingPatterns {
+		if strings.HasPrefix(lower, pat) {
+			cleaned = strings.TrimSpace(cleaned[len(pat):])
+			lower = strings.ToLower(cleaned)
+			break
+		}
+	}
+
+	// Strip condition words at start of remainder.
+	conditionPrefixes := []string{
+		"used ", "new ", "like new ", "second-hand ", "secondhand ",
+		"употребяван ", // BG: "used"
+		"нов ",         // BG: "new"
+	}
+	for _, pat := range conditionPrefixes {
+		if strings.HasPrefix(lower, pat) {
+			cleaned = strings.TrimSpace(cleaned[len(pat):])
+			lower = strings.ToLower(cleaned)
+			break
+		}
+	}
+
+	// Strip trailing context. Cut at the FIRST occurrence of any of:
+	//   - ", budget" / ", under" / ", max" / ", with budget" (price clauses)
+	//   - " in <location>" — match " in " followed by a country/city word
+	//   - " under " / " budget " (mid-clause price markers)
+	//   - " за " / " под " / " бюджет " (BG price markers)
+	trailingMarkers := []string{
+		", budget", ", under", ", max", ", with budget", ", for ",
+		" budget around ", " budget ",
+		" under ", " up to ", " max ",
+		" за ", " под ", " бюджет ",
+	}
+	for _, marker := range trailingMarkers {
+		if idx := strings.Index(lower, marker); idx > 0 {
+			cleaned = strings.TrimSpace(cleaned[:idx])
+			lower = strings.ToLower(cleaned)
+		}
+	}
+
+	// Strip " in <location>" — cut at " in " when the remainder looks
+	// place-like: short, likely a country/city (≤30 chars, ≤3 words).
+	if idx := strings.LastIndex(lower, " in "); idx > 0 {
+		remainder := strings.TrimSpace(cleaned[idx+4:])
+		if remainder != "" {
+			if len(remainder) <= 30 && len(strings.Fields(remainder)) <= 3 {
+				cleaned = strings.TrimSpace(cleaned[:idx])
+			}
+		}
+	}
+
+	cleaned = strings.TrimRight(cleaned, ",.;: ")
+	cleaned = strings.TrimSpace(cleaned)
+
+	// Defensive fallback: if cleaning collapsed the result too aggressively,
+	// return the original text. Prevents missions ending up with empty Name.
+	if len(cleaned) < 3 {
+		return text
+	}
+	return cleaned
 }
 
 // extractBudget pulls a budget integer out of natural-language buying input.
