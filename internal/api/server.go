@@ -34,6 +34,12 @@ type PlainAPIClient interface {
 	SetPriority(ctx context.Context, threadID string, priority plain.Priority) error
 }
 
+// idempEntry is a cached mission POST response for idempotency dedup.
+type idempEntry struct {
+	createdAt   time.Time
+	missionResp *models.Mission
+}
+
 type Server struct {
 	cfg                    config.ServerConfig
 	db                     store.Store
@@ -45,6 +51,13 @@ type Server struct {
 	mux                    *http.ServeMux
 	adminAllowlistWarnOnce sync.Once
 	routesOnce             sync.Once
+	// W19-35 / XOL-132: in-memory idempotency cache for POST /missions.
+	// Keyed by userID|idempotency-key; entries expire after 30 seconds.
+	idempCache map[string]idempEntry
+	idempMu    sync.Mutex
+	// W19-35 / XOL-132: diagnostic tracking — time of last POST /missions per user.
+	lastPostByUser   map[string]time.Time
+	lastPostByUserMu sync.Mutex
 	// plainClient is used by the support handlers to call Plain GraphQL.
 	// It is set to a real *plain.Client in production and can be overridden
 	// in tests by substituting an httptest.Server via plain.Client.HTTPClient.
@@ -63,10 +76,10 @@ type Server struct {
 	replyClassifier replycopilot.Classifier
 	// W18-2: anonymous /matches/analyze guards. Lazily initialised on first
 	// request to /public/matches/analyze via initAnonymousAnalyze.
-	anonymousAnalyzeOnce         sync.Once
-	anonymousAnalyzeRateLimiter  *anonymousAnalyzeRateLimiter
-	anonymousAnalyzeCache        *anonymousAnalyzeCache
-	anonymousAnalyzeBudget       *anonymousAnalyzeBudget
+	anonymousAnalyzeOnce        sync.Once
+	anonymousAnalyzeRateLimiter *anonymousAnalyzeRateLimiter
+	anonymousAnalyzeCache       *anonymousAnalyzeCache
+	anonymousAnalyzeBudget      *anonymousAnalyzeBudget
 	// Test-only overrides. nil in production. Set via SetAnonymousAnalyzeHooks.
 	// The authenticated /matches/analyze path is intentionally untouched —
 	// these hooks are read only by handleAnonymousAnalyze.
@@ -116,6 +129,8 @@ func NewServer(cfg config.ServerConfig, db store.Store, asst *assistant.Assistan
 		plainClient:     plainClient,
 		supportEvents:   make(chan store.SupportEvent, 64),
 		replyClassifier: rc,
+		idempCache:      make(map[string]idempEntry),
+		lastPostByUser:  make(map[string]time.Time),
 	}
 	return s
 }

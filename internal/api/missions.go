@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -231,6 +232,53 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"missions": missions})
 	case http.MethodPost:
+		// W19-35 / XOL-132: idempotency gate — must be checked before any
+		// mutation so duplicate POSTs (network retry, React StrictMode, browser
+		// auto-retry) are deduped at the backend.
+		idempKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+
+		// W19-35 / XOL-132: diagnostic logging — captures time-since-last-post
+		// per user so duplicate-submission tickets can be triaged from production
+		// logs without a screenshot.
+		{
+			ua := r.UserAgent()
+			if len(ua) > 80 {
+				ua = ua[:80]
+			}
+			s.lastPostByUserMu.Lock()
+			last, hasPrior := s.lastPostByUser[user.ID]
+			s.lastPostByUser[user.ID] = time.Now()
+			s.lastPostByUserMu.Unlock()
+
+			var timeSinceLastMs any = "first"
+			if hasPrior {
+				timeSinceLastMs = time.Since(last).Milliseconds()
+			}
+			slog.Info("mission POST received",
+				"op", "handleMissions.post",
+				"user_id", user.ID,
+				"idempotency_key_present", idempKey != "",
+				"time_since_last_post_ms", timeSinceLastMs,
+				"remote_addr", r.RemoteAddr,
+				"user_agent_short", ua)
+		}
+
+		if idempKey != "" {
+			cacheKey := user.ID + "|" + idempKey
+			s.idempMu.Lock()
+			entry, exists := s.idempCache[cacheKey]
+			s.idempMu.Unlock()
+			if exists && time.Since(entry.createdAt) < 30*time.Second {
+				slog.Info("mission POST idempotency hit",
+					"op", "handleMissions.idempotency_hit",
+					"user_id", user.ID,
+					"idempotency_key", idempKey,
+					"age_ms", time.Since(entry.createdAt).Milliseconds())
+				writeJSON(w, http.StatusCreated, entry.missionResp)
+				return
+			}
+		}
+
 		var mission models.Mission
 		if err := Decode(r, &mission); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -273,6 +321,17 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 			return
 		}
 		mission.ID = id
+
+		// W19-35 / XOL-132: store in idempotency cache after successful upsert
+		// so any duplicate POST within the 30s window returns this response.
+		if idempKey != "" {
+			cacheKey := user.ID + "|" + idempKey
+			missionCopy := mission
+			s.idempMu.Lock()
+			s.idempCache[cacheKey] = idempEntry{createdAt: time.Now(), missionResp: &missionCopy}
+			s.idempMu.Unlock()
+		}
+
 		if mission.Status == "active" && s.assistant != nil {
 			_, _ = s.assistant.AutoDeployHunts(r.Context(), user.ID, mission)
 		}

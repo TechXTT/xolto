@@ -887,10 +887,21 @@ func (a *Assistant) AutoDeployHunts(ctx context.Context, userID string, mission 
 	}
 	a.applyUserMissionDefaults(user, &mission)
 
+	// W19-35 / XOL-132: dedup scope is (mission_id, query, marketplace), NOT
+	// (user_id, query, marketplace). Two distinct missions for the same user
+	// can legitimately have overlapping queries (e.g. user creates one mission
+	// for "canon eos r6" and another for "canon eos r6 mark ii" — the
+	// "canon eos r6" query appears in both). The old user-wide dedup made
+	// mission_2 silently lose its search_configs. Scope to the current mission
+	// so AutoDeployHunts only suppresses re-creating the SAME search inside
+	// the SAME mission across multiple deploys (e.g. mission edit + re-deploy).
 	existing, _ := a.store.GetSearchConfigs(userID)
 	existingKeys := make(map[string]bool, len(existing))
 	for _, s := range existing {
-		existingKeys[strings.ToLower(s.Query)+"|"+marketplace.NormalizeMarketplaceID(s.MarketplaceID)] = true
+		// Only dedupe against search_configs for THIS mission (ProfileID == mission.ID).
+		if s.ProfileID == mission.ID {
+			existingKeys[strings.ToLower(s.Query)+"|"+marketplace.NormalizeMarketplaceID(s.MarketplaceID)] = true
+		}
 	}
 
 	rawQueries := mission.SearchQueries
