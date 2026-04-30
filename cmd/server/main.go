@@ -160,6 +160,9 @@ func main() {
 		"configured", mustHaveEvaluator != nil,
 	)
 	broker := api.NewSSEBroker()
+	// W19-42 / XOL-138: wire SSE broker publish into assistant so the chat-path
+	// async goroutine can fire mission_created events without importing api/broker.
+	asst.SetBrokerPublisher(func(uid string, payload []byte) { broker.Publish(uid, string(payload)) })
 	dispatcher := notify.NewSSEDispatcher(broker)
 	registry := marketplace.NewRegistry()
 	registry.Register(provider)

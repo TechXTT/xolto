@@ -134,13 +134,19 @@ const (
 // UsageCallback is called after each LLM request with token counts and timing.
 type UsageCallback func(userID string, missionID int64, callType, model string, promptTokens, completionTokens, latencyMs int, success bool, errMsg string)
 
+// BrokerPublisher publishes an SSE event for a user. Wired by cmd/server/main.go
+// to the api.SSEBroker; injected as a callback to keep the assistant package
+// free of api/broker imports. Best-effort; nil-safe.
+type BrokerPublisher func(userID string, payload []byte)
+
 type Assistant struct {
-	cfg      *config.Config
-	store    store.Store
-	searcher marketplace.Marketplace
-	scorer   *scorer.Scorer
-	client   *http.Client
-	onUsage  UsageCallback
+	cfg       *config.Config
+	store     store.Store
+	searcher  marketplace.Marketplace
+	scorer    *scorer.Scorer
+	client    *http.Client
+	onUsage   UsageCallback
+	onPublish BrokerPublisher
 	// Per-call-site model overrides (XOL-60 SUP-9); fall through to cfg.AI.Model.
 	modelBrief     string // AI_MODEL_ASSISTANT_BRIEF (parseBriefWithAI)
 	modelDraft     string // AI_MODEL_ASSISTANT_DRAFT (draftWithAI)
@@ -190,6 +196,18 @@ func (a *Assistant) SetGeneratorModel(model string) {
 }
 
 func (a *Assistant) SetUsageCallback(cb UsageCallback) { a.onUsage = cb }
+
+// SetBrokerPublisher wires the SSE broker publish callback. Mirrors
+// SetUsageCallback; keeps assistant package free of api/broker imports.
+// Must be called after New() and before serving traffic. Nil-safe.
+func (a *Assistant) SetBrokerPublisher(fn BrokerPublisher) { a.onPublish = fn }
+
+// publishBroker fires a.onPublish if wired. Best-effort; never blocks.
+func (a *Assistant) publishBroker(userID string, payload []byte) {
+	if a.onPublish != nil {
+		a.onPublish(userID, payload)
+	}
+}
 
 func (a *Assistant) reportUsage(userID string, missionID int64, callType, model string, prompt, completion, latencyMs int, success bool, errMsg string) {
 	if a.onUsage != nil {
@@ -734,36 +752,48 @@ func (a *Assistant) startBriefConversation(ctx context.Context, userID, prompt s
 			Mission:   mission,
 		}, nil
 	}
-	_ = a.EnsureSearchVariants(ctx, mission)
-
+	// W19-42 / XOL-138: UpsertMission runs synchronously so the reply carries a
+	// valid mission ID immediately. EnsureSearchVariants + AutoDeployHunts move
+	// into a goroutine (same shape as missions.go:355-385) so the long LLM call
+	// does not block the HTTP response and cannot trigger upstream-timeout-retry
+	// chains that produce duplicate missions.
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
 		return nil, err
 	}
 	mission.ID = id
 
-	huntCount, _ := a.AutoDeployHunts(ctx, userID, *mission)
-	recs, _, _ := a.FindMatches(ctx, userID, defaultMatchLimit, mission.ID)
+	go func(missionCopy models.Mission, uid string) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("startBriefConversation async goroutine panicked",
+					"op", "assistant.startBriefConversation.async_expand",
+					"mission_id", missionCopy.ID,
+					"user_id", uid,
+					"panic", rec)
+			}
+		}()
+		bgCtx := context.Background()
+		_ = a.EnsureSearchVariants(bgCtx, &missionCopy)
+		if _, err := a.store.UpsertMission(missionCopy); err != nil {
+			slog.Warn("startBriefConversation async SearchQueries re-persist failed",
+				"op", "assistant.startBriefConversation.async_expand.upsert",
+				"mission_id", missionCopy.ID,
+				"error", err.Error())
+		}
+		_, _ = a.AutoDeployHunts(bgCtx, uid, missionCopy)
+		payload, _ := json.Marshal(map[string]any{"type": "mission_created", "mission": missionCopy})
+		a.publishBroker(uid, payload)
+	}(*mission, userID)
 
-	var huntMsg string
-	switch {
-	case huntCount == 1:
-		huntMsg = "I've activated 1 monitor. It will scan every few minutes."
-	case huntCount > 1:
-		huntMsg = fmt.Sprintf("I've activated %d monitors across the market.", huntCount)
-	default:
-		huntMsg = "Your existing monitors will pick this up automatically."
-	}
-
-	reply := fmt.Sprintf("Mission saved for %s. %s\n\nHere's what's available right now:", mission.Name, huntMsg)
+	reply := fmt.Sprintf("Mission saved for %s. I'm scanning the market — chips and matches will populate shortly.", mission.Name)
 	_ = a.store.ClearAssistantSession(userID)
 	_ = a.store.SaveConversationArtifact(userID, models.IntentCreateBrief, prompt, reply)
 	return &models.AssistantReply{
-		Message:         reply,
-		Expecting:       false,
-		Intent:          models.IntentShowMatches,
-		Mission:         mission,
-		Recommendations: recs,
+		Message:   reply,
+		Expecting: false,
+		Intent:    models.IntentShowMatches,
+		Mission:   mission,
 	}, nil
 }
 
@@ -804,8 +834,8 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 			Mission:   mission,
 		}, nil
 	}
-	_ = a.EnsureSearchVariants(ctx, mission)
-
+	// W19-42 / XOL-138: same async shape as startBriefConversation. UpsertMission
+	// is synchronous; EnsureSearchVariants + AutoDeployHunts move to a goroutine.
 	id, err := a.store.UpsertMission(*mission)
 	if err != nil {
 		return nil, err
@@ -813,24 +843,35 @@ func (a *Assistant) continueBriefConversation(ctx context.Context, session model
 	mission.ID = id
 	_ = a.store.ClearAssistantSession(session.UserID)
 
-	huntCount, _ := a.AutoDeployHunts(ctx, session.UserID, *mission)
-	recs, _, matchErr := a.FindMatches(ctx, session.UserID, 3, mission.ID)
-	reply := fmt.Sprintf("Done — mission locked in for %s.", mission.Name)
-	if huntCount > 0 {
-		reply += fmt.Sprintf(" I activated %d monitor(s) for it.", huntCount)
-	}
-	if matchErr == nil && len(recs) > 0 {
-		reply += "\n\n" + renderConversationMatches(mission.Name, recs)
-		reply += "\n\nLet me know if you want to save any of these, tighten the budget, or focus on a specific model."
-	} else {
-		reply += " The monitors are set up — head to Matches to catch new listings as they come in."
-	}
+	go func(missionCopy models.Mission, uid string) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("continueBriefConversation async goroutine panicked",
+					"op", "assistant.continueBriefConversation.async_expand",
+					"mission_id", missionCopy.ID,
+					"user_id", uid,
+					"panic", rec)
+			}
+		}()
+		bgCtx := context.Background()
+		_ = a.EnsureSearchVariants(bgCtx, &missionCopy)
+		if _, err := a.store.UpsertMission(missionCopy); err != nil {
+			slog.Warn("continueBriefConversation async SearchQueries re-persist failed",
+				"op", "assistant.continueBriefConversation.async_expand.upsert",
+				"mission_id", missionCopy.ID,
+				"error", err.Error())
+		}
+		_, _ = a.AutoDeployHunts(bgCtx, uid, missionCopy)
+		payload, _ := json.Marshal(map[string]any{"type": "mission_created", "mission": missionCopy})
+		a.publishBroker(uid, payload)
+	}(*mission, session.UserID)
+
+	reply := fmt.Sprintf("Done — mission locked in for %s. I'm scanning the market — chips and matches will populate shortly.", mission.Name)
 	_ = a.store.SaveConversationArtifact(session.UserID, models.IntentRefineBrief, answer, reply)
 	return &models.AssistantReply{
-		Message:         reply,
-		Intent:          models.IntentShowMatches,
-		Mission:         mission,
-		Recommendations: recs,
+		Message: reply,
+		Intent:  models.IntentShowMatches,
+		Mission: mission,
 	}, nil
 }
 
