@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -293,15 +294,9 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 		}
 		mission = normalized
 
-		// W19-32 / XOL-129: auto-expand mission.TargetQuery into 3–5 search
-		// variants via Assistant.EnsureSearchVariants (shared helper covering
-		// both HTTP handler and chat-path call sites). Replaces the inline
-		// generator block from PR #48 (XOL-128 / W19-31) to ensure identical
-		// expansion behaviour across all mission-creation paths.
-		if s.assistant != nil {
-			_ = s.assistant.EnsureSearchVariants(r.Context(), &mission)
-		}
-
+		// W19-39 / XOL-136: limits check moves BEFORE the mission insert. Was
+		// after EnsureSearchVariants in the old order; now order is:
+		// limits → UpsertMission → idempotency cache → 201 → async auto-expand.
 		limits := billing.LimitsFor(user.Tier)
 		if limits.MaxMissions > 0 {
 			count, err := s.db.CountActiveMissions(user.ID)
@@ -315,6 +310,12 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 			}
 		}
 
+		// W19-39 / XOL-136: insert FIRST, before the slow auto-expand. The
+		// previous order ran EnsureSearchVariants (10-15s LLM call) before
+		// UpsertMission, exceeding upstream proxy timeout → 503 → client retry
+		// with new idempotency UUID → duplicate mission row inserted. Per
+		// founder directive: POST returns 201 once the mission row exists;
+		// auto-expand is best-effort enrichment, NOT an insertion failure.
 		id, err := s.db.UpsertMission(mission)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -342,11 +343,51 @@ func (s *Server) handleMissions(w http.ResponseWriter, r *http.Request, user *mo
 			s.idempMu.Unlock()
 		}
 
-		if mission.Status == "active" && s.assistant != nil {
-			_, _ = s.assistant.AutoDeployHunts(r.Context(), user.ID, mission)
-		}
-		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_created", "mission": mission}))
+		// Respond 201 NOW — before the slow auto-expand. The mission row
+		// exists; chips will fill in via the goroutine + SSE refresh below.
 		writeJSON(w, http.StatusCreated, mission)
+
+		// W19-39 / XOL-136: auto-expand + auto-deploy run async. Use
+		// context.Background() because r.Context() will cancel as soon as
+		// the response is written. Recover from panics — the response is
+		// already sent and a panic here would just spam logs.
+		if mission.Status == "active" && s.assistant != nil {
+			go func(missionCopy models.Mission) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						slog.Error("mission auto-expand goroutine panicked",
+							"op", "handleMissions.async_expand",
+							"mission_id", missionCopy.ID,
+							"user_id", missionCopy.UserID,
+							"panic", rec)
+					}
+				}()
+				ctx := context.Background()
+				_ = s.assistant.EnsureSearchVariants(ctx, &missionCopy)
+				// Persist the auto-expanded SearchQueries back to the mission
+				// row so the chip render (which reads from search_configs but
+				// also surfaces SearchQueries on the mission shape) reflects
+				// the auto-expansion. Best-effort; if this fails the
+				// search_configs created by AutoDeployHunts below still drive
+				// the chip render.
+				if _, err := s.db.UpsertMission(missionCopy); err != nil {
+					slog.Warn("mission async update of SearchQueries failed",
+						"op", "handleMissions.async_expand.upsert",
+						"mission_id", missionCopy.ID,
+						"error", err.Error())
+				}
+				_, _ = s.assistant.AutoDeployHunts(ctx, missionCopy.UserID, missionCopy)
+				s.broker.Publish(missionCopy.UserID, mustJSON(map[string]any{
+					"type":    "mission_created",
+					"mission": missionCopy,
+				}))
+			}(mission)
+			return
+		}
+
+		// Inactive/non-active missions: no auto-expand or AutoDeployHunts.
+		// Response already sent above; just publish the SSE event.
+		s.broker.Publish(user.ID, mustJSON(map[string]any{"type": "mission_created", "mission": mission}))
 	default:
 		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
