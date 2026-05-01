@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
@@ -1295,5 +1296,226 @@ func TestHeuristicProfileFromPromptCleansItemName(t *testing.T) {
 		if !strings.Contains(strings.ToLower(mission.Name), "fujifilm") {
 			t.Errorf("Mission.Name = %q; expected to contain 'fujifilm' (clean item name)", mission.Name)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W19-42 / XOL-138: chat-path async mission-create tests
+// ---------------------------------------------------------------------------
+
+// newConverseTestAssistantWithStore is like newConverseTestAssistant but also
+// returns the backing store so tests can poll for eventual-consistency state.
+func newConverseTestAssistantWithStore(t *testing.T) (*Assistant, *store.SQLiteStore, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "converse-async-test.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	userID, err := st.CreateUser("converse-async@example.com", "hash", "Converse Async User")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		AI: config.AIConfig{Enabled: false},
+	}
+	a := &Assistant{
+		cfg:        cfg,
+		store:      st,
+		modelBrief: "gpt-4o-mini",
+		modelDraft: "gpt-4o-mini",
+		modelChat:  "gpt-4o-mini",
+		client:     &http.Client{},
+	}
+	return a, st, userID
+}
+
+// TestStartBriefConversation_AsyncEnrichment_MissionInsertedSync verifies that
+// the reply from startBriefConversation (via Converse) carries a non-zero
+// mission ID immediately, before the async goroutine completes. This is the
+// primary P0 duplicate-prevention contract: UpsertMission runs synchronously
+// so only one row is ever created regardless of upstream retries.
+func TestStartBriefConversation_AsyncEnrichment_MissionInsertedSync(t *testing.T) {
+	a, _, userID := newConverseTestAssistantWithStore(t)
+
+	const input = "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	reply, err := a.Converse(context.Background(), userID, input)
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+
+	// Mission must be non-nil with a positive ID — inserted synchronously.
+	if reply.Mission == nil {
+		t.Fatalf("Converse() returned nil Mission")
+	}
+	if reply.Mission.ID <= 0 {
+		t.Errorf("Mission.ID = %d; want > 0 (sync insert — async enrichment should not affect this)", reply.Mission.ID)
+	}
+}
+
+// TestStartBriefConversation_AsyncEnrichment_SearchQueriesEventuallyPopulated
+// verifies that SearchQueries are populated in the store within 5s after the
+// synchronous reply returns. EnsureSearchVariants runs in the background goroutine.
+func TestStartBriefConversation_AsyncEnrichment_SearchQueriesEventuallyPopulated(t *testing.T) {
+	a, st, userID := newConverseTestAssistantWithStore(t)
+
+	const input = "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	reply, err := a.Converse(context.Background(), userID, input)
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if reply.Mission == nil || reply.Mission.ID <= 0 {
+		t.Fatalf("Converse() returned nil or zero-ID Mission")
+	}
+
+	missionID := reply.Mission.ID
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m, err := st.GetMission(missionID)
+		if err != nil {
+			t.Fatalf("GetMission(%d) error = %v", missionID, err)
+		}
+		if len(m.SearchQueries) >= 3 {
+			return // goroutine completed; contract satisfied
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	m, _ := st.GetMission(missionID)
+	var sq []string
+	if m != nil {
+		sq = m.SearchQueries
+	}
+	t.Errorf("SearchQueries not populated within 5s after Converse(); got %d: %v", len(sq), sq)
+}
+
+// TestContinueBriefConversation_AsyncEnrichment_MissionInsertedSync verifies
+// that the slot-fill continuation path (continueBriefConversation) also returns
+// a non-zero mission ID synchronously, before any goroutine enrichment.
+func TestContinueBriefConversation_AsyncEnrichment_MissionInsertedSync(t *testing.T) {
+	a, _, userID := newConverseTestAssistantWithStore(t)
+
+	// First message — will hit startBriefConversation or ask a slot question.
+	// Use an input that is missing a slot so we force continueBriefConversation.
+	// "Sony A7 III" without location or budget should trigger slot questions.
+	reply1, err := a.Converse(context.Background(), userID, "Sony A7 III")
+	if err != nil {
+		t.Fatalf("first Converse() error = %v", err)
+	}
+
+	if !reply1.Expecting {
+		// No slot questions — brief was fully extracted on first message. Check
+		// that mission ID is set synchronously and skip the continuation test.
+		if reply1.Mission == nil || reply1.Mission.ID <= 0 {
+			t.Errorf("direct startBrief path: Mission.ID = %d; want > 0", reply1.Mission.ID)
+		}
+		return
+	}
+
+	// There is a pending slot question; answer it to reach continueBriefConversation.
+	reply2, err := a.Converse(context.Background(), userID, "Bulgaria, budget 800 euros")
+	if err != nil {
+		t.Fatalf("continuation Converse() error = %v", err)
+	}
+
+	// After slot-fill the mission must be committed synchronously.
+	if reply2.Mission == nil {
+		t.Fatalf("continueBriefConversation() returned nil Mission")
+	}
+	if reply2.Mission.ID <= 0 {
+		t.Errorf("continueBriefConversation Mission.ID = %d; want > 0 (sync insert)", reply2.Mission.ID)
+	}
+}
+
+// TestContinueBriefConversation_AsyncEnrichment_SearchQueriesEventuallyPopulated
+// verifies that the slot-fill continuation path eventually populates SearchQueries
+// in the store via the async goroutine.
+func TestContinueBriefConversation_AsyncEnrichment_SearchQueriesEventuallyPopulated(t *testing.T) {
+	a, st, userID := newConverseTestAssistantWithStore(t)
+
+	// Force slot-question path.
+	reply1, err := a.Converse(context.Background(), userID, "Sony A7 III")
+	if err != nil {
+		t.Fatalf("first Converse() error = %v", err)
+	}
+
+	var missionID int64
+	if !reply1.Expecting {
+		// Fully extracted first-pass; mission already committed.
+		if reply1.Mission == nil || reply1.Mission.ID <= 0 {
+			t.Fatalf("direct path: Mission.ID = %d; want > 0", reply1.Mission.ID)
+		}
+		missionID = reply1.Mission.ID
+	} else {
+		reply2, err := a.Converse(context.Background(), userID, "Bulgaria, budget 800 euros")
+		if err != nil {
+			t.Fatalf("continuation Converse() error = %v", err)
+		}
+		if reply2.Mission == nil || reply2.Mission.ID <= 0 {
+			t.Fatalf("continueBriefConversation: Mission.ID = %d; want > 0", reply2.Mission.ID)
+		}
+		missionID = reply2.Mission.ID
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m, err := st.GetMission(missionID)
+		if err != nil {
+			t.Fatalf("GetMission(%d) error = %v", missionID, err)
+		}
+		if len(m.SearchQueries) >= 1 {
+			return // goroutine completed; at least one query persisted
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	m, _ := st.GetMission(missionID)
+	var sq []string
+	if m != nil {
+		sq = m.SearchQueries
+	}
+	t.Errorf("SearchQueries not populated within 5s in continuation path; got %d: %v", len(sq), sq)
+}
+
+// TestStartBriefConversation_BrokerPublishFiresOnAsyncCompletion verifies that
+// SetBrokerPublisher receives a "mission_created" SSE payload after the async
+// goroutine completes. Uses a channel-based stub BrokerPublisher.
+func TestStartBriefConversation_BrokerPublishFiresOnAsyncCompletion(t *testing.T) {
+	a, _, userID := newConverseTestAssistantWithStore(t)
+
+	// Wire a stub BrokerPublisher that forwards payloads over a channel.
+	publishCh := make(chan []byte, 1)
+	a.SetBrokerPublisher(func(_ string, payload []byte) {
+		select {
+		case publishCh <- payload:
+		default:
+		}
+	})
+
+	const input = "Help me find a used Fujifilm X-T4 in Bulgaria, budget around 1200 euros"
+	reply, err := a.Converse(context.Background(), userID, input)
+	if err != nil {
+		t.Fatalf("Converse() error = %v", err)
+	}
+	if reply.Mission == nil {
+		t.Fatalf("Converse() returned nil Mission")
+	}
+
+	// Wait for the broker publish from the async goroutine.
+	select {
+	case payload := <-publishCh:
+		var event map[string]any
+		if err := json.Unmarshal(payload, &event); err != nil {
+			t.Fatalf("BrokerPublisher received invalid JSON: %v — payload: %s", err, payload)
+		}
+		if event["type"] != "mission_created" {
+			t.Errorf("BrokerPublisher event type = %q; want %q", event["type"], "mission_created")
+		}
+		if event["mission"] == nil {
+			t.Errorf("BrokerPublisher event missing 'mission' field")
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("BrokerPublisher was not called within 5s after Converse()")
 	}
 }
