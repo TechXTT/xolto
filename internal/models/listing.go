@@ -21,13 +21,13 @@ type Listing struct {
 	Attributes    map[string]string // condition, brand, etc.
 	// Analysis fields: zero-value when listing comes from a marketplace search;
 	// populated when loaded from the store (ListRecentListings).
-	Score                   float64
-	FairPrice               int // cents
-	OfferPrice              int // cents
-	Confidence              float64
-	Reason                  string
-	RiskFlags               []string
-	RecommendedAction       string // one of: buy | negotiate | ask_seller | skip
+	Score                    float64
+	FairPrice                int // cents
+	OfferPrice               int // cents
+	Confidence               float64
+	Reason                   string
+	RiskFlags                []string
+	RecommendedAction        string // one of: buy | negotiate | ask_seller | skip
 	ComparablesCount         int    // number of comparable deals used by the scorer
 	ComparablesMedianAgeDays int    // median age of comparables in days; 0 if none
 	Feedback                 string // "", "approved", "dismissed"
@@ -110,15 +110,15 @@ type MustHaveMatch struct {
 // This field MUST NOT be serialised into any public API response shape.
 // See VAL-2 for context.
 type ScoredListing struct {
-	Listing           Listing
-	Score             float64
-	OfferPrice        int // cents
-	FairPrice         int // cents
-	MarketAverage     int // cents
-	Confidence        float64
-	Reason            string
-	ReasoningSource   string
-	SearchAdvice      string
+	Listing                  Listing
+	Score                    float64
+	OfferPrice               int // cents
+	FairPrice                int // cents
+	MarketAverage            int // cents
+	Confidence               float64
+	Reason                   string
+	ReasoningSource          string
+	SearchAdvice             string
 	ComparableDeals          []ComparableDeal
 	RiskFlags                []string
 	RecommendedAction        string // one of: buy | negotiate | ask_seller | skip
@@ -175,8 +175,8 @@ type ComparableDeal struct {
 //
 // AIPathAI is the normal "real LLM call" tag.
 const (
-	AIPathAI                 = "ai"
-	AIPathHeuristicFallback  = "heuristic_fallback"
+	AIPathAI                = "ai"
+	AIPathHeuristicFallback = "heuristic_fallback"
 )
 
 type DealAnalysis struct {
@@ -233,7 +233,9 @@ type Mission struct {
 	TargetQuery        string
 	CategoryID         int
 	BudgetMax          int
+	BudgetMin          int // XOL-181: lower bound of a range budget; 0 = not specified
 	BudgetStretch      int
+	BudgetCurrency     string // XOL-181: "BGN", "EUR", etc.; empty = legacy EUR (pre-BG-pivot rows)
 	PreferredCondition []string
 	RequiredFeatures   []string
 	NiceToHave         []string

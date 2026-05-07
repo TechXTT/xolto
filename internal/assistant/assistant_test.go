@@ -1519,3 +1519,256 @@ func TestStartBriefConversation_BrokerPublishFiresOnAsyncCompletion(t *testing.T
 		t.Errorf("BrokerPublisher was not called within 5s after Converse()")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// XOL-181: budget BGN currency storage + range parsing
+// ---------------------------------------------------------------------------
+
+// TestExtractBudgetInfoBGNCurrencyDetection — "400-600 BGN" must store BGN, not EUR.
+// AC#1: Input containing "BGN" stores budget in BGN with explicit currency field.
+func TestExtractBudgetInfoBGNCurrencyDetection(t *testing.T) {
+	cases := []struct {
+		input        string
+		wantCurrency string
+	}{
+		{"budget around 400-600 BGN", "BGN"},
+		{"бюджет 500 лв.", "BGN"},
+		{"budget 500 bgn", "BGN"},
+		{"max 800 EUR", "EUR"},
+		{"budget 1200 euros", "EUR"},
+		{"budget 500 €", "EUR"},
+		{"looking for a sony", ""}, // no currency marker
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			info := extractBudgetInfo(strings.ToLower(tc.input))
+			if info.Currency != tc.wantCurrency {
+				t.Errorf("extractBudgetInfo(%q).Currency = %q, want %q", tc.input, info.Currency, tc.wantCurrency)
+			}
+		})
+	}
+}
+
+// TestExtractBudgetInfoRangeParsing — "400-600" range must store both Min and Max.
+// AC#2: Input containing range syntax stores BOTH min and max budget values.
+func TestExtractBudgetInfoRangeParsing(t *testing.T) {
+	cases := []struct {
+		input   string
+		wantMin int
+		wantMax int
+	}{
+		{"budget around 400-600 BGN", 400, 600},
+		{"400–600 лв", 400, 600}, // en-dash variant
+		{"between 400 and 600", 400, 600},
+		{"от 400 до 600", 400, 600}, // BG "from 400 to 600"
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			info := extractBudgetInfo(strings.ToLower(tc.input))
+			if info.Min != tc.wantMin {
+				t.Errorf("extractBudgetInfo(%q).Min = %d, want %d", tc.input, info.Min, tc.wantMin)
+			}
+			if info.Max != tc.wantMax {
+				t.Errorf("extractBudgetInfo(%q).Max = %d, want %d", tc.input, info.Max, tc.wantMax)
+			}
+		})
+	}
+}
+
+// TestExtractBudgetInfoSingleValueIsUpperBound — single-value input must produce Max only.
+// AC#3: Single-value inputs default to upper-bound only (Min=0).
+func TestExtractBudgetInfoSingleValueIsUpperBound(t *testing.T) {
+	info := extractBudgetInfo("budget around 500 bgn")
+	if info.Min != 0 {
+		t.Errorf("extractBudgetInfo(single value).Min = %d, want 0", info.Min)
+	}
+	if info.Max != 500 {
+		t.Errorf("extractBudgetInfo(single value).Max = %d, want 500", info.Max)
+	}
+	if info.Currency != "BGN" {
+		t.Errorf("extractBudgetInfo(single value).Currency = %q, want BGN", info.Currency)
+	}
+}
+
+// TestHeuristicProfileBGNRangeStoredCorrectly — canonical audit prompt must store
+// budget as 400-600 BGN (not EUR 400 single-value).
+// Covers XOL-181 AC#1 + AC#2 on the heuristic path.
+func TestHeuristicProfileBGNRangeStoredCorrectly(t *testing.T) {
+	const prompt = "Looking for a Canon EOS 700D DSLR in good working condition. Budget around 400-600 BGN. Body only or with 18-55mm kit lens both fine. Prefer Sofia or Plovdiv pickup."
+	profile := heuristicProfileFromPrompt("u1", prompt, config.MarktplaatsConfig{})
+	if profile.BudgetMin != 400 {
+		t.Errorf("BudgetMin = %d, want 400 (range lower bound)", profile.BudgetMin)
+	}
+	if profile.BudgetMax != 600 {
+		t.Errorf("BudgetMax = %d, want 600 (range upper bound)", profile.BudgetMax)
+	}
+	if profile.BudgetCurrency != "BGN" {
+		t.Errorf("BudgetCurrency = %q, want BGN", profile.BudgetCurrency)
+	}
+}
+
+// TestApplyUserMissionDefaultsBGCountryDefaultsCurrency — AC#4: BG country
+// without explicit currency marker defaults to BGN via applyUserMissionDefaults.
+func TestApplyUserMissionDefaultsBGCountryDefaultsCurrency(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	user := &models.User{
+		CountryCode: "BG",
+		City:        "Sofia",
+	}
+	// Mission extracted with no explicit currency (no BGN/EUR in prompt).
+	mission := &models.Mission{
+		UserID:         "u1",
+		BudgetMax:      500,
+		BudgetCurrency: "", // no explicit currency
+	}
+	a.applyUserMissionDefaults(user, mission)
+	if mission.BudgetCurrency != "BGN" {
+		t.Errorf("applyUserMissionDefaults BG country: BudgetCurrency = %q, want BGN", mission.BudgetCurrency)
+	}
+}
+
+// TestApplyUserMissionDefaultsNonBGCountryNoDefault — non-BG country must NOT
+// force BGN as default (currency stays empty until explicit detection).
+func TestApplyUserMissionDefaultsNonBGCountryNoDefault(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	user := &models.User{
+		CountryCode: "NL",
+		City:        "Amsterdam",
+	}
+	mission := &models.Mission{
+		UserID:         "u1",
+		BudgetMax:      500,
+		BudgetCurrency: "",
+	}
+	a.applyUserMissionDefaults(user, mission)
+	if mission.BudgetCurrency != "" {
+		t.Errorf("applyUserMissionDefaults NL country: BudgetCurrency = %q, want empty", mission.BudgetCurrency)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XOL-182: search-term tier hierarchy, BG Cyrillic, no descriptor echo
+// ---------------------------------------------------------------------------
+
+// TestStripCategoryDescriptors — "canon eos 700d dslr" → "canon eos 700d".
+// AC#6: User-input descriptors like "DSLR" must NOT appear as search tokens.
+func TestStripCategoryDescriptors(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"canon eos 700d dslr", "canon eos 700d"},
+		{"sony a7 iv mirrorless", "sony a7 iv"},
+		{"canon 700d kit lens", "canon 700d"},
+		{"fujifilm x-t4", "fujifilm x-t4"}, // no descriptor, unchanged
+		{"nikon d850 kit-lens", "nikon d850"},
+		{"canon eos 700d dslr kit lens for sale", "canon eos 700d for sale"}, // only category descriptors stripped
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := stripCategoryDescriptors(tc.input)
+			if got != tc.want {
+				t.Errorf("stripCategoryDescriptors(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnsureSearchVariantsCanon700DNoDescriptors — canonical audit input must
+// NOT produce search terms containing "dslr".
+// AC#5: Don't append DSLR/mirrorless/kit-lens suffixes as search-term tokens.
+func TestEnsureSearchVariantsCanon700DNoDescriptors(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	mission := &models.Mission{
+		UserID:        "u-canon",
+		TargetQuery:   "Canon EOS 700D DSLR",
+		SearchQueries: []string{"Canon EOS 700D DSLR"},
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() error = %v", err)
+	}
+	for _, q := range mission.SearchQueries {
+		if strings.Contains(strings.ToLower(q), "dslr") {
+			t.Errorf("SearchQuery %q contains 'dslr' — descriptor must be stripped", q)
+		}
+		if strings.Contains(strings.ToLower(q), "mirrorless") {
+			t.Errorf("SearchQuery %q contains 'mirrorless'", q)
+		}
+		if strings.Contains(strings.ToLower(q), "kit lens") || strings.Contains(strings.ToLower(q), "kit-lens") {
+			t.Errorf("SearchQuery %q contains 'kit lens'", q)
+		}
+	}
+	if len(mission.SearchQueries) < 3 {
+		t.Errorf("SearchQueries len = %d, want >= 3; queries = %v", len(mission.SearchQueries), mission.SearchQueries)
+	}
+}
+
+// TestEnsureSearchVariantsCanon700DIncludesBGCyrillic — when marketplace is OLX BG,
+// must include at least one Bulgarian Cyrillic search term.
+// AC#4: When marketplace=OLX BG, generate ≥1 Bulgarian-language search term.
+func TestEnsureSearchVariantsCanon700DIncludesBGCyrillic(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	mission := &models.Mission{
+		UserID:           "u-bg-canon",
+		CountryCode:      "BG",
+		MarketplaceScope: []string{"olxbg"},
+		TargetQuery:      "Canon EOS 700D",
+		SearchQueries:    nil,
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() error = %v", err)
+	}
+	hasCyrillic := false
+	for _, q := range mission.SearchQueries {
+		for _, r := range q {
+			if r >= 0x0400 && r <= 0x04FF { // Cyrillic Unicode block
+				hasCyrillic = true
+				break
+			}
+		}
+	}
+	if !hasCyrillic {
+		t.Errorf("SearchQueries for OLX BG mission must include ≥1 Cyrillic term; got %v", mission.SearchQueries)
+	}
+}
+
+// TestEnsureSearchVariantsCanon700DAliases — Tier-2 aliases for 700D must be
+// generated (Rebel T5i naming variant).
+// AC#3: For Canon cameras specifically, generate naming-variant aliases (700D ↔ Rebel T5i).
+func TestEnsureSearchVariantsCanon700DAliases(t *testing.T) {
+	a := newMinimalAssistantNoAI()
+	mission := &models.Mission{
+		UserID:        "u-canon-alias",
+		TargetQuery:   "Canon EOS 700D",
+		SearchQueries: nil,
+	}
+	if err := a.EnsureSearchVariants(context.Background(), mission); err != nil {
+		t.Fatalf("EnsureSearchVariants() error = %v", err)
+	}
+	hasAlias := false
+	for _, q := range mission.SearchQueries {
+		if strings.Contains(strings.ToLower(q), "t5i") || strings.Contains(strings.ToLower(q), "rebel") {
+			hasAlias = true
+		}
+	}
+	if !hasAlias {
+		t.Errorf("SearchQueries must include a Rebel T5i alias for Canon 700D; got %v", mission.SearchQueries)
+	}
+}
+
+// TestBGCyrillicCameraTermsCamera — camera query returns Cyrillic "фотоапарат" prefix.
+func TestBGCyrillicCameraTermsCamera(t *testing.T) {
+	got := bgCyrillicCameraTerms("canon eos 700d")
+	want := "фотоапарат canon eos 700d"
+	if got != want {
+		t.Errorf("bgCyrillicCameraTerms(%q) = %q, want %q", "canon eos 700d", got, want)
+	}
+}
+
+// TestBGCyrillicCameraTermsSingleToken — single token (no brand+model) returns "".
+func TestBGCyrillicCameraTermsSingleToken(t *testing.T) {
+	got := bgCyrillicCameraTerms("camera")
+	if got != "" {
+		t.Errorf("bgCyrillicCameraTerms(single token) = %q, want empty", got)
+	}
+}

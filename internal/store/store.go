@@ -152,6 +152,8 @@ func migrate(db *sql.DB) error {
 			marketplace_scope TEXT NOT NULL DEFAULT '[]',
 			category TEXT NOT NULL DEFAULT 'other',
 			active INTEGER NOT NULL DEFAULT 1,
+			budget_min INTEGER NULL DEFAULT NULL,
+			budget_currency TEXT NULL DEFAULT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
@@ -485,6 +487,9 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN cross_border_enabled INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN marketplace_scope TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN category TEXT NOT NULL DEFAULT 'other'`)
+	// XOL-181: additive columns for BGN currency storage and budget range support.
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN budget_min INTEGER NULL DEFAULT NULL`)
+	_, _ = db.Exec(`ALTER TABLE shopping_profiles ADD COLUMN budget_currency TEXT NULL DEFAULT NULL`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN region TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN city TEXT NOT NULL DEFAULT ''`)
@@ -817,6 +822,18 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 	if mission.TravelRadius == 0 && mission.Distance > 0 {
 		mission.TravelRadius = mission.Distance / 1000
 	}
+	// XOL-181: budget_min and budget_currency are nullable. Use sql.NullInt64 /
+	// sql.NullString so zero-value BudgetMin and empty BudgetCurrency write NULL
+	// (not 0 / ""). Legacy rows (pre-BG-pivot) stay NULL and are read back as EUR.
+	var budgetMinArg sql.NullInt64
+	if mission.BudgetMin > 0 {
+		budgetMinArg = sql.NullInt64{Int64: int64(mission.BudgetMin), Valid: true}
+	}
+	var budgetCurrencyArg sql.NullString
+	if strings.TrimSpace(mission.BudgetCurrency) != "" {
+		budgetCurrencyArg = sql.NullString{String: strings.ToUpper(strings.TrimSpace(mission.BudgetCurrency)), Valid: true}
+	}
+
 	if mission.ID > 0 {
 		_, err = s.db.Exec(`
 			UPDATE shopping_profiles
@@ -825,7 +842,7 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 				zip_code = ?, distance = ?, search_queries = ?,
 				status = ?, urgency = ?, avoid_flags = ?, travel_radius = ?, country_code = ?, region = ?, city = ?,
 				postal_code = ?, cross_border_enabled = ?, marketplace_scope = ?, category = ?,
-				active = ?, updated_at = CURRENT_TIMESTAMP
+				active = ?, budget_min = ?, budget_currency = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`,
 			mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
@@ -834,7 +851,7 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 			mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
 			strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City),
 			strings.TrimSpace(mission.PostalCode), boolToInt(mission.CrossBorderEnabled), string(marketplaceScopeJSON), mission.Category,
-			boolToInt(mission.Active), mission.ID,
+			boolToInt(mission.Active), budgetMinArg, budgetCurrencyArg, mission.ID,
 		)
 		if err != nil {
 			return 0, err
@@ -849,8 +866,8 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 			zip_code, distance, search_queries,
 			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
 			cross_border_enabled, marketplace_scope, category,
-			active
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			active, budget_min, budget_currency
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		mission.UserID, mission.Name, mission.TargetQuery, mission.CategoryID, mission.BudgetMax, mission.BudgetStretch,
 		string(conditionsJSON), string(requiredJSON), string(niceToHaveJSON), mission.RiskTolerance,
@@ -858,7 +875,7 @@ func (s *SQLiteStore) UpsertMission(mission models.Mission) (int64, error) {
 		mission.Status, mission.Urgency, string(avoidFlagsJSON), mission.TravelRadius,
 		strings.ToUpper(strings.TrimSpace(mission.CountryCode)), strings.TrimSpace(mission.Region), strings.TrimSpace(mission.City), strings.TrimSpace(mission.PostalCode),
 		boolToInt(mission.CrossBorderEnabled), string(marketplaceScopeJSON), mission.Category,
-		boolToInt(mission.Active),
+		boolToInt(mission.Active), budgetMinArg, budgetCurrencyArg,
 	)
 	if err != nil {
 		return 0, err
@@ -873,7 +890,8 @@ func (s *SQLiteStore) GetActiveMission(userID string) (*models.Mission, error) {
 			zip_code, distance, search_queries,
 			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
 			cross_border_enabled, marketplace_scope, category,
-			active, created_at, updated_at
+			active, created_at, updated_at,
+			budget_min, budget_currency
 		FROM shopping_profiles
 		WHERE user_id = ? AND active = 1 AND status = 'active'
 		ORDER BY updated_at DESC
@@ -896,7 +914,8 @@ func (s *SQLiteStore) GetMission(id int64) (*models.Mission, error) {
 			zip_code, distance, search_queries,
 			status, urgency, avoid_flags, travel_radius, country_code, region, city, postal_code,
 			cross_border_enabled, marketplace_scope, category,
-			active, created_at, updated_at
+			active, created_at, updated_at,
+			budget_min, budget_currency
 		FROM shopping_profiles
 		WHERE id = ?
 	`, id)
@@ -919,7 +938,8 @@ func (s *SQLiteStore) ListMissions(userID string) ([]models.Mission, error) {
 			m.cross_border_enabled, m.marketplace_scope, m.category,
 			m.active, m.created_at, m.updated_at,
 			COUNT(l.item_id) AS match_count,
-			COALESCE(MAX(l.last_seen), '') AS last_match_at
+			COALESCE(MAX(l.last_seen), '') AS last_match_at,
+			m.budget_min, m.budget_currency
 		FROM shopping_profiles m
 		LEFT JOIN listings l
 			ON l.profile_id = m.id AND l.item_id LIKE ?
@@ -3106,6 +3126,9 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 	var preferredJSON, requiredJSON, niceJSON, queriesJSON, avoidFlagsJSON, marketplaceScopeJSON string
 	var active, crossBorder int
 	var createdAt, updatedAt string
+	// XOL-181: budget_min and budget_currency are nullable; use sql.Null types.
+	var budgetMin sql.NullInt64
+	var budgetCurrency sql.NullString
 
 	if withStats {
 		var lastMatchAt string
@@ -3116,6 +3139,7 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
 			&crossBorder, &marketplaceScopeJSON, &mission.Category,
 			&active, &createdAt, &updatedAt, &mission.MatchCount, &lastMatchAt,
+			&budgetMin, &budgetCurrency,
 		)
 		if err != nil {
 			return mission, err
@@ -3131,10 +3155,17 @@ func scanSQLiteMissionInternal(scanner interface{ Scan(dest ...any) error }, wit
 			&mission.Status, &mission.Urgency, &avoidFlagsJSON, &mission.TravelRadius, &mission.CountryCode, &mission.Region, &mission.City, &mission.PostalCode,
 			&crossBorder, &marketplaceScopeJSON, &mission.Category,
 			&active, &createdAt, &updatedAt,
+			&budgetMin, &budgetCurrency,
 		)
 		if err != nil {
 			return mission, err
 		}
+	}
+	if budgetMin.Valid {
+		mission.BudgetMin = int(budgetMin.Int64)
+	}
+	if budgetCurrency.Valid {
+		mission.BudgetCurrency = strings.ToUpper(strings.TrimSpace(budgetCurrency.String))
 	}
 
 	mission.Active = active == 1

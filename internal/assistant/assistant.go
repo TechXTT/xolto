@@ -1057,6 +1057,90 @@ func intervalForTier(tier string) time.Duration {
 //
 // AI-budget gate: handled internally by generator.GenerateSearches via
 // aibudget.Allow("generator", ...) at internal/generator/generator.go:160.
+// searchCategoryDescriptorPattern matches camera-type descriptor tokens that must
+// NOT appear in search queries (XOL-182 AC#6). These belong in RequiredFeatures /
+// NiceToHave (verdict scoring context) but are zero-match tokens on OLX BG where
+// sellers don't use "DSLR"/"mirrorless"/"kit lens" in titles.
+//
+// Covered: dslr, mirrorless, kit lens / kit-lens.
+// "body only" is intentionally excluded: some OLX sellers DO use "body" in titles.
+// "used" / "for sale" / "second hand" are intentionally excluded: they are useful
+// Tier-1 modifier variants on non-BG European marketplaces (Marktplaats, Vinted).
+var searchCategoryDescriptorPattern = regexp.MustCompile(`(?i)\b(dslr|mirrorless|kit[\s-]?lens)\b`)
+
+// stripCategoryDescriptors removes camera-type descriptor tokens from a query.
+// This converts "canon eos 700d dslr" → "canon eos 700d".
+// It does NOT strip marketplace-context tokens ("used", "for sale") which remain
+// valid Tier-1 variants on non-BG marketplaces.
+func stripCategoryDescriptors(q string) string {
+	cleaned := searchCategoryDescriptorPattern.ReplaceAllString(q, " ")
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+// isBGOLXMarket returns true when the mission is scoped to the OLX BG
+// marketplace (sparse inventory: Tier-3 modifiers must stay off).
+func isBGOLXMarket(mission *models.Mission) bool {
+	for _, mp := range mission.MarketplaceScope {
+		if strings.EqualFold(mp, "olxbg") {
+			return true
+		}
+	}
+	// Country-code fallback: BG users with no explicit scope still route OLX BG.
+	return strings.EqualFold(mission.CountryCode, "BG")
+}
+
+// cameraModelAliases maps canonical camera model identifiers (lowercased) to
+// their Tier-2 naming aliases. Used for Canon cameras (700D ↔ Rebel T5i) and
+// similar dual-branding cases. Only brand+model — no descriptors.
+var cameraModelAliases = map[string][]string{
+	"700d":     {"canon rebel t5i", "canon eos rebel t5i"},
+	"eos 700d": {"canon rebel t5i", "canon 700d"},
+	// extend as needed per XOL-182 AC#3
+}
+
+// tier2Aliases returns Tier-2 alias variants for the given base query. Returns
+// empty slice when no alias mapping exists for this model.
+func tier2Aliases(base string) []string {
+	lower := strings.ToLower(base)
+	for fragment, aliases := range cameraModelAliases {
+		if strings.Contains(lower, fragment) {
+			return aliases
+		}
+	}
+	return nil
+}
+
+// bgCyrillicCameraTerms returns a Bulgarian Cyrillic search term for a camera
+// query. Used when marketplace=OLX BG (XOL-182 AC#4).
+// Returns "" when the query doesn't look like a camera (no brand/model token).
+func bgCyrillicCameraTerms(base string) string {
+	// Only generate a Cyrillic variant for camera-like queries (brand+model).
+	// "фотоапарат" = "camera" in Bulgarian.
+	lower := strings.ToLower(base)
+	if len(strings.Fields(lower)) >= 2 {
+		// base is already "canon eos 700d" etc — prepend "фотоапарат".
+		return "фотоапарат " + lower
+	}
+	return ""
+}
+
+// EnsureSearchVariants populates mission.SearchQueries with a tier-structured
+// set of search terms when the mission has fewer than 3 variants.
+//
+// XOL-182 tier hierarchy:
+//
+//	Tier 1 (base): brand + model only, no descriptor tokens.
+//	Tier 2 (aliases): naming variants (Canon 700D ↔ Rebel T5i), Cyrillic for BG.
+//	Tier 3 (modifiers): descriptor-appended terms — SKIPPED for BG/OLX sparse markets.
+//
+// Floor of 3 variants is maintained. The AI generator is consulted first;
+// on AI failure the static fallback from generator.GenerateSearches is used
+// (includes queries from the per-topic fallback tables). The old "used" / "for
+// sale" / "deals" synthesis tokens are replaced with Tier-2 aliases + Cyrillic
+// variants which are substantively useful for BG/OLX market coverage.
+//
+// AI-budget gate: handled internally by generator.GenerateSearches via
+// aibudget.Allow("generator", ...) at internal/generator/generator.go:160.
 func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mission) error {
 	if mission == nil {
 		return nil
@@ -1068,6 +1152,15 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 	if target == "" {
 		return nil
 	}
+
+	// XOL-182: Tier 1 base = descriptor-stripped version of target.
+	tier1Base := stripCategoryDescriptors(strings.ToLower(target))
+	if tier1Base == "" {
+		tier1Base = strings.ToLower(target)
+	}
+
+	isBG := isBGOLXMarket(mission)
+
 	aiCfg := config.AIConfig{
 		Enabled: a.cfg.AI.APIKey != "",
 		BaseURL: a.cfg.AI.BaseURL,
@@ -1090,7 +1183,7 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 			cb(userID, missionID, callType, model, prompt, completion, latencyMs, success, errMsg)
 		})
 	}
-	genSearches, err := gen.GenerateSearches(ctx, target)
+	genSearches, err := gen.GenerateSearches(ctx, tier1Base)
 	if err != nil {
 		// W19-37 / XOL-134: gen.GenerateSearches returns BOTH the fallback
 		// entries AND a wrapped error when AI fails (see generator.go:62-67).
@@ -1110,57 +1203,104 @@ func (a *Assistant) EnsureSearchVariants(ctx context.Context, mission *models.Mi
 		// Fall through to the dedup loop below — fallback entries get
 		// merged into out the same way AI-success entries would.
 	}
+
 	// Dedupe against existing SearchQueries (case-insensitive trim).
-	seen := make(map[string]bool, len(mission.SearchQueries)+len(genSearches))
+	// XOL-182: strip descriptor tokens from existing queries too before adding
+	// them — the heuristic path may have included "DSLR" in TargetQuery which
+	// propagated to initial SearchQueries.
+	seen := make(map[string]bool, len(mission.SearchQueries)+len(genSearches)+5)
 	out := make([]string, 0, 5)
-	for _, q := range mission.SearchQueries {
-		cleaned := strings.TrimSpace(q)
+
+	addQuery := func(q string) bool {
+		// XOL-182: strip descriptor tokens from all incoming queries.
+		cleaned := stripCategoryDescriptors(strings.TrimSpace(q))
 		if cleaned == "" {
-			continue
+			return false
 		}
 		key := strings.ToLower(cleaned)
 		if seen[key] {
-			continue
+			return false
 		}
 		seen[key] = true
 		out = append(out, cleaned)
+		return true
 	}
-	for _, sc := range genSearches {
-		cleaned := strings.TrimSpace(sc.Query)
-		if cleaned == "" {
-			continue
-		}
-		key := strings.ToLower(cleaned)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, cleaned)
+
+	// Tier 1: cleaned existing queries (descriptor-stripped).
+	for _, q := range mission.SearchQueries {
 		if len(out) >= 5 {
 			break
 		}
+		addQuery(q)
 	}
-	// W19-37 / XOL-134: floor enforcement. Brief locks 3-5 variants per
-	// mission. If dedup left us with <3 entries (common when generator
-	// returns 1 generic entry, or fallback returned a small set), synthesize
-	// trailing variants from common buying-context tokens. Deterministic,
-	// no LLM call, no aibudget cost. Skip synthesis when target is empty
-	// (defensive: shouldn't happen since we checked at function entry).
-	if len(out) < 3 && target != "" {
-		floorTokens := []string{"used", "for sale", "deals"}
-		for _, token := range floorTokens {
-			if len(out) >= 3 {
-				break
-			}
-			candidate := strings.TrimSpace(target + " " + token)
-			key := strings.ToLower(candidate)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, candidate)
+
+	// Tier 1: add the clean base if not already present.
+	if len(out) < 5 {
+		addQuery(tier1Base)
+	}
+
+	// Tier 2 (BG/OLX only): Bulgarian Cyrillic variant.
+	// XOL-182 AC#4: must appear in the final query set — add it early (slot 2)
+	// so it is not crowded out by Tier-1 fallback entries ("for sale", "used")
+	// which are less useful on BG/OLX sparse-inventory markets.
+	if isBG && len(out) < 5 {
+		if bg := bgCyrillicCameraTerms(tier1Base); bg != "" {
+			addQuery(bg)
 		}
 	}
+
+	// Tier 2: naming aliases (Canon 700D ↔ Rebel T5i etc).
+	for _, alias := range tier2Aliases(tier1Base) {
+		if len(out) >= 5 {
+			break
+		}
+		addQuery(alias)
+	}
+
+	// Tier 1: from AI/fallback generator (already descriptor-sanitized by
+	// generator.sanitizeSearches). Filter out Tier-3 descriptor-heavy queries.
+	for _, sc := range genSearches {
+		if len(out) >= 5 {
+			break
+		}
+		cleaned := stripCategoryDescriptors(strings.TrimSpace(sc.Query))
+		if cleaned == "" {
+			continue
+		}
+		key := strings.ToLower(cleaned)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, cleaned)
+	}
+
+	// Floor enforcement (XOL-134 / W19-37): 3-5 variants required per mission.
+	// XOL-182: replace the old "used"/"for sale"/"deals" synthesis tokens with
+	// Tier-1 abbreviation shortening (brand+model→brand+abbreviated model) so
+	// variants are substantively different, not marketplace-suffix noise.
+	if len(out) < 3 && tier1Base != "" {
+		// Abbreviated variant: if base is ≥2 words, try omitting "eos" middle word
+		// ("canon eos 700d" → "canon 700d") or just shortened brand+model.
+		fields := strings.Fields(tier1Base)
+		if len(fields) >= 3 {
+			// Try brand + last-token (e.g., "canon" + "700d" from "canon eos 700d").
+			abbreviated := fields[0] + " " + fields[len(fields)-1]
+			addQuery(abbreviated)
+		}
+		if len(out) < 3 && len(fields) >= 2 {
+			// Try last two tokens only ("eos 700d" from "canon eos 700d").
+			abbreviated := strings.Join(fields[len(fields)-2:], " ")
+			addQuery(abbreviated)
+		}
+		// Last resort: if still < 3 and BG market, ensure a Cyrillic term is present.
+		if len(out) < 3 && isBG {
+			if bg := bgCyrillicCameraTerms(tier1Base); bg != "" {
+				addQuery(bg)
+			}
+		}
+	}
+
 	if len(out) > 5 {
 		out = out[:5]
 	}
@@ -1208,6 +1348,13 @@ func (a *Assistant) applyUserMissionDefaults(user *models.User, mission *models.
 	}
 	if len(mission.MarketplaceScope) == 0 {
 		mission.MarketplaceScope = marketplace.ValidateScope(mission.CountryCode, mission.CrossBorderEnabled, nil)
+	}
+	// XOL-181 AC#4: when user's country is BG and no explicit currency marker
+	// was detected in the original prompt, default budget currency to BGN.
+	// This runs after CountryCode has been applied from user defaults so the
+	// country is reliably set at this point.
+	if mission.BudgetCurrency == "" && strings.EqualFold(mission.CountryCode, "BG") {
+		mission.BudgetCurrency = "BGN"
 	}
 }
 
@@ -1595,13 +1742,21 @@ func heuristicProfileFromPrompt(userID, prompt string, mpCfg config.MarktplaatsC
 	if len(name) > 40 {
 		name = name[:40]
 	}
+
+	// XOL-181: extract structured budget (range + currency).
+	bInfo := extractBudgetInfo(lower)
+	// Currency: use detected marker; if none, no default here (CountryCode not
+	// known in heuristic path — applyUserMissionDefaults fills CountryCode later,
+	// and the AI path handles country-based defaulting).
 	return &models.Mission{
 		UserID:             userID,
 		Name:               name,
 		TargetQuery:        cleanItem,
 		CategoryID:         categoryID,
-		BudgetMax:          extractBudget(lower),
-		BudgetStretch:      extractStretchBudget(lower),
+		BudgetMax:          bInfo.Max,
+		BudgetMin:          bInfo.Min,
+		BudgetStretch:      bInfo.Max, // stretch = max (range upper bound or single value)
+		BudgetCurrency:     bInfo.Currency,
 		PreferredCondition: []string{"good", "like_new"},
 		RequiredFeatures:   nil,
 		NiceToHave:         nil,
@@ -1833,76 +1988,134 @@ func extractItemName(rawPrompt string) string {
 	return cleaned
 }
 
-// extractBudget pulls a budget integer out of natural-language buying input.
-// W19-34 / XOL-131: rewritten 2026-04-30 to handle natural phrasings like
-// "budget around 1200 euros" — the prior implementation used Sscanf("%d")
-// which required the integer at position 0 of `after`. Founder live-verify
-// caught the brief parser asking "What's your budget?" for an input that
-// explicitly stated 1200 EUR.
+// budgetIntRegex matches a 2-5 digit positive integer with word boundaries.
+// Pre-compiled at package init so the hot path doesn't repay compilation cost
+// on every call.
+var budgetIntRegex = regexp.MustCompile(`\b\d{2,5}\b`)
+
+// budgetRangeRegex matches explicit range syntax: "400-600", "400–600", "between 400 and 600",
+// "от 400 до 600" (BG: "from 400 to 600"). Captures (lo, hi) as strings.
+// XOL-181.
+var budgetRangeRegex = regexp.MustCompile(`(?i)(?:between\s+|от\s+)?(\d{2,5})\s*[-–]\s*(\d{2,5})|(?:between\s+)(\d{2,5})\s+and\s+(\d{2,5})|(?:от\s+)(\d{2,5})\s+до\s+(\d{2,5})`)
+
+// budgetCurrencyRegex detects explicit currency markers in order of specificity.
+// Returns "BGN" for лв / bgn, "EUR" for eur / €, otherwise empty.
+// XOL-181.
+// Note: \b is ASCII-only in Go RE2 and does not anchor Cyrillic word characters.
+// лв (Bulgarian lev abbreviation, optionally with period) is matched with
+// a lookahead for non-letter / end-of-string instead of \b.
+// The duplicate "bgn" alternatives are collapsed; the first group covers both.
+var budgetCurrencyRegex = regexp.MustCompile(`(?i)лв\.?|€|\b(?:bgn|eur|euro|euros)\b`)
+
+// budgetInfo carries the result of extractBudgetInfo.
+type budgetInfo struct {
+	Min      int    // 0 = not specified (single-value input)
+	Max      int    // upper bound; 0 = not found
+	Currency string // "BGN", "EUR", or "" (caller should default from CountryCode)
+}
+
+// detectBudgetCurrency scans text for an explicit currency marker and returns
+// the canonical 3-letter code. Empty string means no explicit marker found.
+func detectBudgetCurrency(text string) string {
+	m := budgetCurrencyRegex.FindString(text)
+	if m == "" {
+		return ""
+	}
+	m = strings.ToLower(strings.TrimRight(m, "."))
+	switch m {
+	case "bgn", "лв":
+		return "BGN"
+	case "eur", "euro", "euros", "€":
+		return "EUR"
+	}
+	return ""
+}
+
+// extractBudgetInfo is the XOL-181 replacement for the old extractBudget
+// helper. It returns structured budget info including:
+//   - explicit range (Min+Max) when the input uses "400-600" / "between X and Y" / "от X до Y"
+//   - single upper-bound (Max only, Min=0) for inputs like "budget around 500 BGN"
+//   - detected currency ("BGN", "EUR", or "" = no marker / caller defaults from CountryCode)
 //
-// Strategy: find any of the budget markers (EN + BG/Cyrillic) and scan the
-// 30-character window AFTER the marker for the first 2-5 digit integer.
-// Also scans the 30-character window BEFORE the marker so phrasings like
-// "1200 euro budget" / "1500 лв бюджет" work. Returns 0 if no marker is
-// present in the text or if no plausible budget integer is found within
-// any marker's window.
-func extractBudget(text string) int {
+// The old extractBudget signature is preserved as a thin wrapper for call sites
+// that haven't been migrated yet (heuristic path BudgetStretch).
+func extractBudgetInfo(text string) budgetInfo {
+	result := budgetInfo{}
+
+	// 1. Detect explicit currency marker first (before any number parsing).
+	result.Currency = detectBudgetCurrency(text)
+
+	// 2. Check for range syntax. budgetRangeRegex has three alternation groups:
+	//    Group 1+2: "400-600" / "400–600" / "от 400-600"
+	//    Group 3+4: "between 400 and 600"
+	//    Group 5+6: "от 400 до 600"
+	if m := budgetRangeRegex.FindStringSubmatch(text); m != nil {
+		var lo, hi string
+		switch {
+		case m[1] != "" && m[2] != "":
+			lo, hi = m[1], m[2]
+		case m[3] != "" && m[4] != "":
+			lo, hi = m[3], m[4]
+		case m[5] != "" && m[6] != "":
+			lo, hi = m[5], m[6]
+		}
+		if lo != "" && hi != "" {
+			loV, _ := strconv.Atoi(lo)
+			hiV, _ := strconv.Atoi(hi)
+			if loV > 0 && hiV > 0 {
+				if loV > hiV {
+					loV, hiV = hiV, loV // swap if reversed
+				}
+				result.Min = loV
+				result.Max = hiV
+				return result
+			}
+		}
+	}
+
+	// 3. Single-value: scan marker windows (same strategy as the old extractBudget).
 	// EN, NL, and BG Cyrillic budget markers (XOL-39 M3-E).
-	// "под" = under, "до" = up to, "максимум" = maximum, "бюджет" = budget.
 	markers := []string{
 		"under ", "max ", "budget ",
 		"под ", "до ", "максимум ", "бюджет ",
 	}
-	// Match 2-5 digit integers (€10 minimum to €99,999 maximum — typical
-	// used-electronics budget range). Anchored on word boundaries so we
-	// don't pick up partial digits from larger numbers.
 	intRe := budgetIntRegex
 	for _, marker := range markers {
-		// Search for the marker without its trailing space so phrasings like
-		// "1200 euro budget" (marker at end of string, no trailing space) are
-		// also detected by the before-window path.
 		searchMarker := strings.TrimRight(marker, " ")
 		idx := strings.Index(text, searchMarker)
 		if idx < 0 {
 			continue
 		}
 		afterStart := idx + len(searchMarker)
-		// Skip any whitespace between the marker and the next token.
 		for afterStart < len(text) && text[afterStart] == ' ' {
 			afterStart++
 		}
-		afterEnd := afterStart + 30
-		if afterEnd > len(text) {
-			afterEnd = len(text)
-		}
+		afterEnd := min(afterStart+30, len(text))
 		if match := intRe.FindString(text[afterStart:afterEnd]); match != "" {
 			if v, err := strconv.Atoi(match); err == nil && v > 0 {
-				return v
+				result.Max = v
+				return result
 			}
 		}
-		// Also check the 30-character window BEFORE the marker for phrasings
-		// like "1200 euro budget" or "1500 лв бюджет".
-		beforeStart := idx - 30
-		if beforeStart < 0 {
-			beforeStart = 0
-		}
+		beforeStart := max(idx-30, 0)
 		if match := intRe.FindString(text[beforeStart:idx]); match != "" {
 			if v, err := strconv.Atoi(match); err == nil && v > 0 {
-				return v
+				result.Max = v
+				return result
 			}
 		}
 	}
-	return 0
+	return result
 }
 
-func extractStretchBudget(text string) int {
-	return extractBudget(text)
+// extractBudget is preserved as a backward-compatible wrapper for call sites
+// (tests, heuristic BudgetStretch) that only need a single integer. Returns the
+// Max value from extractBudgetInfo, i.e., the upper bound.
+// W19-34 / XOL-131: previously the primary budget extractor; now delegates to
+// extractBudgetInfo for consistency.
+func extractBudget(text string) int {
+	return extractBudgetInfo(text).Max
 }
-
-// budgetIntRegex matches a 2-5 digit positive integer with word boundaries.
-// Pre-compiled at package init so the hot path doesn't repay compilation cost
-// on every call.
-var budgetIntRegex = regexp.MustCompile(`\b\d{2,5}\b`)
 
 func containsAny(value string, needles ...string) bool {
 	for _, needle := range needles {
@@ -1932,13 +2145,17 @@ func (a *Assistant) aiEnabled() bool {
 }
 
 func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string) (*models.Mission, error) {
+	// XOL-181: budget_min and budget_currency added. budget_min=0 means single-value
+	// (no range). budget_currency="" means AI did not detect an explicit marker.
 	type profileResponse struct {
 		Name               string   `json:"name"`
 		TargetQuery        string   `json:"target_query"`
 		CategoryID         int      `json:"category_id"`
 		Category           string   `json:"category"`
 		BudgetMax          int      `json:"budget_max"`
+		BudgetMin          int      `json:"budget_min"`
 		BudgetStretch      int      `json:"budget_stretch"`
+		BudgetCurrency     string   `json:"budget_currency"`
 		PreferredCondition []string `json:"preferred_condition"`
 		RequiredFeatures   []string `json:"required_features"`
 		NiceToHave         []string `json:"nice_to_have"`
@@ -1961,14 +2178,16 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 					"category_id":         map[string]any{"type": "integer"},
 					"category":            map[string]any{"type": "string"},
 					"budget_max":          map[string]any{"type": "integer"},
+					"budget_min":          map[string]any{"type": "integer"},
 					"budget_stretch":      map[string]any{"type": "integer"},
+					"budget_currency":     map[string]any{"type": "string"},
 					"preferred_condition": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"required_features":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"nice_to_have":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"risk_tolerance":      map[string]any{"type": "string"},
 					"search_queries":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				},
-				"required":             []string{"name", "target_query", "category_id", "category", "budget_max", "budget_stretch", "preferred_condition", "required_features", "nice_to_have", "risk_tolerance", "search_queries"},
+				"required":             []string{"name", "target_query", "category_id", "category", "budget_max", "budget_min", "budget_stretch", "budget_currency", "preferred_condition", "required_features", "nice_to_have", "risk_tolerance", "search_queries"},
 				"additionalProperties": false,
 			},
 		},
@@ -1984,16 +2203,16 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 				"content": "You are an expert buying assistant helping users find great second-hand deals on European marketplaces (Marktplaats, Vinted, OLX). " +
 					"Extract the user's buying intent into a structured JSON profile. Rules:\n" +
 					"- name: short human-readable label (e.g. 'Sony A6700', 'Camera + 2 lenses', 'Vintage Levi jacket'). No slugs, no hyphens, no URL encoding.\n" +
-					"- search_queries: 1 to 3 SPECIFIC product queries. Each entry must identify the exact product — include brand + model (or distinctive identifier). Include at most one common abbreviation or alternate spelling. DO NOT emit broad category queries like 'mirrorless camera', 'laptop', or 'smartphone' — those return unrelated noise. DO NOT include price qualifiers like 'under 500' or 'max 300 eur' — budget belongs in budget_max. DO NOT include condition words ('new', 'used', 'like new') — condition belongs in preferred_condition.\n" +
-					"- target_query: the single most representative specific query (brand + model). Strip price and condition words.\n" +
-					"- budget values are whole euros (integers). budget_stretch = budget_max if not specified.\n" +
+					"- search_queries: 1 to 3 SPECIFIC product queries. Each entry must identify the exact product — include brand + model (or distinctive identifier). Include at most one common abbreviation or alternate spelling. DO NOT emit broad category queries like 'mirrorless camera', 'laptop', or 'smartphone' — those return unrelated noise. DO NOT include price qualifiers like 'under 500' or 'max 300 eur' — budget belongs in budget_max. DO NOT include condition words ('new', 'used', 'like new') — condition belongs in preferred_condition. DO NOT include camera type descriptors like 'dslr', 'mirrorless', 'kit lens' in search_queries — store them in required_features or nice_to_have instead.\n" +
+					"- target_query: the single most representative specific query (brand + model only, no descriptors). Strip price, condition, and type-descriptor words.\n" +
+					"- budget_max: whole number, upper bound. budget_min: whole number, lower bound (0 if not a range). budget_stretch: same as budget_max if not specified. budget_currency: 'BGN' if the user said BGN/лв, 'EUR' if they said EUR/€, or empty string if not specified.\n" +
 					"- preferred_condition: 'new', 'like_new', 'good', 'fair'. Default to ['like_new','good'] if unspecified.\n" +
 					"Return ONLY valid JSON — no explanation, no markdown fences.",
 			},
 			{
 				"role": "user",
 				"content": "Extract a buying brief from this request. Schema: " +
-					`{"name":"","target_query":"","category_id":0,"budget_max":0,"budget_stretch":0,"preferred_condition":[],"required_features":[],"nice_to_have":[],"risk_tolerance":"balanced","search_queries":[]}` +
+					`{"name":"","target_query":"","category_id":0,"budget_max":0,"budget_min":0,"budget_stretch":0,"budget_currency":"","preferred_condition":[],"required_features":[],"nice_to_have":[],"risk_tolerance":"balanced","search_queries":[]}` +
 					"\n\nRequest: " + prompt,
 			},
 		},
@@ -2083,13 +2302,32 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 	if parsed.Name == "" && parsed.TargetQuery != "" {
 		parsed.Name = parsed.TargetQuery
 	}
+	// XOL-181: normalise budget_currency from AI response (model may emit lowercase).
+	parsedCurrency := strings.ToUpper(strings.TrimSpace(parsed.BudgetCurrency))
+	// XOL-181: AI path also runs the heuristic currency detector as a safety net —
+	// the AI may miss "лв." or "BGN" in unusual phrasings. Heuristic wins when AI
+	// returned empty but heuristic found a marker.
+	if parsedCurrency == "" {
+		parsedCurrency = detectBudgetCurrency(strings.ToLower(prompt))
+	}
+	// Log when AI path produced empty currency so PM live-verify can detect the
+	// fallback regime (Class-6 silent-fallback-masks-AI-breakage guard).
+	if parsedCurrency == "" {
+		slog.Info("parseBriefWithAI: no explicit currency detected; country-based default will apply in applyUserMissionDefaults",
+			"op", "assistant.parseBriefWithAI",
+			"user_id", userID,
+			"ai_path_currency_empty", true,
+		)
+	}
 	return &models.Mission{
 		UserID:             userID,
 		Name:               parsed.Name,
 		TargetQuery:        parsed.TargetQuery,
 		CategoryID:         parsed.CategoryID,
 		BudgetMax:          parsed.BudgetMax,
+		BudgetMin:          parsed.BudgetMin,
 		BudgetStretch:      parsed.BudgetStretch,
+		BudgetCurrency:     parsedCurrency,
 		PreferredCondition: parsed.PreferredCondition,
 		RequiredFeatures:   parsed.RequiredFeatures,
 		NiceToHave:         parsed.NiceToHave,
