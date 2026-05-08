@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,7 +38,11 @@ func New(aiCfg config.AIConfig) *Generator {
 		aiCfg: aiCfg,
 		model: aiCfg.Model,
 		client: &http.Client{
-			Timeout: 20 * time.Second,
+			// XOL-142: raised from 20s to 30s. gpt-5 reasoning models are
+			// slower than gpt-4 family by design (hidden reasoning tokens);
+			// 20s was tight for variant-generation prompts and caused
+			// silent timeouts that the static fallback silently absorbed.
+			Timeout: 30 * time.Second,
 		},
 	}
 }
@@ -127,13 +133,13 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 		},
 	}
 
-	// gpt-5 reasoning models reject temperature != 1 and consume hidden reasoning
-	// tokens before visible output. Omit temperature, set max_completion_tokens.
-	// Mirrors the pattern in internal/reasoner/reasoner.go (XOL-66).
-	reqPayload := map[string]any{
-		"model":                 g.model,
-		"max_completion_tokens": 2048,
-		"messages": []map[string]any{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Canonical pattern first introduced in XOL-66.
+	reqPayload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:               g.model,
+		MaxCompletionTokens: 2048,
+		Messages: []map[string]any{
 			{
 				"role": "system",
 				"content": "You generate search presets for European second-hand marketplaces (OLX.bg, Marktplaats, Vinted). Return strict JSON only. " +
@@ -146,8 +152,8 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 				"content": buildPrompt(topic),
 			},
 		},
-		"response_format": searchConfigSchema,
-	}
+		ResponseFormat: searchConfigSchema,
+	})
 
 	body, err := json.Marshal(reqPayload)
 	if err != nil {
@@ -176,9 +182,18 @@ func (g *Generator) generateWithAI(ctx context.Context, topic string) ([]config.
 
 	start := time.Now()
 	resp, err := g.client.Do(req)
-	latencyMs := int(time.Since(start).Milliseconds())
+	elapsed := time.Since(start)
+	latencyMs := int(elapsed.Milliseconds())
+	// XOL-142: warn on slow calls — gpt-5 reasoning models are slower than
+	// gpt-4 family by design. 15s is below the 30s timeout but indicates
+	// latency worth monitoring.
+	if elapsed > 15*time.Second {
+		slog.Warn("generator slow ai call", "model", g.model, "latency_ms", latencyMs)
+	}
 	if err != nil {
 		if budget != nil {
+			// XOL-142: budget.Rollback fires on timeout path (DeadlineExceeded
+			// from http.Client.Timeout) to avoid charging the cap for failed calls.
 			budget.Rollback(ctx, aibudget.EstimatedCostPerCallUSD)
 		}
 		g.reportUsage("generator", 0, 0, latencyMs, false, err.Error())

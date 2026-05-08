@@ -24,6 +24,7 @@ import (
 	"github.com/TechXTT/xolto/internal/generator"
 	"github.com/TechXTT/xolto/internal/marketplace"
 	"github.com/TechXTT/xolto/internal/models"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 	"github.com/TechXTT/xolto/internal/scorer"
 	"github.com/TechXTT/xolto/internal/store"
 )
@@ -2193,11 +2194,14 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 		},
 	}
 
-	payload := map[string]any{
-		"model":           a.modelBrief,
-		"temperature":     0.2,
-		"response_format": briefSchema,
-		"messages": []map[string]string{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Temperature: 0.2 is preserved for gpt-4 family fall-through.
+	payload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:          a.modelBrief,
+		Temperature:    0.2,
+		ResponseFormat: briefSchema,
+		Messages: []map[string]any{
 			{
 				"role": "system",
 				"content": "You are an expert buying assistant helping users find great second-hand deals on European marketplaces (Marktplaats, Vinted, OLX). " +
@@ -2216,7 +2220,7 @@ func (a *Assistant) parseBriefWithAI(ctx context.Context, userID, prompt string)
 					"\n\nRequest: " + prompt,
 			},
 		},
-	}
+	})
 	// W19-23 global AI-spend cap. Pre-spend gate.
 	budget := aibudget.Global()
 	if budget != nil {
@@ -2354,10 +2358,13 @@ func missionCategoryFromParsed(parsedCategory, targetQuery, name string) string 
 }
 
 func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []models.ShortlistEntry) (string, error) {
-	payload := map[string]any{
-		"model":       a.modelChat,
-		"temperature": 0.5,
-		"messages": []map[string]string{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Temperature: 0.5 is preserved for gpt-4 family fall-through.
+	payload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:       a.modelChat,
+		Temperature: 0.5,
+		Messages: []map[string]any{
 			{
 				"role": "system",
 				"content": "You are a knowledgeable buying assistant helping a user decide between second-hand items they've shortlisted. " +
@@ -2366,7 +2373,7 @@ func (a *Assistant) compareWithAI(ctx context.Context, userID string, entries []
 			},
 			{"role": "user", "content": "Compare these shortlisted deals and tell me which one to go for:\n" + mustJSON(entries)},
 		},
-	}
+	})
 	missionID := int64(0)
 	if len(entries) > 0 {
 		candidate := entries[0].MissionID
@@ -2397,10 +2404,13 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 		entryForPrompt.Concerns = nil
 		entryForPrompt.Verdict = ""
 	}
-	payload := map[string]any{
-		"model":       a.modelDraft,
-		"temperature": 0.5,
-		"messages": []map[string]string{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Temperature: 0.5 is preserved for gpt-4 family fall-through.
+	payload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:       a.modelDraft,
+		Temperature: 0.5,
+		Messages: []map[string]any{
 			{
 				"role": "system",
 				"content": "You help buyers draft seller messages on European secondhand marketplaces (Marktplaats, Vinted, OLX BG). " +
@@ -2423,7 +2433,7 @@ func (a *Assistant) draftWithAI(ctx context.Context, userID string, entry models
 				}),
 			},
 		},
-	}
+	})
 	return a.chatText(ctx, userID, entry.MissionID, "draft", payload)
 }
 

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 )
 
 // LLMClassifier implements Classifier using an OpenAI-compatible chat
@@ -36,16 +38,19 @@ func NewLLMClassifier(apiURL, apiKey, model string) *LLMClassifier {
 // Classify sends the prompt to the LLM and parses a ClassifyResult from the
 // response. On parse failure it returns an error; the caller applies a fallback.
 func (c *LLMClassifier) Classify(ctx context.Context, prompt string) (ClassifyResult, error) {
-	reqPayload := map[string]any{
-		"model":                 c.Model,
-		"max_completion_tokens": 2048,
-		"messages": []map[string]any{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Canonical pattern per XOL-66/XOL-73.
+	reqPayload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:               c.Model,
+		MaxCompletionTokens: 2048,
+		Messages: []map[string]any{
 			{
 				"role":    "user",
 				"content": prompt,
 			},
 		},
-	}
+	})
 
 	body, err := json.Marshal(reqPayload)
 	if err != nil {

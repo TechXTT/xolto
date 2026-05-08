@@ -33,6 +33,7 @@ import (
 
 	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/linear"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 	"github.com/TechXTT/xolto/internal/plain"
 	"github.com/TechXTT/xolto/internal/store"
 )
@@ -111,22 +112,23 @@ func NewOpenAICompatClientWithHTTP(apiKey, baseURL string, httpClient *http.Clie
 }
 
 func (c *openAICompatClient) Complete(ctx context.Context, req LLMRequest) (string, error) {
-	// gpt-5 reasoning models (nano/mini/full) only support temperature=1 (default),
-	// so we omit the field entirely and rely on response_format + json_schema for
-	// determinism. Older chat-completions models use 1 by default too.
-	body := map[string]any{
-		"model": req.Model,
-		"messages": []map[string]any{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). Temperature: req.Temperature is preserved for gpt-4 fall-through.
+	opts := openaihelper.RequestOpts{
+		Model:               req.Model,
+		Temperature:         req.Temperature,
+		MaxCompletionTokens: req.MaxTokens,
+		MaxTokens:           req.MaxTokens,
+		Messages: []map[string]any{
 			{"role": "system", "content": req.System},
 			{"role": "user", "content": req.UserMessage},
 		},
 	}
-	if req.MaxTokens > 0 {
-		body["max_completion_tokens"] = req.MaxTokens
-	}
 	if req.JSONMode {
-		body["response_format"] = map[string]string{"type": "json_object"}
+		opts.ResponseFormat = map[string]any{"type": "json_object"}
 	}
+	body := openaihelper.BuildRequestPayload(opts)
 
 	data, err := json.Marshal(body)
 	if err != nil {

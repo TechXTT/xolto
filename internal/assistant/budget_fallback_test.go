@@ -7,6 +7,7 @@ import (
 
 	"github.com/TechXTT/xolto/internal/aibudget"
 	"github.com/TechXTT/xolto/internal/config"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 )
 
 // TestChatTextReturnsQuotaExhaustedOnCapFire confirms that when the
@@ -33,11 +34,13 @@ func TestChatTextReturnsQuotaExhaustedOnCapFire(t *testing.T) {
 		},
 	}, nil, nil, nil)
 
-	_, err := a.chatText(context.Background(), "user-1", 0, "test", map[string]any{
-		"model":       "gpt-5-mini",
-		"temperature": 0.5,
-		"messages":    []map[string]string{{"role": "user", "content": "hi"}},
-	})
+	// XOL-141: use openaihelper.BuildRequestPayload so the fixture exercises the
+	// canonical payload shape (gpt-5-mini → max_completion_tokens, no temperature).
+	_, err := a.chatText(context.Background(), "user-1", 0, "test", openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:       "gpt-5-mini",
+		Temperature: 0.5,
+		Messages:    []map[string]any{{"role": "user", "content": "hi"}},
+	}))
 	if err == nil {
 		t.Fatalf("expected error on cap-fire, got nil")
 	}
