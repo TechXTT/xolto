@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/TechXTT/xolto/internal/aibudget"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 )
 
 // mustHavePromptVersion is bumped when the system/user prompt changes.
@@ -243,17 +244,18 @@ func (e *MustHaveEvaluatorLLM) callLLM(
 		},
 	}
 
-	payload := map[string]any{
-		"model": e.cfg.Model,
-		// gpt-5 reasoning models consume hidden reasoning tokens before the
-		// visible output; 2048 covers reasoning + the verdicts JSON payload.
-		"max_completion_tokens": 2048,
-		"messages": []map[string]any{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). 2048 covers reasoning + the verdicts JSON payload.
+	payload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:               e.cfg.Model,
+		MaxCompletionTokens: 2048,
+		Messages: []map[string]any{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userMsg},
 		},
-		"response_format": responseFormat,
-	}
+		ResponseFormat: responseFormat,
+	})
 
 	body, err := json.Marshal(payload)
 	if err != nil {

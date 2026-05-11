@@ -18,6 +18,7 @@ import (
 	"github.com/TechXTT/xolto/internal/config"
 	"github.com/TechXTT/xolto/internal/format"
 	"github.com/TechXTT/xolto/internal/models"
+	openaihelper "github.com/TechXTT/xolto/internal/openai"
 )
 
 // UsageCallback is called after each LLM request with token counts and timing.
@@ -285,17 +286,15 @@ func (r *Reasoner) callLLM(
 		},
 	}
 
-	// gpt-5 reasoning models (nano/mini/full) reject temperature != 1 and consume
-	// hidden reasoning tokens before visible output. Build the payload as a plain
-	// map — omitting temperature entirely — and set max_completion_tokens to give
-	// the reasoning budget enough room. Mirrors the pattern in musthave.go (XOL-65).
-	payload := map[string]any{
-		"model": r.model,
-		// 16000 gives reasoning models (gpt-5/o-series) room for hidden thinking
-		// tokens before visible JSON output. Prior limit of 2048 caused null content
-		// (finish_reason=length) → parse failure on every call (SUP-15).
-		"max_completion_tokens": 16000,
-		"messages": []map[string]any{
+	// XOL-141: use openaihelper.BuildRequestPayload so that gpt-5 reasoning
+	// models receive max_completion_tokens instead of temperature (which they
+	// reject). 16000 gives reasoning models (gpt-5/o-series) room for hidden
+	// thinking tokens before visible JSON output. Prior limit of 2048 caused
+	// null content (finish_reason=length) → parse failure on every call (SUP-15).
+	payload := openaihelper.BuildRequestPayload(openaihelper.RequestOpts{
+		Model:               r.model,
+		MaxCompletionTokens: 16000,
+		Messages: []map[string]any{
 			{
 				"role": "system",
 				// Wedge context: primary market is BG/OLX.bg; user is a Bulgarian buyer.
@@ -318,8 +317,8 @@ func (r *Reasoner) callLLM(
 				"content": buildPrompt(listing, search, marketAvg, comparables, r.cfg.SearchAdvice),
 			},
 		},
-		"response_format": scorerSchema,
-	}
+		ResponseFormat: scorerSchema,
+	})
 
 	body, err := json.Marshal(payload)
 	if err != nil {
